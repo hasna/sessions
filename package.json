@@ -1,0 +1,59 @@
+{
+  "name": "@hasna/sessions",
+  "version": "0.12.0",
+  "description": "Session search and management for AI coding agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "sessions": "dist/cli/index.js",
+    "sessions-mcp": "dist/mcp/index.js",
+    "sessions-serve": "dist/server/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun run build:cli && bun run build:mcp && bun run build:server && bun run build:lib && tsc --emitDeclarationOnly --outDir dist",
+    "build:cli": "bun build src/cli/index.tsx --outdir dist/cli --target bun --packages external",
+    "build:mcp": "bun build src/mcp/index.ts --outdir dist/mcp --target bun --packages external",
+    "build:server": "bun build src/server/index.ts --outdir dist/server --target bun --packages external",
+    "build:lib": "bun build src/index.ts --outdir dist --target bun --packages external",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "dev:cli": "bun run src/cli/index.tsx",
+    "dev:ingest": "bun run src/cli/index.tsx ingest --verbose"
+  },
+  "keywords": [
+    "sessions",
+    "ai",
+    "coding",
+    "search",
+    "claude",
+    "codex",
+    "gemini",
+    "mcp"
+  ],
+  "author": "Hasna <andrei@hasna.com>",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "commander": "^13.0.0",
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/better-sqlite3": "^7.6.0",
+    "typescript": "^5.7.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "restricted"
+  }
+}
