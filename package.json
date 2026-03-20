@@ -1,6 +1,6 @@
 {
   "name": "@hasna/sessions",
-  "version": "0.11.4",
+  "version": "0.11.5",
   "description": "Session search and management for AI coding agents",
   "type": "module",
   "main": "dist/index.js",
