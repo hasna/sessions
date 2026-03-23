@@ -1,6 +1,6 @@
 {
   "name": "@hasna/sessions",
-  "version": "0.11.6",
+  "version": "0.11.7",
   "description": "Session search and management for AI coding agents",
   "type": "module",
   "main": "dist/index.js",
@@ -62,6 +62,6 @@
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org",
-    "access": "restricted"
+    "access": "public"
   }
 }
