@@ -14,7 +14,7 @@
 
 import { existsSync, readdirSync, renameSync, readFileSync, writeFileSync } from "fs";
 import { join, basename } from "path";
-import { Database } from "bun:sqlite";
+import { SqliteAdapter as Database } from "@hasna/cloud";
 import {
   encodePath,
   findMatchingProjectDirs,
