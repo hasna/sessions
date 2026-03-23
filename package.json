@@ -1,6 +1,6 @@
 {
   "name": "@hasna/sessions",
-  "version": "0.11.8",
+  "version": "0.11.9",
   "description": "Session search and management for AI coding agents",
   "type": "module",
   "main": "dist/index.js",
@@ -45,6 +45,7 @@
   "author": "Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",
   "dependencies": {
+    "@hasna/cloud": "^0.1.0",
     "@inkjs/ui": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "better-sqlite3": "^11.0.0",
