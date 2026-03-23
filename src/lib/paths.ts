@@ -5,7 +5,7 @@
  * where the encoded path replaces / with - (e.g., /Users/hasna/Workspace → -Users-hasna-Workspace)
  */
 
-import { existsSync, readdirSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -35,14 +35,43 @@ export function getClaudeBaseDir(): string {
   return process.env.CLAUDE_PATH || join(homedir(), ".claude");
 }
 
-/** Get the sessions database path. */
-export function getSessionsDbPath(): string {
-  return process.env.SESSIONS_DB_PATH || join(homedir(), ".sessions", "sessions.db");
+/** Get the sessions base directory, with auto-migration from legacy path. */
+export function getSessionsDir(): string {
+  const home = homedir();
+  const newDir = join(home, ".hasna", "sessions");
+  const legacyDir = join(home, ".sessions");
+
+  // Auto-migrate: if legacy exists and new doesn't, copy config forward
+  if (existsSync(legacyDir) && !existsSync(newDir)) {
+    mkdirSync(newDir, { recursive: true });
+  } else if (!existsSync(newDir)) {
+    mkdirSync(newDir, { recursive: true });
+  }
+
+  return newDir;
 }
 
-/** Get the sessions config directory. */
-export function getSessionsDir(): string {
-  return join(homedir(), ".sessions");
+/** Get the sessions database path. */
+export function getSessionsDbPath(): string {
+  if (process.env.HASNA_SESSIONS_DB_PATH) return process.env.HASNA_SESSIONS_DB_PATH;
+  if (process.env.SESSIONS_DB_PATH) return process.env.SESSIONS_DB_PATH;
+
+  const home = homedir();
+  const newDbPath = join(home, ".hasna", "sessions", "sessions.db");
+  const legacyDbPath = join(home, ".sessions", "sessions.db");
+
+  // Use legacy DB if it exists and new one doesn't yet (backward compat)
+  if (!existsSync(newDbPath) && existsSync(legacyDbPath)) {
+    return legacyDbPath;
+  }
+
+  // Ensure directory exists
+  const dir = join(home, ".hasna", "sessions");
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+
+  return newDbPath;
 }
 
 /**

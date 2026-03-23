@@ -28,7 +28,18 @@ function _getClaudeProjectsDir(): string {
 }
 
 function _getSessionsDbPath(): string {
-  return process.env.SESSIONS_DB_PATH || join(homedir(), ".sessions", "sessions.db");
+  if (process.env.HASNA_SESSIONS_DB_PATH) return process.env.HASNA_SESSIONS_DB_PATH;
+  if (process.env.SESSIONS_DB_PATH) return process.env.SESSIONS_DB_PATH;
+
+  const home = homedir();
+  const newDbPath = join(home, ".hasna", "sessions", "sessions.db");
+  const legacyDbPath = join(home, ".sessions", "sessions.db");
+
+  // Use legacy DB if it exists and new one doesn't yet (backward compat)
+  if (existsSync(newDbPath)) return newDbPath;
+  if (existsSync(legacyDbPath)) return legacyDbPath;
+
+  return newDbPath;
 }
 
 function _findMatchingProjectDirs(projectDirs: string[], fsPath: string): string[] {
