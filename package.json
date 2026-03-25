@@ -46,7 +46,7 @@
   "author": "Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",
   "dependencies": {
-    "@hasna/cloud": "0.1.5",
+    "@hasna/cloud": "^0.1.24",
     "@inkjs/ui": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "better-sqlite3": "^11.0.0",
