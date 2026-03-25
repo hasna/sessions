@@ -7,7 +7,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { SqliteAdapter as Database } from "@hasna/cloud";
+import { SqliteAdapter as Database, registerCloudTools } from "@hasna/cloud";
 import { existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -97,4 +97,5 @@ server.tool(
 );
 
 const transport = new StdioServerTransport();
+registerCloudTools(server, "sessions");
 await server.connect(transport);
