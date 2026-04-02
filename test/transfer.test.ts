@@ -97,6 +97,53 @@ describe("exportSessions", () => {
     expect(result.manifest.totalFiles).toBeGreaterThan(0);
     expect(existsSync(join(EXPORT_DIR, "dry-test"))).toBe(false);
   });
+
+  it("resolves originalPath from session metadata for hyphenated project names", () => {
+    const projectDir = join(PROJECTS_DIR, "-Users-alice-my-project");
+    rmSync(projectDir, { recursive: true, force: true });
+    mkdirSync(projectDir, { recursive: true });
+
+    writeFileSync(
+      join(projectDir, "sessions-index.json"),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            sessionId: "sess-hyphen",
+            fullPath: `${PROJECTS_DIR}/-Users-alice-my-project/sess-hyphen.jsonl`,
+            projectPath: "/Users/alice/my-project",
+          },
+        ],
+      }),
+      "utf-8"
+    );
+
+    writeFileSync(
+      join(projectDir, "sess-hyphen.jsonl"),
+      JSON.stringify({
+        type: "user",
+        cwd: "/Users/alice/my-project",
+        message: { role: "user", content: "hyphen-path" },
+      }),
+      "utf-8"
+    );
+
+    const origEnv = process.env.CLAUDE_PATH;
+    process.env.CLAUDE_PATH = TEST_DIR;
+
+    const result = exportSessions({
+      outputDir: EXPORT_DIR,
+      outputName: "hyphen-export",
+    });
+
+    process.env.CLAUDE_PATH = origEnv;
+
+    expect(result.errors).toHaveLength(0);
+    const hyphenProject = result.manifest.projects.find(
+      (project) => project.encodedDir === "-Users-alice-my-project"
+    );
+    expect(hyphenProject?.originalPath).toBe("/Users/alice/my-project");
+  });
 });
 
 describe("importSessions", () => {

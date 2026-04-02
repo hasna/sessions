@@ -34,12 +34,17 @@ import {
   findMatchingProjectDirs,
   resolveProjectPath,
 } from "../lib/paths.js";
+import { getPackageVersion } from "../lib/package.js";
 
 const program = new Command();
 
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(value, null, 2));
+}
+
 program
   .name("sessions")
-  .version("0.12.0")
+  .version(getPackageVersion())
   .description("Universal AI coding session search and management");
 
 // ─── relocate ──────────────────────────────────────────────────────────────
@@ -51,20 +56,35 @@ program
   )
   .option("-n, --dry-run", "Show what would change without modifying anything")
   .option("--no-db", "Skip updating the sessions SQLite database")
+  .option("--json", "Output result as JSON")
   .option("-v, --verbose", "Print detailed progress")
   .action((oldPath: string, newPath: string, opts: any) => {
     // Resolve ~ to home directory
     if (oldPath.startsWith("~")) oldPath = join(homedir(), oldPath.slice(1));
     if (newPath.startsWith("~")) newPath = join(homedir(), newPath.slice(1));
 
-    console.log(`Relocating sessions: ${oldPath} → ${newPath}`);
-    if (opts.dryRun) console.log("(dry run — no changes will be made)\n");
-
     const result = relocate(oldPath, newPath, {
       dryRun: opts.dryRun,
       updateDb: opts.db !== false,
-      verbose: opts.verbose,
+      verbose: opts.json ? false : opts.verbose,
     });
+
+    if (opts.json) {
+      printJson({
+        oldPath,
+        newPath,
+        dryRun: Boolean(opts.dryRun),
+        updateDb: opts.db !== false,
+        ...result,
+      });
+      if (result.errors.length > 0) {
+        process.exit(1);
+      }
+      return;
+    }
+
+    console.log(`Relocating sessions: ${oldPath} → ${newPath}`);
+    if (opts.dryRun) console.log("(dry run — no changes will be made)\n");
 
     // Summary
     console.log("\nRelocate Summary:");
@@ -105,22 +125,35 @@ transfer
   .option("-o, --output <dir>", "Output directory (default: current directory)")
   .option("--name <name>", "Custom export directory name")
   .option("-n, --dry-run", "Show what would be exported without writing")
+  .option("--json", "Output result as JSON")
   .option("-v, --verbose", "Print detailed progress")
   .action((opts: any) => {
     let projectPath = opts.project;
     if (projectPath?.startsWith("~"))
       projectPath = join(homedir(), projectPath.slice(1));
 
-    console.log("Exporting sessions...");
-    if (opts.dryRun) console.log("(dry run — no files will be written)\n");
-
     const result = exportSessions({
       projectPath,
       outputDir: opts.output,
       outputName: opts.name,
-      verbose: opts.verbose,
+      verbose: opts.json ? false : opts.verbose,
       dryRun: opts.dryRun,
     });
+
+    if (opts.json) {
+      printJson({
+        projectPath: projectPath ?? null,
+        dryRun: Boolean(opts.dryRun),
+        ...result,
+      });
+      if (result.errors.length > 0) {
+        process.exit(1);
+      }
+      return;
+    }
+
+    console.log("Exporting sessions...");
+    if (opts.dryRun) console.log("(dry run — no files will be written)\n");
 
     const m = result.manifest;
     console.log("\nExport Summary:");
@@ -171,6 +204,7 @@ transfer
   .option("--reingest", "Re-ingest imported sessions into the sessions DB")
   .option("--overwrite", "Overwrite existing session files")
   .option("-n, --dry-run", "Show what would be imported without writing")
+  .option("--json", "Output result as JSON")
   .option("-v, --verbose", "Print detailed progress")
   .action((importPath: string, opts: any) => {
     let remapPath: { from: string; to: string } | undefined;
@@ -189,17 +223,33 @@ transfer
     if (remapHome?.startsWith("~"))
       remapHome = join(homedir(), remapHome.slice(1));
 
-    console.log(`Importing sessions from: ${importPath}`);
-    if (opts.dryRun) console.log("(dry run — no files will be written)\n");
-
     const result = importSessions(importPath, {
       remapHome,
       remapPath,
       reingest: opts.reingest,
-      verbose: opts.verbose,
+      verbose: opts.json ? false : opts.verbose,
       dryRun: opts.dryRun,
       overwrite: opts.overwrite,
     });
+
+    if (opts.json) {
+      printJson({
+        importPath,
+        remapHome: remapHome ?? null,
+        remapPath: remapPath ?? null,
+        dryRun: Boolean(opts.dryRun),
+        reingest: Boolean(opts.reingest),
+        overwrite: Boolean(opts.overwrite),
+        ...result,
+      });
+      if (result.errors.length > 0) {
+        process.exit(1);
+      }
+      return;
+    }
+
+    console.log(`Importing sessions from: ${importPath}`);
+    if (opts.dryRun) console.log("(dry run — no files will be written)\n");
 
     console.log("\nImport Summary:");
     console.log(`  Projects imported: ${result.projectsImported}`);

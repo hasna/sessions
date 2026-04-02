@@ -8,15 +8,23 @@
  *         and optionally triggers re-ingestion into the sessions DB.
  */
 
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, statSync, copyFileSync } from "fs";
-import { join, basename, relative, dirname } from "path";
-import { homedir } from "os";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  statSync,
+  copyFileSync,
+} from "fs";
+import { join } from "path";
+import { homedir, hostname, userInfo } from "os";
 import {
   encodePath,
-  decodePath,
   findMatchingProjectDirs,
   getClaudeProjectsDir,
   getSessionsDbPath,
+  resolveProjectPath,
 } from "./paths.js";
 
 export interface TransferManifest {
@@ -100,8 +108,8 @@ export function exportSessions(options: ExportOptions = {}): ExportResult {
     manifest: {
       version: 1,
       createdAt: new Date().toISOString(),
-      sourceComputer: require("os").hostname(),
-      sourceUser: require("os").userInfo().username,
+      sourceComputer: hostname(),
+      sourceUser: userInfo().username,
       sourceClaudePath: getClaudeProjectsDir(),
       projects: [],
       totalFiles: 0,
@@ -149,7 +157,7 @@ export function exportSessions(options: ExportOptions = {}): ExportResult {
     }
 
     const project: TransferProject = {
-      originalPath: decodePath(dir),
+      originalPath: resolveProjectPath(projectsDir, dir),
       encodedDir: dir,
       sessionCount: 0,
       jsonlCount: 0,
@@ -265,7 +273,7 @@ export function importSessions(
     pathTo = remapHome;
   } else {
     // Auto-detect: if source user differs from current user, remap home dirs
-    const currentUser = require("os").userInfo().username;
+    const currentUser = userInfo().username;
     const currentHome = homedir();
     if (manifest.sourceUser !== currentUser) {
       pathFrom = `/Users/${manifest.sourceUser}`;

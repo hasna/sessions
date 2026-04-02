@@ -11,8 +11,34 @@ import { SqliteAdapter as Database, registerCloudTools } from "@hasna/cloud";
 import { existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
+import { getPackageInfo, getPackageVersion } from "../lib/package.js";
 
-const server = new McpServer({ name: "open-sessions", version: "0.11.8" });
+const packageInfo = getPackageInfo();
+
+function printHelp(): void {
+  console.log(`Usage: sessions-mcp [options]
+
+MCP server for ${packageInfo.name}
+
+Options:
+  -V, --version  output the version number
+  -h, --help     display help for command
+
+Runs a stdio MCP server with sessions agent and feedback tools.`);
+}
+
+const args = process.argv.slice(2);
+if (args.includes("--help") || args.includes("-h")) {
+  printHelp();
+  process.exit(0);
+}
+
+if (args.includes("--version") || args.includes("-V")) {
+  console.log(getPackageVersion());
+  process.exit(0);
+}
+
+const server = new McpServer({ name: "open-sessions", version: packageInfo.version });
 
 // ─── Agent Tools ────────────────────────────────────────────────────────────
 
@@ -87,7 +113,12 @@ server.tool(
   async (params: { message: string; email?: string; category?: string }) => {
     try {
       const db = getFeedbackDb();
-      db.run("INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)", [params.message, params.email || null, params.category || "general", "0.11.8"]);
+      db.run("INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)", [
+        params.message,
+        params.email || null,
+        params.category || "general",
+        packageInfo.version,
+      ]);
       db.close();
       return { content: [{ type: "text" as const, text: "Feedback saved. Thank you!" }] };
     } catch (e) {

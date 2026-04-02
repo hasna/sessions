@@ -281,7 +281,12 @@ function _exportSessions(options: any = {}) {
     const srcDir = join(projectsDir, dir);
     try { if (!statSync(srcDir).isDirectory()) continue; } catch { continue; }
 
-    const project: any = { originalPath: _decodePath(dir), encodedDir: dir, sessionCount: 0, jsonlCount: 0 };
+    const project: any = {
+      originalPath: _resolveProjectPath(projectsDir, dir),
+      encodedDir: dir,
+      sessionCount: 0,
+      jsonlCount: 0,
+    };
     const destDir = join(stagingDir, "projects", dir);
 
     try {
