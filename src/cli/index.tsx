@@ -594,6 +594,22 @@ program
   });
 
 program
+  .command("import-db <path>")
+  .description("Merge another machine's sessions database into this one (preserves machine tags) — RDS-free sync")
+  .option("--json", "Output as JSON")
+  .action(async (path: string, opts: { json?: boolean }) => {
+    const { mergeFromDb } = await import("../db/merge.js");
+    try {
+      const r = mergeFromDb(path);
+      if (opts.json) return void console.log(JSON.stringify(r, null, 2));
+      console.log(`Merged from ${path}: +${r.sessions} sessions, +${r.messages} messages, +${r.tool_calls} tool calls, +${r.embeddings} embeddings`);
+    } catch (e) {
+      console.error((e as Error).message);
+      process.exit(1);
+    }
+  });
+
+program
   .command("watch")
   .description("Continuously index new/changed sessions as they happen (Ctrl-C to stop)")
   .option("--debounce <ms>", "Debounce window after a change before ingesting", "2000")

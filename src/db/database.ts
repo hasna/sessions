@@ -196,6 +196,9 @@ let _db: SqliteAdapter | null = null;
 export function initSchema(db: SqliteAdapter): void {
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
+  // Wait (up to 5s) for locks instead of failing immediately — `sessions watch`
+  // ingests while queries/relocate run against the same DB.
+  db.exec("PRAGMA busy_timeout=5000");
   for (const stmt of SCHEMA) db.exec(stmt);
   runMigrations(db);
 }

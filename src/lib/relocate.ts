@@ -233,6 +233,7 @@ export function relocate(
       try {
         const db = new Database(dbPath);
         db.exec("PRAGMA journal_mode=WAL");
+        db.exec("PRAGMA busy_timeout=5000");
 
         // Update project_path in sessions table
         const sessionUpdate = db.prepare(
