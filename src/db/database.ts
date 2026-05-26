@@ -38,8 +38,18 @@ const SCHEMA: string[] = [
     ingested_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     source_modified_at TEXT,
+    machine TEXT,
     metadata TEXT DEFAULT '{}',
     UNIQUE(source, source_id)
+  )`,
+
+  `CREATE TABLE IF NOT EXISTS machines (
+    name TEXT PRIMARY KEY,
+    hostname TEXT,
+    platform TEXT,
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    session_count INTEGER NOT NULL DEFAULT 0
   )`,
 
   `CREATE TABLE IF NOT EXISTS messages (
@@ -114,6 +124,7 @@ const SCHEMA: string[] = [
   // Indexes
   `CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_project_path ON sessions(project_path)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_model ON sessions(model)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_parent_session_id ON sessions(parent_session_id)`,
@@ -185,6 +196,16 @@ export function initSchema(db: SqliteAdapter): void {
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
   for (const stmt of SCHEMA) db.exec(stmt);
+  runMigrations(db);
+}
+
+/** Idempotent column migrations for databases created before a column existed. */
+function runMigrations(db: SqliteAdapter): void {
+  const cols = db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "machine")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN machine TEXT");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine)");
+  }
 }
 
 /** Get the process-wide database singleton, creating + migrating it on first use. */

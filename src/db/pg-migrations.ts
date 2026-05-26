@@ -35,9 +35,24 @@ export const PG_MIGRATIONS: string[] = [
     ingested_at TEXT NOT NULL DEFAULT NOW()::text,
     updated_at TEXT NOT NULL DEFAULT NOW()::text,
     source_modified_at TEXT,
+    machine TEXT,
     metadata TEXT DEFAULT '{}',
     UNIQUE(source, source_id)
   )`,
+
+  // Add machine column to pre-existing sessions tables
+  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS machine TEXT`,
+
+  // machines registry
+  `CREATE TABLE IF NOT EXISTS machines (
+    name TEXT PRIMARY KEY,
+    hostname TEXT,
+    platform TEXT,
+    first_seen_at TEXT NOT NULL DEFAULT NOW()::text,
+    last_seen_at TEXT NOT NULL DEFAULT NOW()::text,
+    session_count INTEGER NOT NULL DEFAULT 0
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine)`,
 
   // Migration 2: messages table
   `CREATE TABLE IF NOT EXISTS messages (

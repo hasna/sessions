@@ -15,6 +15,7 @@ export interface SearchOptions {
   limit?: number;
   source?: string;
   project_path?: string;
+  machine?: string;
 }
 
 /**
@@ -37,6 +38,10 @@ function filterClause(opts: SearchOptions, params: unknown[]): string {
   if (opts.project_path) {
     where.push("s.project_path = ?");
     params.push(opts.project_path);
+  }
+  if (opts.machine) {
+    where.push("s.machine = ?");
+    params.push(opts.machine);
   }
   return where.length ? ` AND ${where.join(" AND ")}` : "";
 }

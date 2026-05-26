@@ -5,6 +5,7 @@ import { CodexParser } from "./codex.js";
 import { GeminiParser } from "./gemini.js";
 import { saveParsedSession } from "../../db/sessions.js";
 import { getFileState, setFileState, updateIngestionStats } from "../../db/ingestion.js";
+import { registerMachine, recomputeMachineCounts } from "../../db/machines.js";
 
 // Register the built-in parsers on import.
 registerParser(new ClaudeParser());
@@ -37,6 +38,7 @@ export function ingestSource(source: string, opts: IngestOptions = {}): IngestRe
   const parser = getParser(source);
   if (!parser) throw new Error(`No parser registered for source: ${source}`);
 
+  registerMachine();
   const result: IngestResult = { source, scanned: 0, ingested: 0, skipped: 0, sessions: 0, errors: 0 };
   const files = parser.listSessionFiles();
 
@@ -78,6 +80,7 @@ export function ingestSource(source: string, opts: IngestOptions = {}): IngestRe
   }
 
   updateIngestionStats(source);
+  recomputeMachineCounts();
   return result;
 }
 

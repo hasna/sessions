@@ -47,6 +47,7 @@ export interface Session {
   ingested_at: string;
   updated_at: string;
   source_modified_at: string | null;
+  machine: string | null;
   metadata: Record<string, unknown>;
 }
 
@@ -77,7 +78,17 @@ export interface SessionInsert {
   ended_at?: string | null;
   duration_seconds?: number | null;
   source_modified_at?: string | null;
+  machine?: string | null;
   metadata?: Record<string, unknown>;
+}
+
+export interface Machine {
+  name: string;
+  hostname: string | null;
+  platform: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  session_count: number;
 }
 
 // ── Message ────────────────────────────────────────────────────────────

@@ -529,6 +529,71 @@ program
   });
 
 program
+  .command("machines")
+  .description("List machines that have contributed sessions, with counts")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { listMachines } = await import("../db/machines.js");
+    const machines = listMachines();
+    if (opts.json) return void console.log(JSON.stringify(machines, null, 2));
+    if (machines.length === 0) {
+      console.log("No machines recorded yet. Run 'sessions ingest' or 'sessions sync'.");
+      return;
+    }
+    for (const m of machines) {
+      console.log(`${m.name.padEnd(10)} ${String(m.session_count).padStart(6)} sessions   ${(m.platform ?? "").padEnd(8)} last seen ${m.last_seen_at}`);
+    }
+  });
+
+program
+  .command("sync")
+  .description("Ingest local sessions, then sync to/from the cloud so every machine shares one index")
+  .option("--no-ingest", "Skip the local ingest before syncing")
+  .option("--no-pull", "Push only — don't pull other machines' sessions")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { ingest?: boolean; pull?: boolean; json?: boolean }) => {
+    const { ingestAll } = await import("../lib/ingest/index.js");
+    const { recomputeMachineCounts } = await import("../db/machines.js");
+
+    const runCloud = (args: string[]) =>
+      new Promise<{ code: number; output: string }>((resolve) => {
+        try {
+          const p = Bun.spawn(["cloud", ...args], { stdout: "pipe", stderr: "pipe" });
+          (async () => {
+            const out = await new Response(p.stdout).text();
+            const err = await new Response(p.stderr).text();
+            const code = await p.exited;
+            resolve({ code, output: (out + err).trim() });
+          })();
+        } catch (e) {
+          resolve({ code: 127, output: `failed to run cloud: ${(e as Error).message}` });
+        }
+      });
+
+    const result: Record<string, unknown> = {};
+    if (opts.ingest !== false) {
+      result.ingest = ingestAll();
+      if (!opts.json) for (const r of (result.ingest as { source: string; sessions: number }[])) console.log(`ingest ${r.source}: +${r.sessions} sessions`);
+    }
+    if (!opts.json) console.log("pushing to cloud…");
+    result.push = await runCloud(["sync", "push", "--service", "sessions"]);
+    if (opts.pull !== false) {
+      if (!opts.json) console.log("pulling from cloud…");
+      result.pull = await runCloud(["sync", "pull", "--service", "sessions"]);
+    }
+    recomputeMachineCounts();
+
+    if (opts.json) return void console.log(JSON.stringify(result, null, 2));
+    const push = result.push as { code: number };
+    console.log(`push: ${push.code === 0 ? "ok" : `FAILED (exit ${push.code})`}`);
+    if (result.pull) {
+      const pull = result.pull as { code: number };
+      console.log(`pull: ${pull.code === 0 ? "ok" : `FAILED (exit ${pull.code})`}`);
+    }
+    console.log("Done. Run 'sessions machines' to see contributors.");
+  });
+
+program
   .command("watch")
   .description("Continuously index new/changed sessions as they happen (Ctrl-C to stop)")
   .option("--debounce <ms>", "Debounce window after a change before ingesting", "2000")
@@ -561,15 +626,16 @@ program
 program
   .command("recent")
   .description("Show the most recently active sessions across all providers")
+  .option("-m, --machine <name>", "Filter by machine")
   .option("-l, --limit <n>", "Maximum results", "20")
   .option("--json", "Output as JSON")
-  .action(async (opts: { limit?: string; json?: boolean }) => {
-    const { getRecentSessions } = await import("../db/sessions.js");
-    const sessions = getRecentSessions(parseInt(opts.limit ?? "20", 10) || 20);
+  .action(async (opts: { machine?: string; limit?: string; json?: boolean }) => {
+    const { listSessions } = await import("../db/sessions.js");
+    const sessions = listSessions({ machine: opts.machine, limit: parseInt(opts.limit ?? "20", 10) || 20 });
     if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
     for (const s of sessions) {
       console.log(
-        `${(s.started_at ?? "").slice(0, 16).padEnd(16)}  ${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(20)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`
+        `${(s.started_at ?? "").slice(0, 16).padEnd(16)}  ${(s.machine ?? "?").padEnd(9)} ${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(18)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`
       );
     }
   });
@@ -579,18 +645,20 @@ program
   .description("List indexed sessions, optionally filtered")
   .option("-s, --source <source>", "Filter by provider")
   .option("-p, --project <path>", "Filter by project path")
+  .option("-m, --machine <name>", "Filter by machine")
   .option("-l, --limit <n>", "Maximum results", "50")
   .option("--json", "Output as JSON")
-  .action(async (opts: { source?: string; project?: string; limit?: string; json?: boolean }) => {
+  .action(async (opts: { source?: string; project?: string; machine?: string; limit?: string; json?: boolean }) => {
     const { listSessions } = await import("../db/sessions.js");
     const sessions = listSessions({
       source: opts.source,
       project_path: opts.project,
+      machine: opts.machine,
       limit: parseInt(opts.limit ?? "50", 10) || 50,
     });
     if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
     for (const s of sessions) {
-      console.log(`${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(20)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`);
+      console.log(`${(s.machine ?? "?").padEnd(9)} ${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(18)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`);
     }
   });
 
@@ -728,6 +796,7 @@ program
   .description("Full-text search across your indexed AI coding sessions")
   .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
   .option("-p, --project <path>", "Filter by project path")
+  .option("-m, --machine <name>", "Filter by machine (apple03, spark01, …)")
   .option("-l, --limit <n>", "Maximum results", "20")
   .option("--tools", "Search tool calls (name/input/output) instead of message content")
   .option("--semantic", "Semantic (embedding) search — requires 'sessions embed' first")
@@ -736,11 +805,11 @@ program
   .action(
     async (
       query: string,
-      opts: { source?: string; project?: string; limit?: string; tools?: boolean; semantic?: boolean; hybrid?: boolean; json?: boolean }
+      opts: { source?: string; project?: string; machine?: string; limit?: string; tools?: boolean; semantic?: boolean; hybrid?: boolean; json?: boolean }
     ) => {
       const { search, searchToolCalls } = await import("../lib/search.js");
       const limit = parseInt(opts.limit ?? "20", 10) || 20;
-      const o = { limit, source: opts.source, project_path: opts.project };
+      const o = { limit, source: opts.source, project_path: opts.project, machine: opts.machine };
 
       if (opts.tools) {
         const hits = searchToolCalls(query, o);

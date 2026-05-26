@@ -119,11 +119,12 @@ server.tool(
     query: z.string().describe("Search query"),
     source: z.string().optional().describe("Filter by provider: claude, codex, gemini"),
     project_path: z.string().optional().describe("Filter by project path"),
+    machine: z.string().optional().describe("Filter by machine (apple03, spark01, …)"),
     limit: z.number().optional().describe("Max results (default 20)"),
   },
-  async (a: { query: string; source?: string; project_path?: string; limit?: number }) => {
+  async (a: { query: string; source?: string; project_path?: string; machine?: string; limit?: number }) => {
     try {
-      return ok(search(a.query, { source: a.source, project_path: a.project_path, limit: a.limit }));
+      return ok(search(a.query, { source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
     } catch (e) {
       return fail(e);
     }
@@ -166,11 +167,26 @@ server.tool(
   {
     source: z.string().optional(),
     project_path: z.string().optional(),
+    machine: z.string().optional(),
     limit: z.number().optional(),
   },
-  async (a: { source?: string; project_path?: string; limit?: number }) => {
+  async (a: { source?: string; project_path?: string; machine?: string; limit?: number }) => {
     try {
-      return ok(listSessions({ source: a.source, project_path: a.project_path, limit: a.limit }));
+      return ok(listSessions({ source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "machines",
+  "List machines that have contributed sessions, with per-machine session counts.",
+  {},
+  async () => {
+    try {
+      const { listMachines } = await import("../db/machines.js");
+      return ok(listMachines());
     } catch (e) {
       return fail(e);
     }

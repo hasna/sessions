@@ -9,6 +9,7 @@ import {
   getProjectStats,
 } from "../db/sessions.js";
 import { getIngestionStats } from "../db/ingestion.js";
+import { listMachines } from "../db/machines.js";
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
@@ -27,6 +28,7 @@ const ENDPOINTS = [
   "/list",
   "/sessions/:id",
   "/stats",
+  "/machines",
 ];
 
 function intParam(url: URL, name: string, fallback: number): number {
@@ -66,6 +68,7 @@ export function createSessionsServer(options: { port?: number; hostname?: string
           const results = search(q, {
             source: url.searchParams.get("source") ?? undefined,
             project_path: url.searchParams.get("project") ?? undefined,
+            machine: url.searchParams.get("machine") ?? undefined,
             limit: intParam(url, "limit", 20),
           });
           return json({ ok: true, query: q, count: results.length, results });
@@ -91,9 +94,14 @@ export function createSessionsServer(options: { port?: number; hostname?: string
             sessions: listSessions({
               source: url.searchParams.get("source") ?? undefined,
               project_path: url.searchParams.get("project") ?? undefined,
+              machine: url.searchParams.get("machine") ?? undefined,
               limit: intParam(url, "limit", 50),
             }),
           });
+        }
+
+        if (url.pathname === "/machines") {
+          return json({ ok: true, machines: listMachines() });
         }
 
         if (url.pathname === "/stats") {

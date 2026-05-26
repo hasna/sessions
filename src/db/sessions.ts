@@ -1,4 +1,5 @@
 import { getDatabase } from "./database.js";
+import { getMachineName } from "../lib/machine.js";
 import {
   SessionNotFoundError,
   type Session,
@@ -57,6 +58,7 @@ function rowToSession(row: Record<string, unknown>): Session {
     ingested_at: row.ingested_at as string,
     updated_at: row.updated_at as string,
     source_modified_at: (row.source_modified_at as string) ?? null,
+    machine: (row.machine as string) ?? null,
     metadata: parseMeta(row.metadata),
   };
 }
@@ -108,6 +110,7 @@ export function upsertSession(input: SessionInsert): Session {
   const id = existing?.id ?? input.id ?? uuid();
   const ts = nowIso();
   const meta = JSON.stringify(input.metadata ?? {});
+  const machine = input.machine ?? getMachineName();
 
   db.prepare(
     `INSERT INTO sessions (
@@ -116,9 +119,9 @@ export function upsertSession(input: SessionInsert): Session {
       is_subagent, parent_session_id, total_input_tokens, total_output_tokens,
       total_cache_read_tokens, total_cache_write_tokens, total_thinking_tokens,
       message_count, tool_call_count, started_at, ended_at, duration_seconds,
-      ingested_at, updated_at, source_modified_at, metadata
+      ingested_at, updated_at, source_modified_at, machine, metadata
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
     ON CONFLICT(source, source_id) DO UPDATE SET
       source_path = excluded.source_path,
@@ -145,6 +148,7 @@ export function upsertSession(input: SessionInsert): Session {
       duration_seconds = excluded.duration_seconds,
       updated_at = excluded.updated_at,
       source_modified_at = excluded.source_modified_at,
+      machine = excluded.machine,
       metadata = excluded.metadata`
   ).run(
     id,
@@ -175,6 +179,7 @@ export function upsertSession(input: SessionInsert): Session {
     ts,
     ts,
     input.source_modified_at ?? null,
+    machine,
     meta
   );
 
@@ -215,6 +220,7 @@ export function getSessionByPrefix(idOrPrefix: string): Session | null {
 export interface ListSessionsOptions {
   source?: string;
   project_path?: string;
+  machine?: string;
   limit?: number;
   offset?: number;
 }
@@ -230,6 +236,10 @@ export function listSessions(opts: ListSessionsOptions = {}): Session[] {
   if (opts.project_path) {
     where.push("project_path = ?");
     params.push(opts.project_path);
+  }
+  if (opts.machine) {
+    where.push("machine = ?");
+    params.push(opts.machine);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const limit = opts.limit ?? 50;

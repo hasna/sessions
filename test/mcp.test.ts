@@ -61,6 +61,7 @@ describe("sessions MCP server", () => {
     expect(tools).toContain("semantic_search");
     expect(tools).toContain("embed");
     expect(tools).toContain("knowledge_graph");
+    expect(tools).toContain("machines");
     // Preserved from the original stub
     expect(tools).toContain("send_feedback");
     expect(tools).toContain("register_agent");
