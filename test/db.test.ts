@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { getDatabase, resetDatabase, closeDatabase } from "../src/db/database.js";
+import { SqliteAdapter } from "@hasna/cloud";
+import { getDatabase, resetDatabase, closeDatabase, initSchema } from "../src/db/database.js";
 import {
   upsertSession,
   getSession,
@@ -24,6 +25,32 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env.SESSIONS_DB_PATH;
+});
+
+describe("schema migration", () => {
+  it("adds the machine column to a pre-existing DB created before it existed", () => {
+    // Simulate an old sessions table without the `machine` column.
+    const db = new SqliteAdapter(":memory:");
+    // Realistic pre-`machine` schema: every column the current indexes/triggers
+    // reference, minus `machine` (the only column the migration must add).
+    db.exec(
+      `CREATE TABLE sessions (
+        id TEXT PRIMARY KEY, source TEXT NOT NULL, source_id TEXT NOT NULL,
+        title TEXT, project_path TEXT, project_name TEXT, model TEXT,
+        parent_session_id TEXT, started_at TEXT, ingested_at TEXT,
+        metadata TEXT DEFAULT '{}', UNIQUE(source, source_id)
+      )`
+    );
+    db.exec("INSERT INTO sessions (id, source, source_id, title) VALUES ('x','claude','old','t')");
+
+    // Before the fix this left the column missing; now initSchema must add it.
+    initSchema(db);
+
+    // Would throw "no such column: machine" if the migration didn't run.
+    const row = db.prepare("SELECT machine FROM sessions WHERE id = 'x'").get();
+    expect(row).toBeTruthy();
+    db.close();
+  });
 });
 
 describe("upsertSession", () => {

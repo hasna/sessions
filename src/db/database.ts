@@ -124,7 +124,8 @@ const SCHEMA: string[] = [
   // Indexes
   `CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_project_path ON sessions(project_path)`,
-  `CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine)`,
+  // NOTE: idx_sessions_machine is created in runMigrations(), after the machine
+  // column is guaranteed to exist (it must not run before the ALTER on old DBs).
   `CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_model ON sessions(model)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_parent_session_id ON sessions(parent_session_id)`,
@@ -199,13 +200,19 @@ export function initSchema(db: SqliteAdapter): void {
   runMigrations(db);
 }
 
-/** Idempotent column migrations for databases created before a column existed. */
+/**
+ * Idempotent column migrations for databases created before a column existed.
+ * We attempt the ALTER and ignore the "duplicate column" error — this avoids
+ * relying on `PRAGMA table_info` through the adapter (which can't run via a
+ * prepared statement) and works whether or not the column is already present.
+ */
 function runMigrations(db: SqliteAdapter): void {
-  const cols = db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
-  if (!cols.some((c) => c.name === "machine")) {
+  try {
     db.exec("ALTER TABLE sessions ADD COLUMN machine TEXT");
-    db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine)");
+  } catch {
+    // Column already exists — nothing to do.
   }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine)");
 }
 
 /** Get the process-wide database singleton, creating + migrating it on first use. */
