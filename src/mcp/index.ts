@@ -12,8 +12,22 @@ import { existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { getPackageInfo, getPackageVersion } from "../lib/package.js";
+import { search, searchToolCalls } from "../lib/search.js";
+import {
+  getRecentSessions,
+  listSessions,
+  getSessionByPrefix,
+  getMessages,
+  getToolCalls,
+  getProjectStats,
+} from "../db/sessions.js";
+import { ingestAll, ingestSource } from "../lib/ingest/index.js";
+import { getIngestionStats } from "../db/ingestion.js";
 
 const packageInfo = getPackageInfo();
+
+const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
+const fail = (e: unknown) => ({ content: [{ type: "text" as const, text: String((e as Error)?.message ?? e) }], isError: true });
 
 function printHelp(): void {
   console.log(`Usage: sessions-mcp [options]
@@ -90,6 +104,125 @@ server.tool(
     const agents = [..._agentReg.values()];
     if (agents.length === 0) return { content: [{ type: "text" as const, text: "No agents registered." }] };
     return { content: [{ type: "text" as const, text: JSON.stringify(agents, null, 2) }] };
+  }
+);
+
+// ─── Session query + ingest tools ────────────────────────────────────────────
+
+server.tool(
+  "search_sessions",
+  "Full-text search across indexed AI coding sessions (claude/codex/gemini). Returns matching sessions with snippets.",
+  {
+    query: z.string().describe("Search query"),
+    source: z.string().optional().describe("Filter by provider: claude, codex, gemini"),
+    project_path: z.string().optional().describe("Filter by project path"),
+    limit: z.number().optional().describe("Max results (default 20)"),
+  },
+  async (a: { query: string; source?: string; project_path?: string; limit?: number }) => {
+    try {
+      return ok(search(a.query, { source: a.source, project_path: a.project_path, limit: a.limit }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "search_tool_calls",
+  "Search tool calls (name/input/output) across sessions — e.g. find where a command was run.",
+  {
+    query: z.string(),
+    source: z.string().optional(),
+    limit: z.number().optional(),
+  },
+  async (a: { query: string; source?: string; limit?: number }) => {
+    try {
+      return ok(searchToolCalls(a.query, { source: a.source, limit: a.limit }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "recent_sessions",
+  "List the most recently active sessions across all providers — what's been happening lately.",
+  { limit: z.number().optional().describe("Max results (default 20)") },
+  async (a: { limit?: number }) => {
+    try {
+      return ok(getRecentSessions(a.limit ?? 20));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "list_sessions",
+  "List indexed sessions, optionally filtered by provider or project.",
+  {
+    source: z.string().optional(),
+    project_path: z.string().optional(),
+    limit: z.number().optional(),
+  },
+  async (a: { source?: string; project_path?: string; limit?: number }) => {
+    try {
+      return ok(listSessions({ source: a.source, project_path: a.project_path, limit: a.limit }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "get_session",
+  "Get a session's full details, messages, and tool calls by id or unique id prefix.",
+  {
+    id: z.string().describe("Session id or unique prefix"),
+    message_limit: z.number().optional().describe("Cap messages returned (default all)"),
+  },
+  async (a: { id: string; message_limit?: number }) => {
+    try {
+      const session = getSessionByPrefix(a.id);
+      if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
+      let messages = getMessages(session.id);
+      if (a.message_limit) messages = messages.slice(0, a.message_limit);
+      return ok({ session, messages, tool_calls: getToolCalls(session.id) });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "ingest",
+  "Index session files into the database (mtime-gated). Run before searching to pick up new sessions.",
+  {
+    source: z.string().optional().describe("Only this provider: claude, codex, gemini"),
+    force: z.boolean().optional().describe("Re-ingest unchanged files"),
+  },
+  async (a: { source?: string; force?: boolean }) => {
+    try {
+      const results = a.source
+        ? [ingestSource(a.source, { force: a.force })]
+        : ingestAll({ force: a.force });
+      return ok(results);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "session_stats",
+  "Ingestion and project statistics — per-source counts and top projects by session count.",
+  {},
+  async () => {
+    try {
+      return ok({ ingestion: getIngestionStats(), projects: getProjectStats().slice(0, 30) });
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 

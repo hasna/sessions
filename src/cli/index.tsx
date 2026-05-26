@@ -528,4 +528,190 @@ program
     }
   });
 
+program
+  .command("watch")
+  .description("Continuously index new/changed sessions as they happen (Ctrl-C to stop)")
+  .option("--debounce <ms>", "Debounce window after a change before ingesting", "2000")
+  .action(async (opts: { debounce?: string }) => {
+    const { ingestAll } = await import("../lib/ingest/index.js");
+    const { startWatch } = await import("../lib/watch.js");
+    console.log("Initial ingest…");
+    for (const r of ingestAll()) {
+      console.log(`  ${r.source}: ${r.sessions} sessions (${r.ingested} files, ${r.skipped} unchanged)`);
+    }
+    const watcher = startWatch({
+      debounceMs: parseInt(opts.debounce ?? "2000", 10) || 2000,
+      onIngest: (r) => {
+        if (r.ingested > 0 || r.errors > 0) {
+          console.log(`[${new Date().toLocaleTimeString()}] ${r.source}: +${r.sessions} sessions (${r.ingested} files${r.errors ? `, ${r.errors} errors` : ""})`);
+        }
+      },
+      onError: (e) => console.error("watch error:", e.message),
+    });
+    console.log(`Watching: ${watcher.sources.join(", ") || "(no provider dirs found)"}. Press Ctrl-C to stop.`);
+    const shutdown = () => {
+      watcher.stop();
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+    await new Promise<void>(() => {});
+  });
+
+program
+  .command("recent")
+  .description("Show the most recently active sessions across all providers")
+  .option("-l, --limit <n>", "Maximum results", "20")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { limit?: string; json?: boolean }) => {
+    const { getRecentSessions } = await import("../db/sessions.js");
+    const sessions = getRecentSessions(parseInt(opts.limit ?? "20", 10) || 20);
+    if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
+    for (const s of sessions) {
+      console.log(
+        `${(s.started_at ?? "").slice(0, 16).padEnd(16)}  ${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(20)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`
+      );
+    }
+  });
+
+program
+  .command("list")
+  .description("List indexed sessions, optionally filtered")
+  .option("-s, --source <source>", "Filter by provider")
+  .option("-p, --project <path>", "Filter by project path")
+  .option("-l, --limit <n>", "Maximum results", "50")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { source?: string; project?: string; limit?: string; json?: boolean }) => {
+    const { listSessions } = await import("../db/sessions.js");
+    const sessions = listSessions({
+      source: opts.source,
+      project_path: opts.project,
+      limit: parseInt(opts.limit ?? "50", 10) || 50,
+    });
+    if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
+    for (const s of sessions) {
+      console.log(`${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(20)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`);
+    }
+  });
+
+program
+  .command("show <id>")
+  .description("Show a session's details and message previews (id or unique prefix)")
+  .option("-m, --messages <n>", "How many messages to preview", "12")
+  .option("--json", "Output as JSON")
+  .action(async (id: string, opts: { messages?: string; json?: boolean }) => {
+    const { getSessionByPrefix, getMessages, getToolCalls } = await import("../db/sessions.js");
+    const s = getSessionByPrefix(id);
+    if (!s) {
+      console.error(`Session not found (or ambiguous prefix): ${id}`);
+      process.exit(1);
+    }
+    const messages = getMessages(s.id);
+    const tools = getToolCalls(s.id);
+    if (opts.json) return void console.log(JSON.stringify({ session: s, messages, tools }, null, 2));
+    console.log(`${s.title ?? "(untitled)"}`);
+    console.log(`  source:   ${s.source}   model: ${s.model ?? "?"}`);
+    console.log(`  project:  ${s.project_name ?? "?"} (${s.project_path ?? "?"})`);
+    console.log(`  git:      ${s.git_branch ?? "?"}`);
+    console.log(`  when:     ${s.started_at ?? "?"} → ${s.ended_at ?? "?"}`);
+    console.log(`  counts:   ${s.message_count} messages, ${s.tool_call_count} tool calls, ${s.total_input_tokens + s.total_output_tokens} tokens`);
+    console.log(`  id:       ${s.id}`);
+    const n = parseInt(opts.messages ?? "12", 10) || 12;
+    console.log("");
+    for (const m of messages.slice(0, n)) {
+      console.log(`  [${m.role}] ${(m.content ?? "").replace(/\s+/g, " ").slice(0, 200)}`);
+    }
+    if (tools.length) console.log(`\n  tools used: ${[...new Set(tools.map((t) => t.tool_name))].join(", ")}`);
+  });
+
+program
+  .command("stats")
+  .description("Show ingestion and project statistics")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { getIngestionStats } = await import("../db/ingestion.js");
+    const { getProjectStats } = await import("../db/sessions.js");
+    const ingestion = getIngestionStats();
+    const projects = getProjectStats();
+    if (opts.json) return void console.log(JSON.stringify({ ingestion, projects }, null, 2));
+    console.log("By source:");
+    for (const s of ingestion) {
+      console.log(`  ${s.source.padEnd(8)} ${s.session_count} sessions, ${s.message_count} messages, ${s.tool_call_count} tool calls`);
+    }
+    console.log("\nTop projects:");
+    for (const p of projects.slice(0, 15)) {
+      console.log(`  ${String(p.session_count).padStart(4)}  ${p.project_name ?? p.project_path}`);
+    }
+  });
+
+program
+  .command("search <query>")
+  .description("Full-text search across your indexed AI coding sessions")
+  .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
+  .option("-p, --project <path>", "Filter by project path")
+  .option("-l, --limit <n>", "Maximum results", "20")
+  .option("--tools", "Search tool calls (name/input/output) instead of message content")
+  .option("--json", "Output as JSON")
+  .action(
+    async (
+      query: string,
+      opts: { source?: string; project?: string; limit?: string; tools?: boolean; json?: boolean }
+    ) => {
+      const { search, searchToolCalls } = await import("../lib/search.js");
+      const limit = parseInt(opts.limit ?? "20", 10) || 20;
+      const o = { limit, source: opts.source, project_path: opts.project };
+
+      if (opts.tools) {
+        const hits = searchToolCalls(query, o);
+        if (opts.json) return void console.log(JSON.stringify(hits, null, 2));
+        if (hits.length === 0) return void console.log("No matching tool calls.");
+        for (const h of hits) {
+          console.log(`${h.source}  ${h.tool_name}${h.project_name ? `  [${h.project_name}]` : ""}`);
+          console.log(`  ${h.snippet}`);
+        }
+        return;
+      }
+
+      const hits = search(query, o);
+      if (opts.json) return void console.log(JSON.stringify(hits, null, 2));
+      if (hits.length === 0) return void console.log("No matching sessions.");
+      for (const h of hits) {
+        console.log(
+          `${h.source}  ${h.title ?? "(untitled)"}${h.project_name ? `  [${h.project_name}]` : ""}`
+        );
+        console.log(`  ${h.snippet}`);
+        console.log(`  ${h.session_id}  ${h.started_at ?? ""}`);
+      }
+    }
+  );
+
+program
+  .command("ingest")
+  .description("Index AI coding sessions (claude, codex, gemini) into the searchable database")
+  .option("-s, --source <source>", "Only ingest one provider: claude, codex, or gemini")
+  .option("-f, --force", "Re-ingest even files that are unchanged since last run")
+  .option("-v, --verbose", "Print each file as it is ingested")
+  .option("--json", "Output the result as JSON")
+  .action(async (opts: { source?: string; force?: boolean; verbose?: boolean; json?: boolean }) => {
+    const { ingestAll, ingestSource } = await import("../lib/ingest/index.js");
+    const onProgress = opts.verbose ? (m: string) => console.log(m) : undefined;
+    try {
+      const results = opts.source
+        ? [ingestSource(opts.source, { force: opts.force, onProgress })]
+        : ingestAll({ force: opts.force, onProgress });
+      if (opts.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      for (const r of results) {
+        console.log(
+          `${r.source}: scanned ${r.scanned}, ingested ${r.ingested}, skipped ${r.skipped}, sessions ${r.sessions}, errors ${r.errors}`
+        );
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
 program.parse();

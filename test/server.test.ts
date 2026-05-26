@@ -1,6 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createSessionsServer } from "../src/server/app";
 import { getPackageInfo } from "../src/lib/package";
+import { getDatabase, resetDatabase, closeDatabase } from "../src/db/database";
+import { saveParsedSession } from "../src/db/sessions";
 
 describe("createSessionsServer", () => {
   it("serves health and info endpoints", async () => {
@@ -28,6 +33,62 @@ describe("createSessionsServer", () => {
 
       const notFoundResponse = await fetch(`${baseUrl}/missing`);
       expect(notFoundResponse.status).toBe(404);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("query endpoints", () => {
+  let dir: string;
+  let sessionId: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "sessions-server-"));
+    process.env.SESSIONS_DB_PATH = join(dir, "sessions.db");
+    resetDatabase();
+    getDatabase();
+    const s = saveParsedSession({
+      session: { source: "claude", source_id: "srv-1", title: "Deploy infra", project_path: "/p/infra", project_name: "infra" },
+      messages: [{ session_id: "", role: "user", content: "deploy the kubernetes cluster", sequence_num: 0 }],
+      toolCalls: [{ session_id: "", tool_name: "Bash", tool_input: "kubectl apply" }],
+    });
+    sessionId = s.id;
+  });
+
+  afterEach(() => {
+    closeDatabase();
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.SESSIONS_DB_PATH;
+  });
+
+  it("serves /search, /recent, /sessions/:id, /stats", async () => {
+    const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+
+      const search = await (await fetch(`${base}/search?q=kubernetes`)).json();
+      expect(search.ok).toBe(true);
+      expect(search.count).toBe(1);
+      expect(search.results[0].session_id).toBe(sessionId);
+
+      const recent = await (await fetch(`${base}/recent`)).json();
+      expect(recent.sessions).toHaveLength(1);
+
+      const session = await (await fetch(`${base}/sessions/${sessionId}`)).json();
+      expect(session.ok).toBe(true);
+      expect(session.session.source_id).toBe("srv-1");
+      expect(session.messages).toHaveLength(1);
+      expect(session.tool_calls).toHaveLength(1);
+
+      const missing = await fetch(`${base}/sessions/nope`);
+      expect(missing.status).toBe(404);
+
+      const search400 = await fetch(`${base}/search`);
+      expect(search400.status).toBe(400);
+
+      const stats = await (await fetch(`${base}/stats`)).json();
+      expect(stats.ok).toBe(true);
     } finally {
       server.stop(true);
     }

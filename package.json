@@ -1,7 +1,7 @@
 {
   "name": "@hasna/sessions",
-  "version": "0.11.13",
-  "description": "Session search and management for AI coding agents",
+  "version": "0.11.14",
+  "description": "Search and sync AI coding sessions (Claude, Codex, Gemini) — unified SQLite index with full-text search",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
