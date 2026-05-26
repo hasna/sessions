@@ -645,17 +645,98 @@ program
   });
 
 program
+  .command("graph")
+  .description("Explore the session knowledge graph — entities (projects/tools/models/repos) and links")
+  .option("-t, --type <type>", "List one entity type: project, tool, model, provider, repo")
+  .option("-r, --related <type:name>", "Sessions related to an entity, e.g. tool:Bash or project:infra")
+  .option("--session <id>", "Show a single session's entity neighborhood")
+  .option("-l, --limit <n>", "Max results", "50")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { type?: string; related?: string; session?: string; limit?: string; json?: boolean }) => {
+    const { listEntities, relatedSessions, sessionGraph } = await import("../lib/graph.js");
+    type EntityType = "project" | "tool" | "model" | "provider" | "repo";
+    const TYPES = ["project", "tool", "model", "provider", "repo"];
+    const limit = parseInt(opts.limit ?? "50", 10) || 50;
+
+    if (opts.session) {
+      const { getSessionByPrefix } = await import("../db/sessions.js");
+      const s = getSessionByPrefix(opts.session);
+      if (!s) {
+        console.error(`Session not found: ${opts.session}`);
+        process.exit(1);
+      }
+      const g = sessionGraph(s.id);
+      if (opts.json) return void console.log(JSON.stringify(g, null, 2));
+      console.log(`project: ${g?.project ?? "?"}`);
+      console.log(`model:   ${g?.model ?? "?"} (${g?.provider ?? "?"})`);
+      console.log(`repo:    ${g?.repo ?? "?"}`);
+      console.log(`tools:   ${g?.tools.join(", ") || "none"}`);
+      return;
+    }
+
+    if (opts.related) {
+      const idx = opts.related.indexOf(":");
+      const type = idx >= 0 ? opts.related.slice(0, idx) : "";
+      const name = idx >= 0 ? opts.related.slice(idx + 1) : "";
+      if (!TYPES.includes(type) || !name) {
+        console.error("--related must be <type>:<name>, e.g. tool:Bash (type: project|tool|model|provider|repo)");
+        process.exit(1);
+      }
+      const sessions = relatedSessions(type as EntityType, name, limit);
+      if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
+      for (const s of sessions) {
+        console.log(`${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(20)} ${s.title ?? "(untitled)"}  ${s.session_id.slice(0, 8)}`);
+      }
+      return;
+    }
+
+    if (opts.type && !TYPES.includes(opts.type)) {
+      console.error(`Unknown type '${opts.type}'. Use: ${TYPES.join(", ")}`);
+      process.exit(1);
+    }
+    const entities = listEntities(opts.type as EntityType | undefined);
+    if (opts.json) return void console.log(JSON.stringify(entities, null, 2));
+    let lastType = "";
+    for (const e of entities.slice(0, opts.type ? entities.length : 100)) {
+      if (e.type !== lastType) {
+        console.log(`\n${e.type}:`);
+        lastType = e.type;
+      }
+      console.log(`  ${String(e.session_count).padStart(4)}  ${e.name}`);
+    }
+  });
+
+program
+  .command("embed")
+  .description("Generate embeddings for indexed messages (enables semantic search; needs OPENAI_API_KEY)")
+  .option("-l, --limit <n>", "Max messages to embed this run", "200")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { limit?: string; json?: boolean }) => {
+    const { embedSessions } = await import("../lib/embeddings.js");
+    try {
+      const result = await embedSessions({ limit: parseInt(opts.limit ?? "200", 10) || 200 });
+      if (opts.json) return void console.log(JSON.stringify(result, null, 2));
+      console.log(`Embedded ${result.chunksEmbedded} chunks across ${result.messagesProcessed} messages.`);
+    } catch (err) {
+      console.error(`Embed failed (is OPENAI_API_KEY set?): ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+program
   .command("search <query>")
   .description("Full-text search across your indexed AI coding sessions")
   .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
   .option("-p, --project <path>", "Filter by project path")
   .option("-l, --limit <n>", "Maximum results", "20")
   .option("--tools", "Search tool calls (name/input/output) instead of message content")
+  .option("--semantic", "Semantic (embedding) search — requires 'sessions embed' first")
+  .option("--hybrid", "Blend full-text + semantic results (RRF)")
   .option("--json", "Output as JSON")
   .action(
     async (
       query: string,
-      opts: { source?: string; project?: string; limit?: string; tools?: boolean; json?: boolean }
+      opts: { source?: string; project?: string; limit?: string; tools?: boolean; semantic?: boolean; hybrid?: boolean; json?: boolean }
     ) => {
       const { search, searchToolCalls } = await import("../lib/search.js");
       const limit = parseInt(opts.limit ?? "20", 10) || 20;
@@ -672,7 +753,18 @@ program
         return;
       }
 
-      const hits = search(query, o);
+      let hits;
+      if (opts.semantic || opts.hybrid) {
+        const { semanticSearch, hybridSearch } = await import("../lib/vector-search.js");
+        try {
+          hits = opts.hybrid ? await hybridSearch(query, o) : await semanticSearch(query, o);
+        } catch (err) {
+          console.error(`Semantic search failed (is OPENAI_API_KEY set and have you run 'sessions embed'?): ${(err as Error).message}`);
+          process.exit(1);
+        }
+      } else {
+        hits = search(query, o);
+      }
       if (opts.json) return void console.log(JSON.stringify(hits, null, 2));
       if (hits.length === 0) return void console.log("No matching sessions.");
       for (const h of hits) {

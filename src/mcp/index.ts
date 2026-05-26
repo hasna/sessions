@@ -23,6 +23,9 @@ import {
 } from "../db/sessions.js";
 import { ingestAll, ingestSource } from "../lib/ingest/index.js";
 import { getIngestionStats } from "../db/ingestion.js";
+import { embedSessions } from "../lib/embeddings.js";
+import { semanticSearch, hybridSearch } from "../lib/vector-search.js";
+import { listEntities, relatedSessions, sessionGraph } from "../lib/graph.js";
 
 const packageInfo = getPackageInfo();
 
@@ -220,6 +223,66 @@ server.tool(
   async () => {
     try {
       return ok({ ingestion: getIngestionStats(), projects: getProjectStats().slice(0, 30) });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "semantic_search",
+  "Semantic (embedding) search across sessions, or hybrid (full-text + semantic). Requires embeddings (run 'embed') and OPENAI_API_KEY.",
+  {
+    query: z.string(),
+    hybrid: z.boolean().optional().describe("Blend full-text + semantic (RRF)"),
+    source: z.string().optional(),
+    project_path: z.string().optional(),
+    limit: z.number().optional(),
+  },
+  async (a: { query: string; hybrid?: boolean; source?: string; project_path?: string; limit?: number }) => {
+    try {
+      const o = { source: a.source, project_path: a.project_path, limit: a.limit };
+      return ok(a.hybrid ? await hybridSearch(a.query, o) : await semanticSearch(a.query, o));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "embed",
+  "Generate embeddings for indexed messages (enables semantic_search). Needs OPENAI_API_KEY.",
+  { limit: z.number().optional().describe("Max messages to embed this run (default 200)") },
+  async (a: { limit?: number }) => {
+    try {
+      return ok(await embedSessions({ limit: a.limit }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "knowledge_graph",
+  "Explore the session knowledge graph: list entities (projects/tools/models/providers/repos), find sessions related to an entity, or a session's entity neighborhood.",
+  {
+    type: z.enum(["project", "tool", "model", "provider", "repo"]).optional().describe("List entities of this type"),
+    related_type: z.enum(["project", "tool", "model", "provider", "repo"]).optional(),
+    related_name: z.string().optional().describe("With related_type: sessions linked to this entity"),
+    session_id: z.string().optional().describe("A session's entity neighborhood"),
+    limit: z.number().optional(),
+  },
+  async (a: {
+    type?: "project" | "tool" | "model" | "provider" | "repo";
+    related_type?: "project" | "tool" | "model" | "provider" | "repo";
+    related_name?: string;
+    session_id?: string;
+    limit?: number;
+  }) => {
+    try {
+      if (a.session_id) return ok(sessionGraph(a.session_id));
+      if (a.related_type && a.related_name) return ok(relatedSessions(a.related_type, a.related_name, a.limit ?? 50));
+      return ok(listEntities(a.type));
     } catch (e) {
       return fail(e);
     }
