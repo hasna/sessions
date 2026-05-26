@@ -137,7 +137,11 @@ export class ClaudeParser implements SessionParser {
 
     if (messages.length === 0) return [];
 
-    const sourceId = sessionId ?? basename(filePath).replace(/\.jsonl$/, "");
+    // Use the filename uuid as the canonical session id. Claude is one-file-per
+    // -session, and the in-file `sessionId` field is unreliable as a key — many
+    // files (sidechains/resumes/summaries) reference a shared sessionId, which
+    // would collapse distinct sessions on upsert. The filename is unique.
+    const sourceId = basename(filePath).replace(/\.jsonl$/, "");
     const mtime = (() => {
       try {
         return statSync(filePath).mtime.toISOString();
@@ -164,6 +168,7 @@ export class ClaudeParser implements SessionParser {
       total_cache_read_tokens: cacheRead,
       total_cache_write_tokens: cacheWrite,
       source_modified_at: mtime,
+      metadata: sessionId && sessionId !== sourceId ? { claude_session_id: sessionId } : {},
     };
 
     return [{ session, messages, toolCalls }];

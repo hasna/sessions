@@ -153,6 +153,25 @@ describe("ClaudeParser", () => {
     const files = new ClaudeParser().listSessionFiles();
     expect(files.some((f) => f.endsWith("sess-claude-1.jsonl"))).toBe(true);
   });
+
+  it("uses the filename (not the in-file sessionId) as source_id, so files sharing a sessionId don't collapse", () => {
+    const dir = join(root, "claude", "projects", "-Users-h-Workspace-shared");
+    mkdirSync(dir, { recursive: true });
+    // Two distinct files that both reference the SAME in-file sessionId.
+    const line = (uuid: string) =>
+      JSON.stringify({ type: "user", message: { role: "user", content: "hi" }, uuid, timestamp: "2026-05-01T10:00:00Z", cwd: "/Users/h/Workspace/shared", sessionId: "SHARED-PARENT" });
+    writeFileSync(join(dir, "file-A.jsonl"), line("a"));
+    writeFileSync(join(dir, "file-B.jsonl"), line("b"));
+
+    const p = new ClaudeParser();
+    const a = p.parseFile(join(dir, "file-A.jsonl"))[0];
+    const b = p.parseFile(join(dir, "file-B.jsonl"))[0];
+    expect(a.session.source_id).toBe("file-A");
+    expect(b.session.source_id).toBe("file-B");
+    expect(a.session.source_id).not.toBe(b.session.source_id);
+    // the in-file sessionId is preserved in metadata
+    expect(a.session.metadata?.claude_session_id).toBe("SHARED-PARENT");
+  });
 });
 
 describe("CodexParser", () => {
