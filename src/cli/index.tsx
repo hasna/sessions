@@ -93,7 +93,8 @@ program
       console.log(`    ${from} → ${to}`);
     }
     console.log(`  Index files updated: ${result.indexFilesUpdated}`);
-    console.log(`  JSONL files updated: ${result.jsonlFilesUpdated}`);
+    console.log(`  Claude JSONL updated: ${result.jsonlFilesUpdated}`);
+    console.log(`  Codex JSONL updated: ${result.codexFilesUpdated}`);
     console.log(`  DB rows updated:     ${result.dbRowsUpdated}`);
 
     if (result.errors.length > 0) {

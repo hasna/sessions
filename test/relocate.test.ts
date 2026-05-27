@@ -52,11 +52,51 @@ function setup() {
 
 function cleanup() {
   rmSync(TEST_DIR, { recursive: true, force: true });
+  delete process.env.CODEX_PATH;
 }
 
 describe("relocate", () => {
-  beforeEach(setup);
+  beforeEach(() => {
+    setup();
+    // Isolate Codex to the test dir so we never touch the real ~/.codex/sessions.
+    // TEST_DIR/sessions doesn't exist by default → codex relocation is a no-op.
+    process.env.CODEX_PATH = TEST_DIR;
+  });
   afterEach(cleanup);
+
+  it("relocates Codex rollout cwd (top-level and nested payload)", () => {
+    const origClaude = process.env.CLAUDE_PATH;
+    process.env.CLAUDE_PATH = TEST_DIR;
+    process.env.CODEX_PATH = TEST_DIR;
+
+    // Fake Codex rollout under a date folder, with cwd both nested and top-level
+    const codexDay = join(TEST_DIR, "sessions", "2026", "05", "27");
+    mkdirSync(codexDay, { recursive: true });
+    const rollout = join(codexDay, "rollout-test.jsonl");
+    writeFileSync(
+      rollout,
+      [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/Users/test/old/project", id: "x" } }),
+        JSON.stringify({ type: "turn_context", payload: { cwd: "/Users/test/old/project" } }),
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "hi" } }),
+      ].join("\n"),
+      "utf-8"
+    );
+
+    const result = relocate("/Users/test/old", "/Users/test/new", {
+      dryRun: false,
+      updateDb: false,
+    });
+
+    process.env.CLAUDE_PATH = origClaude;
+
+    expect(result.codexFilesUpdated).toBe(1);
+    const lines = readFileSync(rollout, "utf-8").split("\n");
+    expect(JSON.parse(lines[0]).payload.cwd).toBe("/Users/test/new/project");
+    expect(JSON.parse(lines[1]).payload.cwd).toBe("/Users/test/new/project");
+    // unrelated line untouched
+    expect(JSON.parse(lines[2]).payload.message).toBe("hi");
+  });
 
   it("dry-run does not modify files", () => {
     // Override CLAUDE_PATH to use test dir
