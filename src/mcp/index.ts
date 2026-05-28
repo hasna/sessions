@@ -59,6 +59,8 @@ MCP server for ${packageInfo.name}
 Options:
   -V, --version  output the version number
   -h, --help     display help for command
+  --http         run Streamable HTTP transport on 127.0.0.1 (default port 8835)
+  --port <n>     HTTP port (--http or MCP_HTTP=1)
 
 Runs a stdio MCP server with session discovery, resume, search, stats, and feedback tools.`);
 }
@@ -74,11 +76,12 @@ if (args.includes("--version") || args.includes("-V")) {
   process.exit(0);
 }
 
-const server = new McpServer({ name: "open-sessions", version: packageInfo.version });
+const _agentReg = new Map<string, { id: string; name: string; last_seen_at: string; project_id?: string }>();
+
+export function buildServer(): McpServer {
+  const server = new McpServer({ name: "open-sessions", version: packageInfo.version });
 
 // ─── Agent Tools ────────────────────────────────────────────────────────────
-
-const _agentReg = new Map<string, { id: string; name: string; last_seen_at: string; project_id?: string }>();
 
 server.tool(
   "register_agent",
@@ -637,6 +640,29 @@ server.tool(
   }
 );
 
-const transport = new StdioServerTransport();
-registerCloudTools(server, "sessions");
-await server.connect(transport);
+  return server;
+}
+
+async function main(): Promise<void> {
+  const { isMcpHttpMode, parseMcpHttpPort } = await import("./http.js");
+
+  if (isMcpHttpMode(args)) {
+    const { createSessionsServer } = await import("../server/app.js");
+    const port = parseMcpHttpPort(args);
+    const hostname = "127.0.0.1";
+    const server = createSessionsServer({ port, hostname, enableMcp: true });
+    console.error(`sessions-mcp HTTP listening on http://${hostname}:${server.port}/mcp`);
+    return;
+  }
+
+  const server = buildServer();
+  registerCloudTools(server, "sessions");
+  await server.connect(new StdioServerTransport());
+}
+
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error("MCP server error:", error);
+    process.exit(1);
+  });
+}

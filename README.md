@@ -79,6 +79,24 @@ registry-backed tools (`sessions_list`, `sessions_history`, `sessions_search`,
 `sessions_resume`, `sessions_rename`, `sessions_watch`, `sessions_stats`),
 cross-adapter import tools, agent registry, feedback, and cloud-sync tools.
 
+## HTTP mode
+
+Long-lived Streamable HTTP transport (default port **8835**, bind `127.0.0.1` only):
+
+```bash
+sessions-mcp --http
+# or
+MCP_HTTP=1 sessions-mcp
+
+# override port
+sessions-mcp --http --port 8835
+MCP_HTTP_PORT=8835 sessions-mcp --http
+```
+
+Endpoints: `GET /health` → `{"status":"ok","name":"sessions"}`, MCP at `/mcp`.
+Uses stateless `StreamableHTTPServerTransport` (shared process, many clients).
+`sessions-mcp` without flags still uses stdio (unchanged).
+
 ## REST API
 
 ```bash

@@ -36,7 +36,11 @@ function intParam(url: URL, name: string, fallback: number): number {
   return Number.isFinite(v) ? v : fallback;
 }
 
-export function createSessionsServer(options: { port?: number; hostname?: string } = {}) {
+export function createSessionsServer(options: {
+  port?: number;
+  hostname?: string;
+  enableMcp?: boolean;
+} = {}) {
   const pkg = getPackageInfo();
   const hostname = options.hostname ?? process.env.HOST ?? "127.0.0.1";
   const port = Number.isFinite(options.port)
@@ -46,7 +50,13 @@ export function createSessionsServer(options: { port?: number; hostname?: string
   return Bun.serve({
     hostname,
     port: Number.isFinite(port) ? port : 3456,
-    fetch(request) {
+    async fetch(request) {
+      if (options.enableMcp) {
+        const { handleMcpHttpFetch } = await import("../mcp/http.js");
+        const mcpResponse = await handleMcpHttpFetch(request);
+        if (mcpResponse) return mcpResponse;
+      }
+
       const url = new URL(request.url);
 
       if (request.method !== "GET") {
