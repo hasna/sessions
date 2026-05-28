@@ -8,13 +8,17 @@ Session search and management for AI coding agents
 ## Install
 
 ```bash
-npm install -g @hasna/sessions
+bun install -g @hasna/sessions
 ```
 
 ## CLI Usage
 
 ```bash
 sessions --help
+sessions list --json
+sessions history --today
+sessions search "fix auth bug"
+sessions resume --last --print-command
 ```
 
 ## MCP Server
@@ -23,7 +27,9 @@ sessions --help
 sessions-mcp
 ```
 
-5 tools available.
+Available tools include `sessions_list`, `sessions_history`, `sessions_search`,
+`sessions_resume`, `sessions_rename`, `sessions_watch`, `sessions_stats`,
+agent registration helpers, and feedback/cloud sync tools.
 
 ## REST API
 
