@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * MCP server for sessions.
- * Provides session discovery, search, resume resolution, stats, and feedback tools.
+ * Provides indexed search/ingest tools, friendly-name registry tools, and cross-adapter import.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -12,25 +12,44 @@ import { existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { getPackageInfo, getPackageVersion } from "../lib/package.js";
+import { search, searchToolCalls } from "../lib/search.js";
+import {
+  getRecentSessions,
+  listSessions,
+  getSessionByPrefix,
+  getMessages,
+  getToolCalls,
+  getProjectStats,
+} from "../db/sessions.js";
+import { ingestAll, ingestSource } from "../lib/ingest/index.js";
+import { getIngestionStats } from "../db/ingestion.js";
+import { embedSessions } from "../lib/embeddings.js";
+import { semanticSearch, hybridSearch } from "../lib/vector-search.js";
+import { listEntities, relatedSessions, sessionGraph } from "../lib/graph.js";
 import {
   buildClaudeResumeCommand,
   findSession,
   historySessions,
   latestSession,
   latestSessionForProject,
-  listSessions,
+  listSessions as listRegistrySessions,
   renameSession,
   searchSessions,
 } from "../lib/sessions.js";
-import {
-  listAdapters,
-  getAdapter,
-  autoDetectAdapters,
-} from "../lib/adapters/index.js";
+import { listAdapters, getAdapter } from "../lib/adapters/index.js";
 import type { CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
 
 const packageInfo = getPackageInfo();
+
+const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
+const fail = (e: unknown) => ({ content: [{ type: "text" as const, text: String((e as Error)?.message ?? e) }], isError: true });
+
+function textJson(value: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+  };
+}
 
 function printHelp(): void {
   console.log(`Usage: sessions-mcp [options]
@@ -56,12 +75,6 @@ if (args.includes("--version") || args.includes("-V")) {
 }
 
 const server = new McpServer({ name: "open-sessions", version: packageInfo.version });
-
-function textJson(value: unknown) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
-  };
-}
 
 // ─── Agent Tools ────────────────────────────────────────────────────────────
 
@@ -116,12 +129,209 @@ server.tool(
   }
 );
 
+// ─── Indexed session query + ingest tools ────────────────────────────────────
+
+server.tool(
+  "search_sessions",
+  "Full-text search across indexed AI coding sessions (claude/codex/gemini). Returns matching sessions with snippets.",
+  {
+    query: z.string().describe("Search query"),
+    source: z.string().optional().describe("Filter by provider: claude, codex, gemini"),
+    project_path: z.string().optional().describe("Filter by project path"),
+    machine: z.string().optional().describe("Filter by machine (apple03, spark01, …)"),
+    limit: z.number().optional().describe("Max results (default 20)"),
+  },
+  async (a: { query: string; source?: string; project_path?: string; machine?: string; limit?: number }) => {
+    try {
+      return ok(search(a.query, { source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "search_tool_calls",
+  "Search tool calls (name/input/output) across sessions — e.g. find where a command was run.",
+  {
+    query: z.string(),
+    source: z.string().optional(),
+    limit: z.number().optional(),
+  },
+  async (a: { query: string; source?: string; limit?: number }) => {
+    try {
+      return ok(searchToolCalls(a.query, { source: a.source, limit: a.limit }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "recent_sessions",
+  "List the most recently active sessions across all providers — what's been happening lately.",
+  { limit: z.number().optional().describe("Max results (default 20)") },
+  async (a: { limit?: number }) => {
+    try {
+      return ok(getRecentSessions(a.limit ?? 20));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "list_sessions",
+  "List indexed sessions, optionally filtered by provider or project.",
+  {
+    source: z.string().optional(),
+    project_path: z.string().optional(),
+    machine: z.string().optional(),
+    limit: z.number().optional(),
+  },
+  async (a: { source?: string; project_path?: string; machine?: string; limit?: number }) => {
+    try {
+      return ok(listSessions({ source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "machines",
+  "List machines that have contributed sessions, with per-machine session counts.",
+  {},
+  async () => {
+    try {
+      const { listMachines } = await import("../db/machines.js");
+      return ok(listMachines());
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "get_session",
+  "Get a session's full details, messages, and tool calls by id or unique id prefix.",
+  {
+    id: z.string().describe("Session id or unique prefix"),
+    message_limit: z.number().optional().describe("Cap messages returned (default all)"),
+  },
+  async (a: { id: string; message_limit?: number }) => {
+    try {
+      const session = getSessionByPrefix(a.id);
+      if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
+      let messages = getMessages(session.id);
+      if (a.message_limit) messages = messages.slice(0, a.message_limit);
+      return ok({ session, messages, tool_calls: getToolCalls(session.id) });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "ingest",
+  "Index session files into the database (mtime-gated). Run before searching to pick up new sessions.",
+  {
+    source: z.string().optional().describe("Only this provider: claude, codex, gemini"),
+    force: z.boolean().optional().describe("Re-ingest unchanged files"),
+  },
+  async (a: { source?: string; force?: boolean }) => {
+    try {
+      const results = a.source
+        ? [ingestSource(a.source, { force: a.force })]
+        : ingestAll({ force: a.force });
+      return ok(results);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "session_stats",
+  "Ingestion and project statistics — per-source counts and top projects by session count.",
+  {},
+  async () => {
+    try {
+      return ok({ ingestion: getIngestionStats(), projects: getProjectStats().slice(0, 30) });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "semantic_search",
+  "Semantic (embedding) search across sessions, or hybrid (full-text + semantic). Requires embeddings (run 'embed') and OPENAI_API_KEY.",
+  {
+    query: z.string(),
+    hybrid: z.boolean().optional().describe("Blend full-text + semantic (RRF)"),
+    source: z.string().optional(),
+    project_path: z.string().optional(),
+    limit: z.number().optional(),
+  },
+  async (a: { query: string; hybrid?: boolean; source?: string; project_path?: string; limit?: number }) => {
+    try {
+      const o = { source: a.source, project_path: a.project_path, limit: a.limit };
+      return ok(a.hybrid ? await hybridSearch(a.query, o) : await semanticSearch(a.query, o));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "embed",
+  "Generate embeddings for indexed messages (enables semantic_search). Needs OPENAI_API_KEY.",
+  { limit: z.number().optional().describe("Max messages to embed this run (default 200)") },
+  async (a: { limit?: number }) => {
+    try {
+      return ok(await embedSessions({ limit: a.limit }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "knowledge_graph",
+  "Explore the session knowledge graph: list entities (projects/tools/models/providers/repos), find sessions related to an entity, or a session's entity neighborhood.",
+  {
+    type: z.enum(["project", "tool", "model", "provider", "repo"]).optional().describe("List entities of this type"),
+    related_type: z.enum(["project", "tool", "model", "provider", "repo"]).optional(),
+    related_name: z.string().optional().describe("With related_type: sessions linked to this entity"),
+    session_id: z.string().optional().describe("A session's entity neighborhood"),
+    limit: z.number().optional(),
+  },
+  async (a: {
+    type?: "project" | "tool" | "model" | "provider" | "repo";
+    related_type?: "project" | "tool" | "model" | "provider" | "repo";
+    related_name?: string;
+    session_id?: string;
+    limit?: number;
+  }) => {
+    try {
+      if (a.session_id) return ok(sessionGraph(a.session_id));
+      if (a.related_type && a.related_name) return ok(relatedSessions(a.related_type, a.related_name, a.limit ?? 50));
+      return ok(listEntities(a.type));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+// ─── Friendly-name registry + resume tools ───────────────────────────────────
+
 server.tool(
   "sessions_list",
   "List known sessions with friendly names and metadata.",
   { project: z.string().optional() },
   async (args: { project?: string }) => {
-    return textJson(listSessions({ project: args.project }));
+    return textJson(listRegistrySessions({ project: args.project }));
   }
 );
 
@@ -146,7 +356,7 @@ server.tool(
 
 server.tool(
   "sessions_search",
-  "Search session transcripts by text query.",
+  "Search session transcripts by text query (registry-backed).",
   {
     query: z.string(),
     project: z.string().optional(),
@@ -217,17 +427,17 @@ server.tool(
   async (args: { project?: string }) => {
     return textJson({
       generated_at: new Date().toISOString(),
-      sessions: listSessions({ project: args.project }),
+      sessions: listRegistrySessions({ project: args.project }),
     });
   }
 );
 
 server.tool(
   "sessions_stats",
-  "Return session counts and high-level activity breakdown.",
+  "Return session counts and high-level activity breakdown (registry-backed).",
   { project: z.string().optional() },
   async (args: { project?: string }) => {
-    const sessions = listSessions({ project: args.project });
+    const sessions = listRegistrySessions({ project: args.project });
     const active = sessions.filter((session) => session.status === "active").length;
     const idle = sessions.length - active;
     const projectCounts = sessions.reduce<Record<string, number>>((acc, session) => {

@@ -1,0 +1,90 @@
+import { watch, existsSync, type FSWatcher } from "node:fs";
+import { listParsers, ingestSource, type IngestResult } from "./ingest/index.js";
+
+export interface WatchOptions {
+  /** How long to wait after the last change before ingesting (per source). Default 2000ms. */
+  debounceMs?: number;
+  /**
+   * Safety-net re-scan interval. fs.watch can miss events (notably recursive
+   * subdirectory writes on some runtimes), so we also re-ingest on this cadence.
+   * Re-ingest is mtime-gated and cheap when nothing changed. Default 10000ms;
+   * set 0 to disable.
+   */
+  pollMs?: number;
+  /** Called after each debounced ingest. */
+  onIngest?: (result: IngestResult) => void;
+  /** Called when an ingest throws. */
+  onError?: (error: Error) => void;
+}
+
+export interface Watcher {
+  /** Stop watching and clear pending timers. */
+  stop(): void;
+  /** Source providers currently being watched. */
+  readonly sources: string[];
+}
+
+/**
+ * Watch every registered provider's session directories and re-ingest the
+ * affected provider (debounced) whenever files change — keeping the index
+ * continuously fresh for real-time queries.
+ */
+export function startWatch(opts: WatchOptions = {}): Watcher {
+  const debounceMs = opts.debounceMs ?? 2000;
+  const pollMs = opts.pollMs ?? 10000;
+  const watchers: FSWatcher[] = [];
+  const pending = new Map<string, ReturnType<typeof setTimeout>>();
+  const sources: string[] = [];
+
+  const runIngest = (source: string) => {
+    try {
+      opts.onIngest?.(ingestSource(source));
+    } catch (err) {
+      opts.onError?.(err as Error);
+    }
+  };
+
+  const scheduleIngest = (source: string) => {
+    const existingTimer = pending.get(source);
+    if (existingTimer) clearTimeout(existingTimer);
+    pending.set(
+      source,
+      setTimeout(() => {
+        pending.delete(source);
+        runIngest(source);
+      }, debounceMs)
+    );
+  };
+
+  for (const parser of listParsers()) {
+    let watching = false;
+    for (const root of parser.sessionRoots()) {
+      if (!existsSync(root)) continue;
+      try {
+        watchers.push(watch(root, { recursive: true }, () => scheduleIngest(parser.source)));
+        watching = true;
+      } catch (err) {
+        opts.onError?.(err as Error);
+      }
+    }
+    if (watching) sources.push(parser.source);
+  }
+
+  // Safety-net poll: re-ingest watched sources on a cadence (mtime-gated, cheap).
+  const interval =
+    pollMs > 0 && sources.length > 0
+      ? setInterval(() => {
+          for (const source of sources) runIngest(source);
+        }, pollMs)
+      : null;
+
+  return {
+    sources,
+    stop() {
+      for (const w of watchers) w.close();
+      for (const t of pending.values()) clearTimeout(t);
+      pending.clear();
+      if (interval) clearInterval(interval);
+    },
+  };
+}

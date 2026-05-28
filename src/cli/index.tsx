@@ -135,7 +135,8 @@ program
       console.log(`    ${from} → ${to}`);
     }
     console.log(`  Index files updated: ${result.indexFilesUpdated}`);
-    console.log(`  JSONL files updated: ${result.jsonlFilesUpdated}`);
+    console.log(`  Claude JSONL updated: ${result.jsonlFilesUpdated}`);
+    console.log(`  Codex JSONL updated: ${result.codexFilesUpdated}`);
     console.log(`  DB rows updated:     ${result.dbRowsUpdated}`);
 
     if (result.errors.length > 0) {
@@ -753,6 +754,369 @@ program
         );
       }
       console.log(`\nTotal: ${projects.length} projects, ${projects.reduce((s, p) => s + p.sessions, 0)} sessions`);
+    }
+  });
+
+program
+  .command("machines")
+  .description("List machines that have contributed sessions, with counts")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { listMachines } = await import("../db/machines.js");
+    const machines = listMachines();
+    if (opts.json) return void console.log(JSON.stringify(machines, null, 2));
+    if (machines.length === 0) {
+      console.log("No machines recorded yet. Run 'sessions ingest' or 'sessions sync'.");
+      return;
+    }
+    for (const m of machines) {
+      console.log(`${m.name.padEnd(10)} ${String(m.session_count).padStart(6)} sessions   ${(m.platform ?? "").padEnd(8)} last seen ${m.last_seen_at}`);
+    }
+  });
+
+program
+  .command("sync")
+  .description("Ingest local sessions, then sync to/from the cloud so every machine shares one index")
+  .option("--no-ingest", "Skip the local ingest before syncing")
+  .option("--no-pull", "Push only — don't pull other machines' sessions")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { ingest?: boolean; pull?: boolean; json?: boolean }) => {
+    const { ingestAll } = await import("../lib/ingest/index.js");
+    const { recomputeMachineCounts } = await import("../db/machines.js");
+
+    const runCloud = (args: string[]) =>
+      new Promise<{ code: number; output: string }>((resolve) => {
+        try {
+          const p = Bun.spawn(["cloud", ...args], { stdout: "pipe", stderr: "pipe" });
+          (async () => {
+            const out = await new Response(p.stdout).text();
+            const err = await new Response(p.stderr).text();
+            const code = await p.exited;
+            resolve({ code, output: (out + err).trim() });
+          })();
+        } catch (e) {
+          resolve({ code: 127, output: `failed to run cloud: ${(e as Error).message}` });
+        }
+      });
+
+    const result: Record<string, unknown> = {};
+    if (opts.ingest !== false) {
+      result.ingest = ingestAll();
+      if (!opts.json) for (const r of (result.ingest as { source: string; sessions: number }[])) console.log(`ingest ${r.source}: +${r.sessions} sessions`);
+    }
+    if (!opts.json) console.log("pushing to cloud…");
+    result.push = await runCloud(["sync", "push", "--service", "sessions"]);
+    if (opts.pull !== false) {
+      if (!opts.json) console.log("pulling from cloud…");
+      result.pull = await runCloud(["sync", "pull", "--service", "sessions"]);
+    }
+    recomputeMachineCounts();
+
+    if (opts.json) return void console.log(JSON.stringify(result, null, 2));
+    const push = result.push as { code: number };
+    console.log(`push: ${push.code === 0 ? "ok" : `FAILED (exit ${push.code})`}`);
+    if (result.pull) {
+      const pull = result.pull as { code: number };
+      console.log(`pull: ${pull.code === 0 ? "ok" : `FAILED (exit ${pull.code})`}`);
+    }
+    console.log("Done. Run 'sessions machines' to see contributors.");
+  });
+
+program
+  .command("import-db <path>")
+  .description("Merge another machine's sessions database into this one (preserves machine tags) — RDS-free sync")
+  .option("--json", "Output as JSON")
+  .action(async (path: string, opts: { json?: boolean }) => {
+    const { mergeFromDb } = await import("../db/merge.js");
+    try {
+      const r = mergeFromDb(path);
+      if (opts.json) return void console.log(JSON.stringify(r, null, 2));
+      console.log(`Merged from ${path}: +${r.sessions} sessions, +${r.messages} messages, +${r.tool_calls} tool calls, +${r.embeddings} embeddings`);
+    } catch (e) {
+      console.error((e as Error).message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("watch")
+  .description("Continuously index new/changed sessions as they happen (Ctrl-C to stop)")
+  .option("--debounce <ms>", "Debounce window after a change before ingesting", "2000")
+  .action(async (opts: { debounce?: string }) => {
+    const { ingestAll } = await import("../lib/ingest/index.js");
+    const { startWatch } = await import("../lib/watch.js");
+    console.log("Initial ingest…");
+    for (const r of ingestAll()) {
+      console.log(`  ${r.source}: ${r.sessions} sessions (${r.ingested} files, ${r.skipped} unchanged)`);
+    }
+    const watcher = startWatch({
+      debounceMs: parseInt(opts.debounce ?? "2000", 10) || 2000,
+      onIngest: (r) => {
+        if (r.ingested > 0 || r.errors > 0) {
+          console.log(`[${new Date().toLocaleTimeString()}] ${r.source}: +${r.sessions} sessions (${r.ingested} files${r.errors ? `, ${r.errors} errors` : ""})`);
+        }
+      },
+      onError: (e) => console.error("watch error:", e.message),
+    });
+    console.log(`Watching: ${watcher.sources.join(", ") || "(no provider dirs found)"}. Press Ctrl-C to stop.`);
+    const shutdown = () => {
+      watcher.stop();
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+    await new Promise<void>(() => {});
+  });
+
+program
+  .command("recent")
+  .description("Show the most recently active sessions across all providers")
+  .option("-m, --machine <name>", "Filter by machine")
+  .option("-l, --limit <n>", "Maximum results", "20")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { machine?: string; limit?: string; json?: boolean }) => {
+    const { listSessions } = await import("../db/sessions.js");
+    const sessions = listSessions({ machine: opts.machine, limit: parseInt(opts.limit ?? "20", 10) || 20 });
+    if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
+    for (const s of sessions) {
+      console.log(
+        `${(s.started_at ?? "").slice(0, 16).padEnd(16)}  ${(s.machine ?? "?").padEnd(9)} ${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(18)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`
+      );
+    }
+  });
+
+program
+  .command("list")
+  .description("List indexed sessions, optionally filtered")
+  .option("-s, --source <source>", "Filter by provider")
+  .option("-p, --project <path>", "Filter by project path")
+  .option("-m, --machine <name>", "Filter by machine")
+  .option("-l, --limit <n>", "Maximum results", "50")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { source?: string; project?: string; machine?: string; limit?: string; json?: boolean }) => {
+    const { listSessions } = await import("../db/sessions.js");
+    const sessions = listSessions({
+      source: opts.source,
+      project_path: opts.project,
+      machine: opts.machine,
+      limit: parseInt(opts.limit ?? "50", 10) || 50,
+    });
+    if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
+    for (const s of sessions) {
+      console.log(`${(s.machine ?? "?").padEnd(9)} ${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(18)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`);
+    }
+  });
+
+program
+  .command("show <id>")
+  .description("Show a session's details and message previews (id or unique prefix)")
+  .option("-m, --messages <n>", "How many messages to preview", "12")
+  .option("--json", "Output as JSON")
+  .action(async (id: string, opts: { messages?: string; json?: boolean }) => {
+    const { getSessionByPrefix, getMessages, getToolCalls } = await import("../db/sessions.js");
+    const s = getSessionByPrefix(id);
+    if (!s) {
+      console.error(`Session not found (or ambiguous prefix): ${id}`);
+      process.exit(1);
+    }
+    const messages = getMessages(s.id);
+    const tools = getToolCalls(s.id);
+    if (opts.json) return void console.log(JSON.stringify({ session: s, messages, tools }, null, 2));
+    console.log(`${s.title ?? "(untitled)"}`);
+    console.log(`  source:   ${s.source}   model: ${s.model ?? "?"}`);
+    console.log(`  project:  ${s.project_name ?? "?"} (${s.project_path ?? "?"})`);
+    console.log(`  git:      ${s.git_branch ?? "?"}`);
+    console.log(`  when:     ${s.started_at ?? "?"} → ${s.ended_at ?? "?"}`);
+    console.log(`  counts:   ${s.message_count} messages, ${s.tool_call_count} tool calls, ${s.total_input_tokens + s.total_output_tokens} tokens`);
+    console.log(`  id:       ${s.id}`);
+    const n = parseInt(opts.messages ?? "12", 10) || 12;
+    console.log("");
+    for (const m of messages.slice(0, n)) {
+      console.log(`  [${m.role}] ${(m.content ?? "").replace(/\s+/g, " ").slice(0, 200)}`);
+    }
+    if (tools.length) console.log(`\n  tools used: ${[...new Set(tools.map((t) => t.tool_name))].join(", ")}`);
+  });
+
+program
+  .command("stats")
+  .description("Show ingestion and project statistics")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const { getIngestionStats } = await import("../db/ingestion.js");
+    const { getProjectStats } = await import("../db/sessions.js");
+    const ingestion = getIngestionStats();
+    const projects = getProjectStats();
+    if (opts.json) return void console.log(JSON.stringify({ ingestion, projects }, null, 2));
+    console.log("By source:");
+    for (const s of ingestion) {
+      console.log(`  ${s.source.padEnd(8)} ${s.session_count} sessions, ${s.message_count} messages, ${s.tool_call_count} tool calls`);
+    }
+    console.log("\nTop projects:");
+    for (const p of projects.slice(0, 15)) {
+      console.log(`  ${String(p.session_count).padStart(4)}  ${p.project_name ?? p.project_path}`);
+    }
+  });
+
+program
+  .command("graph")
+  .description("Explore the session knowledge graph — entities (projects/tools/models/repos) and links")
+  .option("-t, --type <type>", "List one entity type: project, tool, model, provider, repo")
+  .option("-r, --related <type:name>", "Sessions related to an entity, e.g. tool:Bash or project:infra")
+  .option("--session <id>", "Show a single session's entity neighborhood")
+  .option("-l, --limit <n>", "Max results", "50")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { type?: string; related?: string; session?: string; limit?: string; json?: boolean }) => {
+    const { listEntities, relatedSessions, sessionGraph } = await import("../lib/graph.js");
+    type EntityType = "project" | "tool" | "model" | "provider" | "repo";
+    const TYPES = ["project", "tool", "model", "provider", "repo"];
+    const limit = parseInt(opts.limit ?? "50", 10) || 50;
+
+    if (opts.session) {
+      const { getSessionByPrefix } = await import("../db/sessions.js");
+      const s = getSessionByPrefix(opts.session);
+      if (!s) {
+        console.error(`Session not found: ${opts.session}`);
+        process.exit(1);
+      }
+      const g = sessionGraph(s.id);
+      if (opts.json) return void console.log(JSON.stringify(g, null, 2));
+      console.log(`project: ${g?.project ?? "?"}`);
+      console.log(`model:   ${g?.model ?? "?"} (${g?.provider ?? "?"})`);
+      console.log(`repo:    ${g?.repo ?? "?"}`);
+      console.log(`tools:   ${g?.tools.join(", ") || "none"}`);
+      return;
+    }
+
+    if (opts.related) {
+      const idx = opts.related.indexOf(":");
+      const type = idx >= 0 ? opts.related.slice(0, idx) : "";
+      const name = idx >= 0 ? opts.related.slice(idx + 1) : "";
+      if (!TYPES.includes(type) || !name) {
+        console.error("--related must be <type>:<name>, e.g. tool:Bash (type: project|tool|model|provider|repo)");
+        process.exit(1);
+      }
+      const sessions = relatedSessions(type as EntityType, name, limit);
+      if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
+      for (const s of sessions) {
+        console.log(`${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(20)} ${s.title ?? "(untitled)"}  ${s.session_id.slice(0, 8)}`);
+      }
+      return;
+    }
+
+    if (opts.type && !TYPES.includes(opts.type)) {
+      console.error(`Unknown type '${opts.type}'. Use: ${TYPES.join(", ")}`);
+      process.exit(1);
+    }
+    const entities = listEntities(opts.type as EntityType | undefined);
+    if (opts.json) return void console.log(JSON.stringify(entities, null, 2));
+    let lastType = "";
+    for (const e of entities.slice(0, opts.type ? entities.length : 100)) {
+      if (e.type !== lastType) {
+        console.log(`\n${e.type}:`);
+        lastType = e.type;
+      }
+      console.log(`  ${String(e.session_count).padStart(4)}  ${e.name}`);
+    }
+  });
+
+program
+  .command("embed")
+  .description("Generate embeddings for indexed messages (enables semantic search; needs OPENAI_API_KEY)")
+  .option("-l, --limit <n>", "Max messages to embed this run", "200")
+  .option("--json", "Output as JSON")
+  .action(async (opts: { limit?: string; json?: boolean }) => {
+    const { embedSessions } = await import("../lib/embeddings.js");
+    try {
+      const result = await embedSessions({ limit: parseInt(opts.limit ?? "200", 10) || 200 });
+      if (opts.json) return void console.log(JSON.stringify(result, null, 2));
+      console.log(`Embedded ${result.chunksEmbedded} chunks across ${result.messagesProcessed} messages.`);
+    } catch (err) {
+      console.error(`Embed failed (is OPENAI_API_KEY set?): ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("search <query>")
+  .description("Full-text search across your indexed AI coding sessions")
+  .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
+  .option("-p, --project <path>", "Filter by project path")
+  .option("-m, --machine <name>", "Filter by machine (apple03, spark01, …)")
+  .option("-l, --limit <n>", "Maximum results", "20")
+  .option("--tools", "Search tool calls (name/input/output) instead of message content")
+  .option("--semantic", "Semantic (embedding) search — requires 'sessions embed' first")
+  .option("--hybrid", "Blend full-text + semantic results (RRF)")
+  .option("--json", "Output as JSON")
+  .action(
+    async (
+      query: string,
+      opts: { source?: string; project?: string; machine?: string; limit?: string; tools?: boolean; semantic?: boolean; hybrid?: boolean; json?: boolean }
+    ) => {
+      const { search, searchToolCalls } = await import("../lib/search.js");
+      const limit = parseInt(opts.limit ?? "20", 10) || 20;
+      const o = { limit, source: opts.source, project_path: opts.project, machine: opts.machine };
+
+      if (opts.tools) {
+        const hits = searchToolCalls(query, o);
+        if (opts.json) return void console.log(JSON.stringify(hits, null, 2));
+        if (hits.length === 0) return void console.log("No matching tool calls.");
+        for (const h of hits) {
+          console.log(`${h.source}  ${h.tool_name}${h.project_name ? `  [${h.project_name}]` : ""}`);
+          console.log(`  ${h.snippet}`);
+        }
+        return;
+      }
+
+      let hits;
+      if (opts.semantic || opts.hybrid) {
+        const { semanticSearch, hybridSearch } = await import("../lib/vector-search.js");
+        try {
+          hits = opts.hybrid ? await hybridSearch(query, o) : await semanticSearch(query, o);
+        } catch (err) {
+          console.error(`Semantic search failed (is OPENAI_API_KEY set and have you run 'sessions embed'?): ${(err as Error).message}`);
+          process.exit(1);
+        }
+      } else {
+        hits = search(query, o);
+      }
+      if (opts.json) return void console.log(JSON.stringify(hits, null, 2));
+      if (hits.length === 0) return void console.log("No matching sessions.");
+      for (const h of hits) {
+        console.log(
+          `${h.source}  ${h.title ?? "(untitled)"}${h.project_name ? `  [${h.project_name}]` : ""}`
+        );
+        console.log(`  ${h.snippet}`);
+        console.log(`  ${h.session_id}  ${h.started_at ?? ""}`);
+      }
+    }
+  );
+
+program
+  .command("ingest")
+  .description("Index AI coding sessions (claude, codex, gemini) into the searchable database")
+  .option("-s, --source <source>", "Only ingest one provider: claude, codex, or gemini")
+  .option("-f, --force", "Re-ingest even files that are unchanged since last run")
+  .option("-v, --verbose", "Print each file as it is ingested")
+  .option("--json", "Output the result as JSON")
+  .action(async (opts: { source?: string; force?: boolean; verbose?: boolean; json?: boolean }) => {
+    const { ingestAll, ingestSource } = await import("../lib/ingest/index.js");
+    const onProgress = opts.verbose ? (m: string) => console.log(m) : undefined;
+    try {
+      const results = opts.source
+        ? [ingestSource(opts.source, { force: opts.force, onProgress })]
+        : ingestAll({ force: opts.force, onProgress });
+      if (opts.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      for (const r of results) {
+        console.log(
+          `${r.source}: scanned ${r.scanned}, ingested ${r.ingested}, skipped ${r.skipped}, sessions ${r.sessions}, errors ${r.errors}`
+        );
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
     }
   });
 

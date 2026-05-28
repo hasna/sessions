@@ -12,7 +12,7 @@
  * 4. Updating the sessions DB (project_path, source_path)
  */
 
-import { existsSync, readdirSync, renameSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readdirSync, renameSync, readFileSync, writeFileSync, statSync } from "fs";
 import { join, basename } from "path";
 import { SqliteAdapter as Database } from "@hasna/cloud";
 import {
@@ -20,8 +20,113 @@ import {
   findMatchingProjectDirs,
   computeRelocatedDir,
   getClaudeProjectsDir,
+  getCodexSessionsDir,
   getSessionsDbPath,
 } from "./paths.js";
+
+/**
+ * Rewrite a `cwd` value that starts with oldPath to point at newPath.
+ * Returns the new value, or null if it doesn't match.
+ */
+function remapCwd(cwd: unknown, oldPath: string, newPath: string): string | null {
+  if (typeof cwd !== "string") return null;
+  if (cwd === oldPath) return newPath;
+  if (cwd.startsWith(oldPath + "/")) return newPath + cwd.slice(oldPath.length);
+  return null;
+}
+
+/**
+ * Relocate Codex sessions. Unlike Claude, Codex stores rollout JSONL files under
+ * date folders (~/.codex/sessions/YYYY/MM/DD/) — not path-encoded dirs — and the
+ * project path lives in `cwd` fields, both top-level and nested under `payload`
+ * (session_meta, turn_context). So there is no directory to rename; we walk every
+ * rollout file and rewrite matching `cwd` fields in place.
+ */
+function relocateCodexSessions(
+  oldPath: string,
+  newPath: string,
+  options: { dryRun?: boolean; verbose?: boolean }
+): { filesUpdated: number; errors: Array<{ file: string; error: string }> } {
+  const { dryRun = false, verbose = false } = options;
+  const out = { filesUpdated: 0, errors: [] as Array<{ file: string; error: string }> };
+  const root = getCodexSessionsDir();
+  if (!existsSync(root)) return out;
+
+  const walk = (dir: string): void => {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch (err: any) {
+      out.errors.push({ file: dir, error: err.message });
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.endsWith(".jsonl")) continue;
+
+      let content: string;
+      try {
+        content = readFileSync(full, "utf-8");
+      } catch (err: any) {
+        out.errors.push({ file: full, error: err.message });
+        continue;
+      }
+      // Cheap pre-check: skip files that don't reference the old path at all.
+      if (!content.includes(oldPath)) continue;
+
+      let modified = false;
+      const lines = content.split("\n").map((line) => {
+        if (!line.trim()) return line;
+        try {
+          const obj = JSON.parse(line);
+          // top-level cwd
+          const top = remapCwd(obj.cwd, oldPath, newPath);
+          if (top !== null) {
+            obj.cwd = top;
+            modified = true;
+          }
+          // nested payload.cwd (session_meta, turn_context)
+          if (obj.payload && typeof obj.payload === "object") {
+            const nested = remapCwd(obj.payload.cwd, oldPath, newPath);
+            if (nested !== null) {
+              obj.payload.cwd = nested;
+              modified = true;
+            }
+          }
+          return modified ? JSON.stringify(obj) : line;
+        } catch {
+          return line;
+        }
+      });
+
+      if (modified) {
+        if (verbose) console.log(`  Updating codex jsonl: ${full}`);
+        if (!dryRun) {
+          try {
+            writeFileSync(full, lines.join("\n"), "utf-8");
+          } catch (err: any) {
+            out.errors.push({ file: full, error: err.message });
+            continue;
+          }
+        }
+        out.filesUpdated++;
+      }
+    }
+  };
+
+  walk(root);
+  return out;
+}
 
 export interface RelocateOptions {
   /** Only show what would change without modifying anything. */
@@ -36,6 +141,7 @@ export interface RelocateResult {
   dirsRenamed: Array<{ from: string; to: string }>;
   indexFilesUpdated: number;
   jsonlFilesUpdated: number;
+  codexFilesUpdated: number;
   dbRowsUpdated: number;
   errors: Array<{ file: string; error: string }>;
 }
@@ -52,6 +158,7 @@ export function relocate(
     dirsRenamed: [],
     indexFilesUpdated: 0,
     jsonlFilesUpdated: 0,
+    codexFilesUpdated: 0,
     dbRowsUpdated: 0,
     errors: [],
   };
@@ -60,8 +167,17 @@ export function relocate(
   oldPath = oldPath.replace(/\/+$/, "");
   newPath = newPath.replace(/\/+$/, "");
 
+  // Relocate Codex sessions regardless of whether Claude has any (a project may
+  // have been used in only one of the two tools).
+  const codex = relocateCodexSessions(oldPath, newPath, { dryRun, verbose });
+  result.codexFilesUpdated = codex.filesUpdated;
+  result.errors.push(...codex.errors);
+
   if (!existsSync(projectsDir)) {
-    result.errors.push({ file: projectsDir, error: "Claude projects directory not found" });
+    // No Claude projects dir — Codex-only relocation may still have done work.
+    if (codex.filesUpdated === 0) {
+      result.errors.push({ file: projectsDir, error: "Claude projects directory not found" });
+    }
     return result;
   }
 
@@ -70,10 +186,15 @@ export function relocate(
   const matchingDirs = findMatchingProjectDirs(allDirs, oldPath);
 
   if (matchingDirs.length === 0) {
-    result.errors.push({
-      file: oldPath,
-      error: `No session directories found for path: ${oldPath}`,
-    });
+    // No Claude project dirs — that's fine if Codex sessions were relocated.
+    if (codex.filesUpdated === 0) {
+      result.errors.push({
+        file: oldPath,
+        error: `No session directories found for path: ${oldPath}`,
+      });
+    }
+    // Still update the DB below (covers Codex rows), then return.
+    if (updateDb) updateSessionsDb(oldPath, newPath, result, verbose);
     return result;
   }
 
@@ -227,44 +348,48 @@ export function relocate(
   }
 
   // Phase 3: Update sessions DB
-  if (updateDb) {
-    const dbPath = getSessionsDbPath();
-    if (existsSync(dbPath)) {
-      try {
-        const db = new Database(dbPath);
-        db.exec("PRAGMA journal_mode=WAL");
-
-        // Update project_path in sessions table
-        const sessionUpdate = db.prepare(
-          "UPDATE sessions SET project_path = ? || substr(project_path, ?) WHERE project_path LIKE ? || '%'"
-        );
-        const sessionResult = sessionUpdate.run(newPath, oldPath.length + 1, oldPath);
-
-        // Update source_path in sessions table
-        const sourceUpdate = db.prepare(
-          "UPDATE sessions SET source_path = replace(source_path, ?, ?) WHERE source_path LIKE ? || '%'"
-        );
-        sourceUpdate.run(oldPath, newPath, oldPath);
-
-        // Update ingestion_state file_path
-        const stateUpdate = db.prepare(
-          "UPDATE ingestion_state SET file_path = replace(file_path, ?, ?) WHERE file_path LIKE ? || '%'"
-        );
-        stateUpdate.run(
-          encodePath(oldPath),
-          encodePath(newPath),
-          encodePath(oldPath)
-        );
-
-        result.dbRowsUpdated = (sessionResult as any).changes || 0;
-
-        db.close();
-        if (verbose) console.log(`  Updated ${result.dbRowsUpdated} DB rows`);
-      } catch (err: any) {
-        result.errors.push({ file: dbPath, error: err.message });
-      }
-    }
-  }
+  if (updateDb) updateSessionsDb(oldPath, newPath, result, verbose);
 
   return result;
+}
+
+/** Update project_path / source_path / ingestion_state in the sessions DB. */
+function updateSessionsDb(
+  oldPath: string,
+  newPath: string,
+  result: RelocateResult,
+  verbose: boolean
+): void {
+  const dbPath = getSessionsDbPath();
+  if (!existsSync(dbPath)) return;
+  try {
+    const db = new Database(dbPath);
+    db.exec("PRAGMA journal_mode=WAL");
+    db.exec("PRAGMA busy_timeout=5000");
+
+    // Update project_path in sessions table
+    const sessionUpdate = db.prepare(
+      "UPDATE sessions SET project_path = ? || substr(project_path, ?) WHERE project_path LIKE ? || '%'"
+    );
+    const sessionResult = sessionUpdate.run(newPath, oldPath.length + 1, oldPath);
+
+    // Update source_path in sessions table
+    const sourceUpdate = db.prepare(
+      "UPDATE sessions SET source_path = replace(source_path, ?, ?) WHERE source_path LIKE ? || '%'"
+    );
+    sourceUpdate.run(oldPath, newPath, oldPath);
+
+    // Update ingestion_state file_path (Claude encodes the path into the file path)
+    const stateUpdate = db.prepare(
+      "UPDATE ingestion_state SET file_path = replace(file_path, ?, ?) WHERE file_path LIKE ? || '%'"
+    );
+    stateUpdate.run(encodePath(oldPath), encodePath(newPath), encodePath(oldPath));
+
+    result.dbRowsUpdated += (sessionResult as any).changes || 0;
+
+    db.close();
+    if (verbose) console.log(`  Updated ${result.dbRowsUpdated} DB rows`);
+  } catch (err: any) {
+    result.errors.push({ file: dbPath, error: err.message });
+  }
 }

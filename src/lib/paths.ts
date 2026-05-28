@@ -35,6 +35,13 @@ export function getClaudeBaseDir(): string {
   return process.env.CLAUDE_PATH || join(homedir(), ".claude");
 }
 
+/** Get the Codex sessions directory (date-foldered rollout JSONL files). */
+export function getCodexSessionsDir(): string {
+  return process.env.CODEX_PATH
+    ? join(process.env.CODEX_PATH, "sessions")
+    : join(homedir(), ".codex", "sessions");
+}
+
 /** Get the sessions base directory, with auto-migration from legacy path. */
 export function getSessionsDir(): string {
   const home = homedir();
