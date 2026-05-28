@@ -53,6 +53,16 @@ sessions stats                 # per-source + top-project counts
 sessions watch
 ```
 
+## Friendly names & resume
+
+```bash
+sessions list --json
+sessions history --today
+sessions rename <id-or-name> "my friendly name"
+sessions resume --last --print-command
+sessions resume <friendly-name-or-id>
+```
+
 Existing maintenance commands (`relocate`, `transfer`, `migrate`, `paths`)
 remain available.
 
@@ -64,8 +74,10 @@ sessions-mcp
 
 Exposes session tools for agents/orchestrators: `search_sessions`,
 `search_tool_calls`, `semantic_search`, `recent_sessions`, `list_sessions`,
-`get_session`, `ingest`, `embed`, `session_stats`, `knowledge_graph` (plus agent
-registry, feedback, and cloud-sync tools).
+`get_session`, `ingest`, `embed`, `session_stats`, `knowledge_graph`, plus
+registry-backed tools (`sessions_list`, `sessions_history`, `sessions_search`,
+`sessions_resume`, `sessions_rename`, `sessions_watch`, `sessions_stats`),
+cross-adapter import tools, agent registry, feedback, and cloud-sync tools.
 
 ## REST API
 

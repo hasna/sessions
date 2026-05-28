@@ -21,6 +21,7 @@ import {
 } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { createInterface } from "readline/promises";
 import { relocate } from "../lib/relocate.js";
 import {
   exportSessions,
@@ -35,11 +36,52 @@ import {
   resolveProjectPath,
 } from "../lib/paths.js";
 import { getPackageVersion } from "../lib/package.js";
+import {
+  buildClaudeResumeCommand,
+  findSession,
+  formatSessionTable,
+  historySessions,
+  latestSession,
+  latestSessionForProject,
+  listSessions,
+  renameSession,
+  searchSessions,
+} from "../lib/sessions.js";
 
 const program = new Command();
 
 function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
+}
+
+async function pickSessionFromList() {
+  const sessions = listSessions().slice(0, 20);
+  if (sessions.length === 0) {
+    throw new Error("No sessions available to pick from");
+  }
+
+  console.log("Select a session to resume:\n");
+  sessions.forEach((session, index) => {
+    console.log(
+      `  ${index + 1}. ${session.friendlyName}  ${session.projectSlug}  ${session.status}  ${session.sessionId.slice(0, 12)}`
+    );
+  });
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  try {
+    const answer = await rl.question("\nSession number: ");
+    const parsed = Number.parseInt(answer, 10);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > sessions.length) {
+      throw new Error("Invalid selection");
+    }
+    return sessions[parsed - 1];
+  } finally {
+    rl.close();
+  }
 }
 
 program
@@ -460,6 +502,192 @@ program
   });
 
 // ─── list-projects (helper to see what's available) ────────────────────────
+
+program
+  .command("list")
+  .description("List known sessions with friendly names")
+  .option("-p, --project <value>", "Filter by project slug or path")
+  .option("--json", "Output as JSON")
+  .action((opts: any) => {
+    const sessions = listSessions({ project: opts.project });
+    if (opts.json) {
+      printJson(sessions);
+      return;
+    }
+
+    console.log(formatSessionTable(sessions));
+  });
+
+program
+  .command("rename <id-or-name> <friendly-name>")
+  .description("Assign a manual friendly name to a session")
+  .option("--json", "Output as JSON")
+  .action((identifier: string, friendlyName: string, opts: any) => {
+    try {
+      const session = renameSession(identifier, friendlyName);
+      if (opts.json) {
+        printJson(session);
+        return;
+      }
+
+      console.log(
+        `Renamed ${session.sessionId} -> ${session.friendlyName}`
+      );
+    } catch (error: any) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("resume [id-or-name]")
+  .description("Resume a session by friendly name, session ID, or latest project session")
+  .option("-p, --project <value>", "Resume the most recent session for a project")
+  .option("--last", "Resume the most recently active session")
+  .option("--pick", "Interactively pick a session from the most recent results")
+  .option("--print-command", "Print the underlying resume command without executing it")
+  .option("--json", "Output the selected session as JSON")
+  .action(async (identifier: string | undefined, opts: any) => {
+    try {
+      let session = null;
+
+      if (opts.pick) {
+        session = await pickSessionFromList();
+      } else if (opts.project) {
+        session = latestSessionForProject(opts.project);
+      } else if (opts.last || !identifier) {
+        session = latestSession();
+      } else {
+        session = findSession(identifier);
+      }
+
+      if (!session) {
+        throw new Error("No matching session found");
+      }
+
+      const command = buildClaudeResumeCommand(session);
+      if (opts.json) {
+        printJson({
+          session,
+          command,
+        });
+        return;
+      }
+
+      if (opts.printCommand) {
+        console.log(command.join(" "));
+        return;
+      }
+
+      const proc = Bun.spawn({
+        cmd: command,
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      const exitCode = await proc.exited;
+      process.exit(exitCode);
+    } catch (error: any) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("history")
+  .description("Show known sessions with history filters")
+  .option("-p, --project <value>", "Filter by project slug or path")
+  .option("--today", "Only include sessions active today")
+  .option("--agent <value>", "Filter by provider, agent name, or custom title")
+  .option("--json", "Output as JSON")
+  .action((opts: any) => {
+    const sessions = historySessions({
+      project: opts.project,
+      today: Boolean(opts.today),
+      agent: opts.agent,
+    });
+
+    if (opts.json) {
+      printJson(sessions);
+      return;
+    }
+
+    console.log(formatSessionTable(sessions));
+  });
+
+program
+  .command("search <query>")
+  .description("Search session transcripts by text")
+  .option("-p, --project <value>", "Filter by project slug or path")
+  .option("--limit <count>", "Maximum matches to return", "20")
+  .option("--json", "Output as JSON")
+  .action((query: string, opts: any) => {
+    const limit = Number.parseInt(opts.limit, 10);
+    if (!Number.isFinite(limit) || limit <= 0) {
+      console.error("Error: --limit must be a positive integer");
+      process.exit(1);
+    }
+
+    const matches = searchSessions(query, {
+      project: opts.project,
+      limit,
+    });
+
+    if (opts.json) {
+      printJson(matches);
+      return;
+    }
+
+    if (matches.length === 0) {
+      console.log("No matching sessions found.");
+      return;
+    }
+
+    for (const match of matches) {
+      console.log(`${match.session.friendlyName}  ${match.session.projectSlug}`);
+      console.log(`  ${match.snippet}`);
+    }
+  });
+
+program
+  .command("watch")
+  .description("Watch session activity in a live-updating table")
+  .option("-p, --project <value>", "Filter by project slug or path")
+  .option("--interval <seconds>", "Refresh interval in seconds", "5")
+  .option("--json", "Output one JSON snapshot and exit")
+  .option("--once", "Render a single snapshot and exit")
+  .action((opts: any) => {
+    const intervalSeconds = Number.parseInt(opts.interval, 10);
+    if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
+      console.error("Error: --interval must be a positive integer");
+      process.exit(1);
+    }
+
+    const render = () => {
+      const sessions = listSessions({ project: opts.project });
+      if (opts.json) {
+        printJson(sessions);
+        return;
+      }
+
+      console.clear();
+      console.log(
+        `sessions watch (${new Date().toISOString()})\n`
+      );
+      console.log(formatSessionTable(sessions));
+    };
+
+    render();
+    if (opts.json || opts.once) {
+      return;
+    }
+
+    const timer = setInterval(render, intervalSeconds * 1000);
+    process.on("SIGINT", () => {
+      clearInterval(timer);
+      process.exit(0);
+    });
+  });
 
 program
   .command("paths")
