@@ -24,3 +24,20 @@ export {
   findMatchingProjectDirs,
   computeRelocatedDir,
 } from "./lib/paths.js";
+
+export {
+  loadSessionRegistry,
+  saveSessionRegistry,
+  refreshSessionRegistry,
+  listSessions,
+  findSession,
+  latestSession,
+  latestSessionForProject,
+  renameSession,
+  buildClaudeResumeCommand,
+  formatSessionTable,
+  historySessions,
+  searchSessions,
+} from "./lib/sessions.js";
+
+export type { SessionRecord, SessionSearchResult, SessionStatus } from "./lib/sessions.js";
