@@ -644,20 +644,21 @@ server.tool(
 }
 
 async function main(): Promise<void> {
-  const { isMcpHttpMode, parseMcpHttpPort } = await import("./http.js");
+  const { isMcpStdioMode, parseMcpHttpPort } = await import("./http.js");
 
-  if (isMcpHttpMode(args)) {
-    const { createSessionsServer } = await import("../server/app.js");
-    const port = parseMcpHttpPort(args);
-    const hostname = "127.0.0.1";
-    const server = createSessionsServer({ port, hostname, enableMcp: true });
-    console.error(`sessions-mcp HTTP listening on http://${hostname}:${server.port}/mcp`);
+  if (isMcpStdioMode(args)) {
+    const server = buildServer();
+    registerCloudTools(server, "sessions");
+    await server.connect(new StdioServerTransport());
     return;
   }
 
-  const server = buildServer();
-  registerCloudTools(server, "sessions");
-  await server.connect(new StdioServerTransport());
+  // Default: shared Streamable HTTP server (one process per MCP, many agents).
+  const { createSessionsServer } = await import("../server/app.js");
+  const port = parseMcpHttpPort(args);
+  const hostname = "127.0.0.1";
+  const server = createSessionsServer({ port, hostname, enableMcp: true });
+  console.error(`sessions-mcp HTTP listening on http://${hostname}:${server.port}/mcp`);
 }
 
 if (import.meta.main) {

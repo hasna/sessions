@@ -4,11 +4,15 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { registerCloudTools } from "@hasna/cloud";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-export const MCP_HTTP_DEFAULT_PORT = 8835;
+export const MCP_HTTP_DEFAULT_PORT = 8877;
 export const MCP_HTTP_SERVICE_NAME = "sessions";
 
 export function isMcpHttpMode(argv: string[] = process.argv.slice(2)): boolean {
   return argv.includes("--http") || process.env.MCP_HTTP === "1";
+}
+
+export function isMcpStdioMode(argv: string[] = process.argv.slice(2)): boolean {
+  return argv.includes("--stdio") || process.env.MCP_STDIO === "1";
 }
 
 export function parseMcpHttpPort(argv: string[], defaultPort = MCP_HTTP_DEFAULT_PORT): number {
