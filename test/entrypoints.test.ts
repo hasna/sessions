@@ -39,4 +39,20 @@ describe("entrypoint help and version", () => {
     expect(result.exitCode).toBe(0);
     expect(output).toBe(getPackageVersion());
   });
+
+  // Regression: commander 13 throws "cannot add command 'X' as already have
+  // command 'X'" when two top-level commands share a name, crashing every CLI
+  // invocation. `watch` and `list` were each registered twice.
+  it("loads without duplicate-command collisions and lists renamed commands", () => {
+    const result = runBun(["run", "src/cli/index.tsx", "--help"]);
+    const stdout = Buffer.from(result.stdout).toString("utf-8");
+    const stderr = Buffer.from(result.stderr).toString("utf-8");
+
+    expect(result.exitCode).toBe(0);
+    expect(stderr).not.toContain("already have command");
+    expect(stdout).toContain("watch");
+    expect(stdout).toContain("ingest-watch");
+    expect(stdout).toContain("list");
+    expect(stdout).toContain("list-indexed");
+  });
 });

@@ -839,7 +839,7 @@ program
   });
 
 program
-  .command("watch")
+  .command("ingest-watch")
   .description("Continuously index new/changed sessions as they happen (Ctrl-C to stop)")
   .option("--debounce <ms>", "Debounce window after a change before ingesting", "2000")
   .action(async (opts: { debounce?: string }) => {
@@ -886,7 +886,7 @@ program
   });
 
 program
-  .command("list")
+  .command("list-indexed")
   .description("List indexed sessions, optionally filtered")
   .option("-s, --source <source>", "Filter by provider")
   .option("-p, --project <path>", "Filter by project path")
@@ -1037,7 +1037,7 @@ program
   });
 
 program
-  .command("search <query>")
+  .command("search-indexed <query>")
   .description("Full-text search across your indexed AI coding sessions")
   .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
   .option("-p, --project <path>", "Filter by project path")
