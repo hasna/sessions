@@ -8,6 +8,7 @@
  */
 
 import { Command } from "commander";
+import { registerEventsCommands } from "@hasna/events/commander";
 import {
   existsSync,
   mkdirSync,
@@ -88,6 +89,8 @@ program
   .name("sessions")
   .version(getPackageVersion())
   .description("Universal AI coding session search and management");
+
+registerEventsCommands(program, { source: "sessions" });
 
 // ─── relocate ──────────────────────────────────────────────────────────────
 
