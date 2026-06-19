@@ -10,6 +10,7 @@ import {
 } from "../db/sessions.js";
 import { getIngestionStats } from "../db/ingestion.js";
 import { listMachines } from "../db/machines.js";
+import { recallSessions } from "../lib/recall.js";
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
@@ -23,6 +24,7 @@ const ENDPOINTS = [
   "/health",
   "/info",
   "/search?q=…",
+  "/recall?q=…",
   "/tool-calls?q=…",
   "/recent",
   "/list",
@@ -34,6 +36,12 @@ const ENDPOINTS = [
 function intParam(url: URL, name: string, fallback: number): number {
   const v = parseInt(url.searchParams.get(name) ?? "", 10);
   return Number.isFinite(v) ? v : fallback;
+}
+
+function booleanParam(url: URL, name: string, fallback: boolean): boolean {
+  const raw = url.searchParams.get(name);
+  if (raw == null) return fallback;
+  return !["0", "false", "no", "off"].includes(raw.toLowerCase());
 }
 
 export function createSessionsServer(options: {
@@ -84,11 +92,26 @@ export function createSessionsServer(options: {
           return json({ ok: true, query: q, count: results.length, results });
         }
 
+        if (url.pathname === "/recall") {
+          const q = url.searchParams.get("q");
+          if (!q) return json({ ok: false, error: "missing query param 'q'" }, 400);
+          const result = await recallSessions(q, {
+            source: url.searchParams.get("source") ?? undefined,
+            project_path: url.searchParams.get("project") ?? undefined,
+            machine: url.searchParams.get("machine") ?? undefined,
+            limit: intParam(url, "limit", 10),
+            semantic: booleanParam(url, "semantic", true),
+          });
+          return json({ ok: true, ...result });
+        }
+
         if (url.pathname === "/tool-calls") {
           const q = url.searchParams.get("q");
           if (!q) return json({ ok: false, error: "missing query param 'q'" }, 400);
           const results = searchToolCalls(q, {
             source: url.searchParams.get("source") ?? undefined,
+            project_path: url.searchParams.get("project") ?? undefined,
+            machine: url.searchParams.get("machine") ?? undefined,
             limit: intParam(url, "limit", 20),
           });
           return json({ ok: true, query: q, count: results.length, results });

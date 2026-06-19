@@ -5,5 +5,6 @@ dist/
 *.db-shm
 .secrets/
 .connect/
+.hasna/
 .env
 .env.local

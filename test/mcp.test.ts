@@ -3,8 +3,8 @@ import { join } from "path";
 
 const repoRoot = join(import.meta.dir, "..");
 
-async function listTools(): Promise<string[]> {
-  const proc = Bun.spawn(["bun", "run", "src/mcp/index.ts"], {
+async function listMcpNames(method: string, resultKey: "tools" | "resources" | "prompts"): Promise<string[]> {
+  const proc = Bun.spawn(["bun", "run", "src/mcp/index.ts", "--stdio"], {
     cwd: repoRoot,
     stdin: "pipe",
     stdout: "pipe",
@@ -16,13 +16,13 @@ async function listTools(): Promise<string[]> {
   const send = (obj: unknown) => proc.stdin.write(enc.encode(JSON.stringify(obj) + "\n"));
   send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
   send({ jsonrpc: "2.0", method: "notifications/initialized" });
-  send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+  send({ jsonrpc: "2.0", id: 2, method });
   await proc.stdin.flush();
 
   const reader = proc.stdout.getReader();
   const dec = new TextDecoder();
   let buf = "";
-  let tools: string[] = [];
+  let names: string[] = [];
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
     const { value, done } = await reader.read();
@@ -35,17 +35,21 @@ async function listTools(): Promise<string[]> {
       if (!line.trim()) continue;
       try {
         const msg = JSON.parse(line);
-        if (msg.id === 2 && msg.result?.tools) {
-          tools = (msg.result.tools as { name: string }[]).map((t) => t.name);
+        if (msg.id === 2 && msg.result?.[resultKey]) {
+          names = (msg.result[resultKey] as { name: string }[]).map((t) => t.name);
         }
       } catch {
         // partial / non-JSON line
       }
     }
-    if (tools.length) break;
+    if (names.length) break;
   }
   proc.kill();
-  return tools;
+  return names;
+}
+
+async function listTools(): Promise<string[]> {
+  return listMcpNames("tools/list", "tools");
 }
 
 describe("sessions MCP server", () => {
@@ -53,6 +57,7 @@ describe("sessions MCP server", () => {
     const tools = await listTools();
     expect(tools).toContain("search_sessions");
     expect(tools).toContain("search_tool_calls");
+    expect(tools).toContain("recall_session");
     expect(tools).toContain("recent_sessions");
     expect(tools).toContain("list_sessions");
     expect(tools).toContain("get_session");
@@ -65,5 +70,14 @@ describe("sessions MCP server", () => {
     // Preserved from the original stub
     expect(tools).toContain("send_feedback");
     expect(tools).toContain("register_agent");
+  }, 15000);
+
+  it("registers session resources and prompts", async () => {
+    const resources = await listMcpNames("resources/list", "resources");
+    expect(resources).toContain("sessions_stats");
+    expect(resources).toContain("recent_sessions");
+
+    const prompts = await listMcpNames("prompts/list", "prompts");
+    expect(prompts).toContain("recall_coding_session");
   }, 15000);
 });

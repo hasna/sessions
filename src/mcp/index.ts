@@ -4,10 +4,11 @@
  * Provides indexed search/ingest tools, friendly-name registry tools, and cross-adapter import.
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { SqliteAdapter as Database, registerCloudTools } from "@hasna/cloud";
+import { registerCloudTools } from "@hasna/cloud";
+import { SqliteAdapter as Database } from "../db/sqlite-adapter.js";
 import { existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -23,9 +24,11 @@ import {
 } from "../db/sessions.js";
 import { ingestAll, ingestSource } from "../lib/ingest/index.js";
 import { getIngestionStats } from "../db/ingestion.js";
+import { listMachines } from "../db/machines.js";
 import { embedSessions } from "../lib/embeddings.js";
 import { semanticSearch, hybridSearch } from "../lib/vector-search.js";
 import { listEntities, relatedSessions, sessionGraph } from "../lib/graph.js";
+import { recallSessions } from "../lib/recall.js";
 import {
   buildClaudeResumeCommand,
   findSession,
@@ -39,6 +42,7 @@ import {
 import { listAdapters, getAdapter } from "../lib/adapters/index.js";
 import type { CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
+import { registerSessionsStorageTools } from "./storage-tools.js";
 
 const packageInfo = getPackageInfo();
 
@@ -59,7 +63,7 @@ MCP server for ${packageInfo.name}
 Options:
   -V, --version  output the version number
   -h, --help     display help for command
-  --http         run Streamable HTTP transport on 127.0.0.1 (default port 8835)
+  --http         run Streamable HTTP transport on 127.0.0.1 (default port 8877)
   --port <n>     HTTP port (--http or MCP_HTTP=1)
 
 Runs a stdio MCP server with session discovery, resume, search, stats, and feedback tools.`);
@@ -80,6 +84,80 @@ const _agentReg = new Map<string, { id: string; name: string; last_seen_at: stri
 
 export function buildServer(): McpServer {
   const server = new McpServer({ name: "open-sessions", version: packageInfo.version });
+
+function jsonResource(uri: URL, value: unknown) {
+  return {
+    contents: [
+      {
+        uri: uri.href,
+        mimeType: "application/json",
+        text: JSON.stringify(value, null, 2),
+      },
+    ],
+  };
+}
+
+server.registerResource(
+  "sessions_stats",
+  "sessions://stats",
+  {
+    title: "Session Index Statistics",
+    description: "Current ingestion, project, and machine statistics for the local sessions index.",
+    mimeType: "application/json",
+  },
+  async (uri) => jsonResource(uri, { ingestion: getIngestionStats(), projects: getProjectStats().slice(0, 30), machines: listMachines() })
+);
+
+server.registerResource(
+  "recent_sessions",
+  "sessions://recent",
+  {
+    title: "Recent Sessions",
+    description: "Most recently active indexed sessions.",
+    mimeType: "application/json",
+  },
+  async (uri) => jsonResource(uri, { sessions: getRecentSessions(20) })
+);
+
+server.registerResource(
+  "session_detail",
+  new ResourceTemplate("sessions://session/{id}", { list: undefined }),
+  {
+    title: "Session Detail",
+    description: "Indexed session metadata, messages, and tool calls by exact ID or unique prefix.",
+    mimeType: "application/json",
+  },
+  async (uri, variables) => {
+    const id = String(variables.id ?? "");
+    const session = getSessionByPrefix(id);
+    if (!session) return jsonResource(uri, { ok: false, error: `session not found: ${id}` });
+    return jsonResource(uri, { ok: true, session, messages: getMessages(session.id), tool_calls: getToolCalls(session.id) });
+  }
+);
+
+server.registerPrompt(
+  "recall_coding_session",
+  {
+    title: "Recall Coding Session",
+    description: "Build a prompt that asks an agent to recall the most relevant prior coding session with evidence.",
+    argsSchema: {
+      query: z.string().describe("What to recall, e.g. 'aws deployment socializer.co'"),
+      limit: z.string().optional().describe("Maximum number of sessions to inspect"),
+    },
+  },
+  async (args: { query: string; limit?: string }) => ({
+    description: "Use open-sessions recall to find the best prior thread.",
+    messages: [
+      {
+        role: "user" as const,
+        content: {
+          type: "text" as const,
+          text: `Use the open-sessions MCP tools to recall prior coding work for this query: ${args.query}\n\nCall recall_session with limit ${args.limit ?? "5"}, inspect the evidence snippets and resume metadata, and answer with the most specific session IDs, project paths, and why each result is relevant.`,
+        },
+      },
+    ],
+  })
+);
 
 // ─── Agent Tools ────────────────────────────────────────────────────────────
 
@@ -171,6 +249,32 @@ server.tool(
 );
 
 server.tool(
+  "recall_session",
+  "High-level recall for coding threads. Combines FTS, optional semantic search, tool calls, graph context, touched files, evidence snippets, and resume metadata.",
+  {
+    query: z.string().describe("Natural-language recall query, e.g. 'find the thread where we implemented stripe webhook'"),
+    source: z.string().optional().describe("Filter by provider: claude, codex, gemini"),
+    project_path: z.string().optional().describe("Filter by project path"),
+    machine: z.string().optional().describe("Filter by machine"),
+    limit: z.number().optional().describe("Max results (default 10)"),
+    semantic: z.boolean().optional().describe("Set false to disable semantic/vector recall"),
+  },
+  async (a: { query: string; source?: string; project_path?: string; machine?: string; limit?: number; semantic?: boolean }) => {
+    try {
+      return ok(await recallSessions(a.query, {
+        source: a.source,
+        project_path: a.project_path,
+        machine: a.machine,
+        limit: a.limit,
+        semantic: a.semantic,
+      }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
   "recent_sessions",
   "List the most recently active sessions across all providers — what's been happening lately.",
   { limit: z.number().optional().describe("Max results (default 20)") },
@@ -207,7 +311,6 @@ server.tool(
   {},
   async () => {
     try {
-      const { listMachines } = await import("../db/machines.js");
       return ok(listMachines());
     } catch (e) {
       return fail(e);
@@ -639,6 +742,8 @@ server.tool(
     });
   }
 );
+
+registerSessionsStorageTools(server);
 
   return server;
 }

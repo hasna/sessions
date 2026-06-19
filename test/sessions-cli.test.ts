@@ -128,7 +128,7 @@ describe("sessions CLI registry flows", () => {
     expect(historyPayload).toHaveLength(1);
     expect(historyPayload[0].friendlyName).toBe("sample-project-00001");
 
-    const searchResult = runCli(["search", "hello", "--json"]);
+    const searchResult = runCli(["transcript-search", "hello", "--json"]);
     const searchPayload = parseJsonOutput(searchResult);
     expect(searchPayload).toHaveLength(1);
     expect(searchPayload[0].session.sessionId).toBe("session-001");

@@ -2,6 +2,8 @@ import { watch, existsSync, type FSWatcher } from "node:fs";
 import { listParsers, ingestSource, type IngestResult } from "./ingest/index.js";
 
 export interface WatchOptions {
+  /** Restrict watching to these provider sources. Defaults to every parser. */
+  sources?: string[];
   /** How long to wait after the last change before ingesting (per source). Default 2000ms. */
   debounceMs?: number;
   /**
@@ -22,6 +24,42 @@ export interface Watcher {
   stop(): void;
   /** Source providers currently being watched. */
   readonly sources: string[];
+  /** Existing provider roots being watched. */
+  readonly roots: WatchRootStatus[];
+  readonly debounceMs: number;
+  readonly pollMs: number;
+}
+
+export interface WatchRootStatus {
+  source: string;
+  root: string;
+  exists: boolean;
+}
+
+export interface WatchStatus {
+  sources: string[];
+  roots: WatchRootStatus[];
+  debounceMs: number;
+  pollMs: number;
+}
+
+export function getWatchStatus(opts: WatchOptions = {}): WatchStatus {
+  const debounceMs = opts.debounceMs ?? 2000;
+  const pollMs = opts.pollMs ?? 10000;
+  const allowedSources = opts.sources ? new Set(opts.sources) : null;
+  const roots: WatchRootStatus[] = [];
+  const sources = new Set<string>();
+
+  for (const parser of listParsers()) {
+    if (allowedSources && !allowedSources.has(parser.source)) continue;
+    for (const root of parser.sessionRoots()) {
+      const rootStatus = { source: parser.source, root, exists: existsSync(root) };
+      roots.push(rootStatus);
+      if (rootStatus.exists) sources.add(parser.source);
+    }
+  }
+
+  return { sources: [...sources], roots, debounceMs, pollMs };
 }
 
 /**
@@ -30,8 +68,8 @@ export interface Watcher {
  * continuously fresh for real-time queries.
  */
 export function startWatch(opts: WatchOptions = {}): Watcher {
-  const debounceMs = opts.debounceMs ?? 2000;
-  const pollMs = opts.pollMs ?? 10000;
+  const status = getWatchStatus(opts);
+  const { debounceMs, pollMs } = status;
   const watchers: FSWatcher[] = [];
   const pending = new Map<string, ReturnType<typeof setTimeout>>();
   const sources: string[] = [];
@@ -58,8 +96,8 @@ export function startWatch(opts: WatchOptions = {}): Watcher {
 
   for (const parser of listParsers()) {
     let watching = false;
-    for (const root of parser.sessionRoots()) {
-      if (!existsSync(root)) continue;
+    for (const { source, root, exists } of status.roots) {
+      if (source !== parser.source || !exists) continue;
       try {
         watchers.push(watch(root, { recursive: true }, () => scheduleIngest(parser.source)));
         watching = true;
@@ -80,6 +118,9 @@ export function startWatch(opts: WatchOptions = {}): Watcher {
 
   return {
     sources,
+    roots: status.roots.filter((root) => root.exists),
+    debounceMs,
+    pollMs,
     stop() {
       for (const w of watchers) w.close();
       for (const t of pending.values()) clearTimeout(t);

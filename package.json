@@ -1,6 +1,6 @@
 {
   "name": "@hasna/sessions",
-  "version": "0.11.27",
+  "version": "0.11.32",
   "description": "Search and sync AI coding sessions (Claude, Codex, Gemini) — unified SQLite index with full-text search",
   "type": "module",
   "main": "dist/index.js",
@@ -14,6 +14,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage.d.ts",
+      "import": "./dist/storage.js"
     }
   },
   "files": [
@@ -22,11 +26,11 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun run build:cli && bun run build:mcp && bun run build:server && bun run build:lib && tsc --emitDeclarationOnly --outDir dist",
+    "build": "rm -rf dist && bun run build:cli && bun run build:mcp && bun run build:server && bun run build:lib && tsc --emitDeclarationOnly --outDir dist",
     "build:cli": "bun build src/cli/index.tsx --outdir dist/cli --target bun --packages external",
     "build:mcp": "bun build src/mcp/index.ts --outdir dist/mcp --target bun --packages external",
     "build:server": "bun build src/server/index.ts --outdir dist/server --target bun --packages external",
-    "build:lib": "bun build src/index.ts --outdir dist --target bun --packages external",
+    "build:lib": "bun build src/index.ts src/storage.ts --outdir dist --target bun --packages external",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev:cli": "bun run src/cli/index.tsx",
@@ -47,18 +51,20 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@hasna/cloud": "0.1.24",
+    "@hasna/events": "^0.1.7",
     "@inkjs/ui": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "chalk": "^5.6.2",
     "commander": "^13.0.0",
     "ink": "^6.8.0",
     "openai": "^6.32.0",
+    "pg": "^8.13.3",
     "react": "^19.2.4",
-    "zod": "^4.3.6",
-    "@hasna/events": "^0.1.7"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/pg": "^8.11.11",
     "typescript": "^5.7.0"
   },
   "publishConfig": {

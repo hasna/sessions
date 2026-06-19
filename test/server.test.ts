@@ -62,7 +62,7 @@ describe("query endpoints", () => {
     delete process.env.SESSIONS_DB_PATH;
   });
 
-  it("serves /search, /recent, /sessions/:id, /stats", async () => {
+  it("serves /search, /recall, /recent, /sessions/:id, /stats", async () => {
     const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
     try {
       const base = `http://127.0.0.1:${server.port}`;
@@ -71,6 +71,19 @@ describe("query endpoints", () => {
       expect(search.ok).toBe(true);
       expect(search.count).toBe(1);
       expect(search.results[0].session_id).toBe(sessionId);
+
+      const recall = await (await fetch(`${base}/recall?q=kubernetes`)).json();
+      expect(recall.ok).toBe(true);
+      expect(recall.count).toBe(1);
+      expect(recall.results[0].session_id).toBe(sessionId);
+      expect(recall.results[0].resume.shell_command).toBe("claude --resume srv-1");
+
+      const toolCalls = await (await fetch(`${base}/tool-calls?q=kubectl&project=${encodeURIComponent("/p/infra")}`)).json();
+      expect(toolCalls.ok).toBe(true);
+      expect(toolCalls.count).toBe(1);
+      const filteredToolCalls = await (await fetch(`${base}/tool-calls?q=kubectl&project=${encodeURIComponent("/definitely/nope")}`)).json();
+      expect(filteredToolCalls.ok).toBe(true);
+      expect(filteredToolCalls.count).toBe(0);
 
       const recent = await (await fetch(`${base}/recent`)).json();
       expect(recent.sessions).toHaveLength(1);

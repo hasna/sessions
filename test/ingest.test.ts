@@ -38,6 +38,7 @@ beforeEach(() => {
   process.env.CODEX_PATH = join(root, "codex");
   process.env.GEMINI_PATH = join(root, "gemini");
 
+  process.env.HASNA_SESSIONS_DIR = join(root, "sessions");
   process.env.SESSIONS_DB_PATH = ":memory:";
   resetDatabase();
   getDatabase();
@@ -49,6 +50,7 @@ afterEach(() => {
   delete process.env.CLAUDE_PATH;
   delete process.env.CODEX_PATH;
   delete process.env.GEMINI_PATH;
+  delete process.env.HASNA_SESSIONS_DIR;
   delete process.env.SESSIONS_DB_PATH;
 });
 
@@ -86,6 +88,14 @@ describe("ingestSource", () => {
 
   it("throws for an unknown source", () => {
     expect(() => ingestSource("nope")).toThrow(/No parser registered/);
+  });
+
+  it("fails clearly when another ingest lock is active", () => {
+    const lockDir = join(root, "sessions", "ingest.lock");
+    mkdirSync(lockDir, { recursive: true });
+    writeFileSync(join(lockDir, "owner.json"), JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
+
+    expect(() => ingestSource("claude")).toThrow(/another sessions ingest is already running/);
   });
 });
 

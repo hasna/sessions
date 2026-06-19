@@ -7,7 +7,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 
 /** Encode a filesystem path to a Claude Code project directory name. */
 export function encodePath(fsPath: string): string {
@@ -44,6 +44,12 @@ export function getCodexSessionsDir(): string {
 
 /** Get the sessions base directory, with auto-migration from legacy path. */
 export function getSessionsDir(): string {
+  if (process.env.HASNA_SESSIONS_DIR) {
+    const dir = process.env.HASNA_SESSIONS_DIR;
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
   const home = homedir();
   const newDir = join(home, ".hasna", "sessions");
   const legacyDir = join(home, ".sessions");
@@ -58,10 +64,22 @@ export function getSessionsDir(): string {
   return newDir;
 }
 
+function ensureExplicitDbPath(dbPath: string): string {
+  if (dbPath === ":memory:") return dbPath;
+  const dir = dirname(dbPath);
+  if (dir && dir !== "." && !existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dbPath;
+}
+
 /** Get the sessions database path. */
 export function getSessionsDbPath(): string {
-  if (process.env.HASNA_SESSIONS_DB_PATH) return process.env.HASNA_SESSIONS_DB_PATH;
-  if (process.env.SESSIONS_DB_PATH) return process.env.SESSIONS_DB_PATH;
+  if (process.env.HASNA_SESSIONS_DB_PATH) return ensureExplicitDbPath(process.env.HASNA_SESSIONS_DB_PATH);
+  if (process.env.SESSIONS_DB_PATH) return ensureExplicitDbPath(process.env.SESSIONS_DB_PATH);
+
+  if (process.env.HASNA_SESSIONS_DIR) {
+    const dir = getSessionsDir();
+    return join(dir, "sessions.db");
+  }
 
   const home = homedir();
   const newDbPath = join(home, ".hasna", "sessions", "sessions.db");

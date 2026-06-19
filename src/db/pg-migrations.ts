@@ -1,5 +1,5 @@
 /**
- * PostgreSQL migrations for open-sessions cloud sync.
+ * PostgreSQL migrations for open-sessions storage sync.
  *
  * Equivalent to the SQLite schema in database.ts, translated for PostgreSQL.
  */

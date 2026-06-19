@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { getDatabase } from "./database.js";
+import { getDatabase, rebuildFtsTables } from "./database.js";
 import { recomputeMachineCounts } from "./machines.js";
 import { updateIngestionStats } from "./ingestion.js";
 import { SESSION_SOURCES } from "../types/index.js";
@@ -58,6 +58,9 @@ export function mergeFromDb(path: string): MergeResult {
       t: countRows(db, "tool_calls"),
       e: countRows(db, "embeddings"),
     };
+    if (after.s !== before.s || after.m !== before.m || after.t !== before.t) {
+      rebuildFtsTables(db);
+    }
     recomputeMachineCounts();
     for (const source of SESSION_SOURCES) updateIngestionStats(source);
     return {

@@ -1,9 +1,13 @@
-import { describe, it, expect } from "bun:test";
+import { afterEach, describe, it, expect } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   encodePath,
   decodePath,
   findMatchingProjectDirs,
   computeRelocatedDir,
+  getSessionsDbPath,
 } from "../src/lib/paths";
 
 describe("encodePath", () => {
@@ -99,5 +103,28 @@ describe("computeRelocatedDir", () => {
         "/Users/john"
       )
     ).toBe("-Users-john-Workspace-project");
+  });
+});
+
+
+describe("getSessionsDbPath", () => {
+  let root: string | null = null;
+  let previous: string | undefined;
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.SESSIONS_DB_PATH;
+    else process.env.SESSIONS_DB_PATH = previous;
+    if (root) rmSync(root, { recursive: true, force: true });
+    root = null;
+  });
+
+  it("creates parent directories for explicit database paths", () => {
+    previous = process.env.SESSIONS_DB_PATH;
+    root = mkdtempSync(join(tmpdir(), "open-sessions-db-path-"));
+    const dbPath = join(root, "missing", "nested", "sessions.db");
+    process.env.SESSIONS_DB_PATH = dbPath;
+
+    expect(getSessionsDbPath()).toBe(dbPath);
+    expect(existsSync(join(root, "missing", "nested"))).toBe(true);
   });
 });

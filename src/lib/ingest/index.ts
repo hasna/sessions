@@ -1,4 +1,5 @@
-import { statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { registerParser, getParser, listParsers } from "./registry.js";
 import { ClaudeParser } from "./claude.js";
 import { CodexParser } from "./codex.js";
@@ -6,6 +7,7 @@ import { GeminiParser } from "./gemini.js";
 import { saveParsedSession } from "../../db/sessions.js";
 import { getFileState, setFileState, updateIngestionStats } from "../../db/ingestion.js";
 import { registerMachine, recomputeMachineCounts } from "../../db/machines.js";
+import { getSessionsDir } from "../paths.js";
 
 // Register the built-in parsers on import.
 registerParser(new ClaudeParser());
@@ -33,8 +35,82 @@ export interface IngestOptions {
   onProgress?: (message: string) => void;
 }
 
-/** Ingest all session files for a single provider, skipping unchanged files. */
-export function ingestSource(source: string, opts: IngestOptions = {}): IngestResult {
+const INGEST_LOCK_DIR = "ingest.lock";
+const STALE_LOCK_MS = 6 * 60 * 60 * 1000;
+
+interface IngestLockInfo {
+  pid: number;
+  started_at: string;
+}
+
+function ingestLockPath(): string {
+  return join(getSessionsDir(), INGEST_LOCK_DIR);
+}
+
+function pidIsRunning(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function readLockInfo(lockPath: string): IngestLockInfo | null {
+  try {
+    return JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf-8")) as IngestLockInfo;
+  } catch {
+    return null;
+  }
+}
+
+function lockLooksStale(lockPath: string, info: IngestLockInfo | null): boolean {
+  if (info?.pid && pidIsRunning(info.pid)) return false;
+  try {
+    const age = Date.now() - statSync(lockPath).mtimeMs;
+    return age > STALE_LOCK_MS || !info?.pid || !pidIsRunning(info.pid);
+  } catch {
+    return true;
+  }
+}
+
+function acquireIngestLock(): () => void {
+  const lockPath = ingestLockPath();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      mkdirSync(lockPath);
+      writeFileSync(
+        join(lockPath, "owner.json"),
+        JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }, null, 2),
+        "utf-8"
+      );
+      return () => rmSync(lockPath, { recursive: true, force: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw error;
+      const info = readLockInfo(lockPath);
+      if (lockLooksStale(lockPath, info)) {
+        rmSync(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      const owner = info?.pid ? `pid ${info.pid}` : "another process";
+      throw new Error(`another sessions ingest is already running (${owner}); wait for it to finish before starting another ingest`);
+    }
+  }
+  throw new Error("could not acquire sessions ingest lock");
+}
+
+function withIngestLock<T>(fn: () => T): T {
+  const release = acquireIngestLock();
+  try {
+    return fn();
+  } finally {
+    release();
+  }
+}
+
+function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestResult {
   const parser = getParser(source);
   if (!parser) throw new Error(`No parser registered for source: ${source}`);
 
@@ -84,8 +160,13 @@ export function ingestSource(source: string, opts: IngestOptions = {}): IngestRe
   return result;
 }
 
+/** Ingest all session files for a single provider, skipping unchanged files. */
+export function ingestSource(source: string, opts: IngestOptions = {}): IngestResult {
+  return withIngestLock(() => ingestSourceUnlocked(source, opts));
+}
+
 /** Ingest every registered provider (or a subset). */
 export function ingestAll(opts: IngestOptions & { sources?: string[] } = {}): IngestResult[] {
   const sources = opts.sources ?? listParsers().map((p) => p.source);
-  return sources.map((s) => ingestSource(s, opts));
+  return withIngestLock(() => sources.map((s) => ingestSourceUnlocked(s, opts)));
 }

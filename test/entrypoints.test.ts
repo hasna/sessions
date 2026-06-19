@@ -1,15 +1,19 @@
 import { describe, expect, it } from "bun:test";
+import { randomUUID } from "crypto";
+import { tmpdir } from "os";
 import { join } from "path";
 import { getPackageVersion } from "../src/lib/package";
 
 const repoRoot = join(import.meta.dir, "..");
 
 function runBun(args: string[]) {
+  const eventsDir = join(tmpdir(), `sessions-events-${randomUUID()}`);
   return Bun.spawnSync({
     cmd: ["bun", ...args],
     cwd: repoRoot,
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env, HASNA_EVENTS_DIR: eventsDir },
   });
 }
 
@@ -52,7 +56,30 @@ describe("entrypoint help and version", () => {
     expect(stderr).not.toContain("already have command");
     expect(stdout).toContain("watch");
     expect(stdout).toContain("ingest-watch");
+    expect(stdout).toContain("watch-ingest");
     expect(stdout).toContain("list");
     expect(stdout).toContain("list-indexed");
+    expect(stdout).toContain("indexed-list");
+    expect(stdout).toContain("events");
+    expect(stdout).toContain("webhooks");
+  });
+
+  it("prints CLI help with shared events and webhooks commands", () => {
+    const result = runBun(["run", "src/cli/index.tsx", "--help"]);
+    const output = Buffer.from(result.stdout).toString("utf-8");
+
+    expect(result.exitCode).toBe(0);
+    expect(output).toContain("events");
+    expect(output).toContain("webhooks");
+  });
+
+  it("prints watch-ingest help with daemon controls", () => {
+    const result = runBun(["run", "src/cli/index.tsx", "watch-ingest", "--help"]);
+    const output = Buffer.from(result.stdout).toString("utf-8");
+
+    expect(result.exitCode).toBe(0);
+    expect(output).toContain("--source");
+    expect(output).toContain("--no-initial");
+    expect(output).toContain("--poll");
   });
 });

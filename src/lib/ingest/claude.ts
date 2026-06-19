@@ -40,8 +40,13 @@ export class ClaudeParser implements SessionParser {
     const lines = raw.split("\n").filter((l) => l.trim());
     if (lines.length === 0) return [];
 
+    // Claude message UUIDs are not globally unique across resumed sessions and
+    // subagent files. Use the filename-backed session id as a namespace for the
+    // internal DB primary key while preserving the raw UUID in source_id.
+    const sourceId = basename(filePath).replace(/\.jsonl$/, "");
     const messages: MessageInsert[] = [];
     const toolCalls: ToolCallInsert[] = [];
+    const seenMessageIds = new Map<string, number>();
     let sessionId: string | undefined;
     let cwd: string | undefined;
     let gitBranch: string | undefined;
@@ -98,12 +103,18 @@ export class ClaudeParser implements SessionParser {
         title = content.replace(/\s+/g, " ").slice(0, 120);
       }
 
-      const messageId = (typeof o.uuid === "string" ? o.uuid : undefined) ?? crypto.randomUUID();
+      const rawMessageId = typeof o.uuid === "string" ? o.uuid : null;
+      const rawCount = rawMessageId ? seenMessageIds.get(rawMessageId) ?? 0 : 0;
+      if (rawMessageId) seenMessageIds.set(rawMessageId, rawCount + 1);
+      const sourceMessageId = rawMessageId && rawCount > 0 ? `${rawMessageId}:${rawCount}` : rawMessageId;
+      const messageId = sourceMessageId
+        ? `${sourceId}:${sourceMessageId}`
+        : `${sourceId}:${seq}:${crypto.randomUUID()}`;
       messages.push({
         id: messageId,
         session_id: "",
-        source_id: typeof o.uuid === "string" ? o.uuid : null,
-        parent_message_id: typeof o.parentUuid === "string" ? o.parentUuid : null,
+        source_id: sourceMessageId,
+        parent_message_id: typeof o.parentUuid === "string" ? `${sourceId}:${o.parentUuid}` : null,
         role,
         content,
         model: msgModel ?? null,
@@ -141,7 +152,6 @@ export class ClaudeParser implements SessionParser {
     // -session, and the in-file `sessionId` field is unreliable as a key — many
     // files (sidechains/resumes/summaries) reference a shared sessionId, which
     // would collapse distinct sessions on upsert. The filename is unique.
-    const sourceId = basename(filePath).replace(/\.jsonl$/, "");
     const mtime = (() => {
       try {
         return statSync(filePath).mtime.toISOString();

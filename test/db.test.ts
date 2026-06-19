@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { SqliteAdapter } from "@hasna/cloud";
+import { SqliteAdapter } from "../src/db/sqlite-adapter.js";
 import { getDatabase, resetDatabase, closeDatabase, initSchema } from "../src/db/database.js";
 import {
   upsertSession,
@@ -141,6 +141,20 @@ describe("saveParsedSession", () => {
       .prepare("SELECT session_id FROM messages_fts WHERE messages_fts MATCH ?")
       .get("deploy") as { session_id: string } | undefined;
     expect(hit?.session_id).toBe(s.id);
+  });
+
+  it("repairs missing FTS rowid refs from existing FTS rows on schema init", () => {
+    saveParsedSession(parsed);
+    const db = getDatabase();
+    db.exec("DELETE FROM messages_fts_refs");
+    db.exec("DELETE FROM tool_calls_fts_refs");
+
+    initSchema(db);
+
+    const messageRefs = db.prepare("SELECT COUNT(*) AS c FROM messages_fts_refs").get() as { c: number };
+    const toolRefs = db.prepare("SELECT COUNT(*) AS c FROM tool_calls_fts_refs").get() as { c: number };
+    expect(messageRefs.c).toBe(2);
+    expect(toolRefs.c).toBe(1);
   });
 });
 

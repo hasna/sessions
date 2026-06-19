@@ -9,6 +9,7 @@
 
 import { Command } from "commander";
 import { registerEventsCommands } from "@hasna/events/commander";
+import { registerStorageCommands } from "./storage.js";
 import {
   existsSync,
   mkdirSync,
@@ -55,6 +56,26 @@ function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
+function parsePositiveIntOption(raw: string | undefined, fallback: number, name: string): number {
+  if (raw == null) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    console.error(`Error: ${name} must be a positive integer`);
+    process.exit(1);
+  }
+  return value;
+}
+
+function parseNonNegativeIntOption(raw: string | undefined, fallback: number, name: string): number {
+  if (raw == null) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    console.error(`Error: ${name} must be a non-negative integer`);
+    process.exit(1);
+  }
+  return value;
+}
+
 async function pickSessionFromList() {
   const sessions = listSessions().slice(0, 20);
   if (sessions.length === 0) {
@@ -90,6 +111,7 @@ program
   .version(getPackageVersion())
   .description("Universal AI coding session search and management");
 
+registerStorageCommands(program);
 registerEventsCommands(program, { source: "sessions" });
 
 // ─── relocate ──────────────────────────────────────────────────────────────
@@ -619,17 +641,14 @@ program
   });
 
 program
-  .command("search <query>")
-  .description("Search session transcripts by text")
+  .command("transcript-search <query>")
+  .alias("registry-search")
+  .description("Search raw Claude transcript files by text")
   .option("-p, --project <value>", "Filter by project slug or path")
   .option("--limit <count>", "Maximum matches to return", "20")
   .option("--json", "Output as JSON")
   .action((query: string, opts: any) => {
-    const limit = Number.parseInt(opts.limit, 10);
-    if (!Number.isFinite(limit) || limit <= 0) {
-      console.error("Error: --limit must be a positive integer");
-      process.exit(1);
-    }
+    const limit = parsePositiveIntOption(opts.limit, 20, "--limit");
 
     const matches = searchSessions(query, {
       project: opts.project,
@@ -779,7 +798,7 @@ program
 
 program
   .command("sync")
-  .description("Ingest local sessions, then sync to/from the cloud so every machine shares one index")
+  .description("Ingest local sessions, then sync to/from storage so every machine shares one index")
   .option("--no-ingest", "Skip the local ingest before syncing")
   .option("--no-pull", "Push only — don't pull other machines' sessions")
   .option("--json", "Output as JSON")
@@ -787,41 +806,47 @@ program
     const { ingestAll } = await import("../lib/ingest/index.js");
     const { recomputeMachineCounts } = await import("../db/machines.js");
 
-    const runCloud = (args: string[]) =>
-      new Promise<{ code: number; output: string }>((resolve) => {
-        try {
-          const p = Bun.spawn(["cloud", ...args], { stdout: "pipe", stderr: "pipe" });
-          (async () => {
-            const out = await new Response(p.stdout).text();
-            const err = await new Response(p.stderr).text();
-            const code = await p.exited;
-            resolve({ code, output: (out + err).trim() });
-          })();
-        } catch (e) {
-          resolve({ code: 127, output: `failed to run cloud: ${(e as Error).message}` });
-        }
-      });
+    const runStorage = async (direction: "push" | "pull") => {
+      try {
+        const { pushStorageChanges, pullStorageChanges } = await import("../db/storage-sync.js");
+        const results = direction === "push"
+          ? await pushStorageChanges()
+          : await pullStorageChanges();
+        const errors = results.flatMap((result) => result.errors);
+        return { code: errors.length > 0 ? 1 : 0, output: errors.join("\n"), results };
+      } catch (e) {
+        return { code: 1, output: `failed to run storage ${direction}: ${(e as Error).message}` };
+      }
+    };
 
     const result: Record<string, unknown> = {};
     if (opts.ingest !== false) {
       result.ingest = ingestAll();
       if (!opts.json) for (const r of (result.ingest as { source: string; sessions: number }[])) console.log(`ingest ${r.source}: +${r.sessions} sessions`);
     }
-    if (!opts.json) console.log("pushing to cloud…");
-    result.push = await runCloud(["sync", "push", "--service", "sessions"]);
+    if (!opts.json) console.log("pushing to storage...");
+    result.push = await runStorage("push");
     if (opts.pull !== false) {
-      if (!opts.json) console.log("pulling from cloud…");
-      result.pull = await runCloud(["sync", "pull", "--service", "sessions"]);
+      if (!opts.json) console.log("pulling from storage...");
+      result.pull = await runStorage("pull");
     }
     recomputeMachineCounts();
 
-    if (opts.json) return void console.log(JSON.stringify(result, null, 2));
     const push = result.push as { code: number };
+    const pull = result.pull as { code: number } | undefined;
+    const failed = push.code !== 0 || (pull?.code ?? 0) !== 0;
+
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+      if (failed) process.exit(1);
+      return;
+    }
+
     console.log(`push: ${push.code === 0 ? "ok" : `FAILED (exit ${push.code})`}`);
-    if (result.pull) {
-      const pull = result.pull as { code: number };
+    if (pull) {
       console.log(`pull: ${pull.code === 0 ? "ok" : `FAILED (exit ${pull.code})`}`);
     }
+    if (failed) process.exit(1);
     console.log("Done. Run 'sessions machines' to see contributors.");
   });
 
@@ -843,17 +868,44 @@ program
 
 program
   .command("ingest-watch")
+  .alias("watch-ingest")
   .description("Continuously index new/changed sessions as they happen (Ctrl-C to stop)")
+  .option("-s, --source <source...>", "Only watch one or more providers: claude, codex, gemini")
+  .option("--no-initial", "Skip the startup ingest and only ingest future changes/poll ticks")
   .option("--debounce <ms>", "Debounce window after a change before ingesting", "2000")
-  .action(async (opts: { debounce?: string }) => {
+  .option("--poll <ms>", "Safety-net poll interval; set 0 to disable", "10000")
+  .option("--status", "Print provider watch status and exit")
+  .option("--json", "Output status as JSON with --status")
+  .action(async (opts: { source?: string[]; initial?: boolean; debounce?: string; poll?: string; status?: boolean; json?: boolean }) => {
     const { ingestAll } = await import("../lib/ingest/index.js");
-    const { startWatch } = await import("../lib/watch.js");
-    console.log("Initial ingest…");
-    for (const r of ingestAll()) {
-      console.log(`  ${r.source}: ${r.sessions} sessions (${r.ingested} files, ${r.skipped} unchanged)`);
+    const { getWatchStatus, startWatch } = await import("../lib/watch.js");
+    const sources = opts.source?.length ? opts.source : undefined;
+    const debounceMs = parsePositiveIntOption(opts.debounce, 2000, "--debounce");
+    const pollMs = parseNonNegativeIntOption(opts.poll, 10000, "--poll");
+    if (opts.status) {
+      const status = getWatchStatus({ sources, debounceMs, pollMs });
+      if (opts.json) return void console.log(JSON.stringify(status, null, 2));
+      console.log("watch-ingest status");
+      console.log(`  sources:  ${status.sources.join(", ") || "(no provider dirs found)"}`);
+      console.log(`  debounce: ${status.debounceMs}ms`);
+      console.log(`  poll:     ${status.pollMs}ms`);
+      for (const root of status.roots) {
+        console.log(`  ${root.exists ? "ok " : "miss"} ${root.source.padEnd(7)} ${root.root}`);
+      }
+      return;
+    }
+    if (opts.initial !== false) {
+      console.log("Initial ingest…");
+      for (const r of ingestAll({ sources })) {
+        console.log(`  ${r.source}: ${r.sessions} sessions (${r.ingested} files, ${r.skipped} unchanged)`);
+      }
+    } else {
+      console.log("Initial ingest skipped.");
     }
     const watcher = startWatch({
-      debounceMs: parseInt(opts.debounce ?? "2000", 10) || 2000,
+      sources,
+      debounceMs,
+      pollMs,
       onIngest: (r) => {
         if (r.ingested > 0 || r.errors > 0) {
           console.log(`[${new Date().toLocaleTimeString()}] ${r.source}: +${r.sessions} sessions (${r.ingested} files${r.errors ? `, ${r.errors} errors` : ""})`);
@@ -890,6 +942,7 @@ program
 
 program
   .command("list-indexed")
+  .alias("indexed-list")
   .description("List indexed sessions, optionally filtered")
   .option("-s, --source <source>", "Filter by provider")
   .option("-p, --project <path>", "Filter by project path")
@@ -924,7 +977,9 @@ program
     }
     const messages = getMessages(s.id);
     const tools = getToolCalls(s.id);
-    if (opts.json) return void console.log(JSON.stringify({ session: s, messages, tools }, null, 2));
+    const n = parsePositiveIntOption(opts.messages, 12, "--messages");
+    const previewMessages = messages.slice(0, n);
+    if (opts.json) return void console.log(JSON.stringify({ session: s, messages: previewMessages, tools }, null, 2));
     console.log(`${s.title ?? "(untitled)"}`);
     console.log(`  source:   ${s.source}   model: ${s.model ?? "?"}`);
     console.log(`  project:  ${s.project_name ?? "?"} (${s.project_path ?? "?"})`);
@@ -932,9 +987,8 @@ program
     console.log(`  when:     ${s.started_at ?? "?"} → ${s.ended_at ?? "?"}`);
     console.log(`  counts:   ${s.message_count} messages, ${s.tool_call_count} tool calls, ${s.total_input_tokens + s.total_output_tokens} tokens`);
     console.log(`  id:       ${s.id}`);
-    const n = parseInt(opts.messages ?? "12", 10) || 12;
     console.log("");
-    for (const m of messages.slice(0, n)) {
+    for (const m of previewMessages) {
       console.log(`  [${m.role}] ${(m.content ?? "").replace(/\s+/g, " ").slice(0, 200)}`);
     }
     if (tools.length) console.log(`\n  tools used: ${[...new Set(tools.map((t) => t.tool_name))].join(", ")}`);
@@ -1041,6 +1095,7 @@ program
 
 program
   .command("search-indexed <query>")
+  .aliases(["search", "indexed-search"])
   .description("Full-text search across your indexed AI coding sessions")
   .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
   .option("-p, --project <path>", "Filter by project path")
@@ -1056,7 +1111,7 @@ program
       opts: { source?: string; project?: string; machine?: string; limit?: string; tools?: boolean; semantic?: boolean; hybrid?: boolean; json?: boolean }
     ) => {
       const { search, searchToolCalls } = await import("../lib/search.js");
-      const limit = parseInt(opts.limit ?? "20", 10) || 20;
+      const limit = parsePositiveIntOption(opts.limit, 20, "--limit");
       const o = { limit, source: opts.source, project_path: opts.project, machine: opts.machine };
 
       if (opts.tools) {
@@ -1095,32 +1150,100 @@ program
   );
 
 program
-  .command("ingest")
-  .description("Index AI coding sessions (claude, codex, gemini) into the searchable database")
-  .option("-s, --source <source>", "Only ingest one provider: claude, codex, or gemini")
-  .option("-f, --force", "Re-ingest even files that are unchanged since last run")
-  .option("-v, --verbose", "Print each file as it is ingested")
-  .option("--json", "Output the result as JSON")
-  .action(async (opts: { source?: string; force?: boolean; verbose?: boolean; json?: boolean }) => {
-    const { ingestAll, ingestSource } = await import("../lib/ingest/index.js");
-    const onProgress = opts.verbose ? (m: string) => console.log(m) : undefined;
-    try {
-      const results = opts.source
-        ? [ingestSource(opts.source, { force: opts.force, onProgress })]
-        : ingestAll({ force: opts.force, onProgress });
-      if (opts.json) {
-        console.log(JSON.stringify(results, null, 2));
+  .command("recall <query>")
+  .description("Recall a coding session by natural language, with evidence, touched files, graph context, and resume metadata")
+  .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
+  .option("-p, --project <path>", "Filter by project path")
+  .option("-m, --machine <name>", "Filter by machine")
+  .option("-l, --limit <n>", "Maximum results", "10")
+  .option("--no-semantic", "Disable semantic/vector recall even when embeddings are available")
+  .option("--json", "Output as JSON")
+  .action(
+    async (
+      query: string,
+      opts: { source?: string; project?: string; machine?: string; limit?: string; semantic?: boolean; json?: boolean }
+    ) => {
+      const limit = parsePositiveIntOption(opts.limit, 10, "--limit");
+      const { recallSessions } = await import("../lib/recall.js");
+      const response = await recallSessions(query, {
+        source: opts.source,
+        project_path: opts.project,
+        machine: opts.machine,
+        limit,
+        semantic: opts.semantic,
+      });
+
+      if (opts.json) return void console.log(JSON.stringify(response, null, 2));
+      if (response.results.length === 0) {
+        console.log("No matching sessions found.");
+        if (response.metadata.semantic.reason) {
+          console.log(`semantic: ${response.metadata.semantic.reason}`);
+        }
         return;
       }
-      for (const r of results) {
+
+      for (const result of response.results) {
         console.log(
-          `${r.source}: scanned ${r.scanned}, ingested ${r.ingested}, skipped ${r.skipped}, sessions ${r.sessions}, errors ${r.errors}`
+          `#${result.rank} ${result.source}  ${result.title ?? "(untitled)"}${result.project_name ? `  [${result.project_name}]` : ""}`
         );
+        console.log(`  score: ${result.score}  id: ${result.session_id}  updated: ${result.updated_at ?? "?"}`);
+        console.log(`  reason: ${result.reason}`);
+        for (const evidence of result.evidence.slice(0, 3)) {
+          console.log(`  evidence (${evidence.kind}): ${evidence.snippet.replace(/\s+/g, " ")}`);
+        }
+        if (result.touched_file_paths.length > 0) {
+          console.log(`  files: ${result.touched_file_paths.slice(0, 6).join(", ")}`);
+        }
+        if (result.related_graph_entities.tools.length > 0) {
+          console.log(`  graph: project=${result.related_graph_entities.project ?? "?"} tools=${result.related_graph_entities.tools.slice(0, 6).join(", ")}`);
+        }
+        if (result.resume.available) {
+          console.log(`  resume: ${result.resume.shell_command}`);
+        } else {
+          console.log(`  resume: unavailable (${result.resume.reason})`);
+        }
       }
-    } catch (err) {
-      console.error((err as Error).message);
-      process.exit(1);
+
+      if (response.metadata.semantic.reason) {
+        console.log(`\nsemantic: ${response.metadata.semantic.reason}`);
+      }
     }
-  });
+  );
+
+async function runIngestCommand(opts: { source?: string; force?: boolean; verbose?: boolean; json?: boolean }) {
+  const { ingestAll, ingestSource } = await import("../lib/ingest/index.js");
+  const onProgress = opts.verbose ? (m: string) => console.log(m) : undefined;
+  try {
+    const results = opts.source
+      ? [ingestSource(opts.source, { force: opts.force, onProgress })]
+      : ingestAll({ force: opts.force, onProgress });
+    if (opts.json) {
+      console.log(JSON.stringify(results, null, 2));
+      return;
+    }
+    for (const r of results) {
+      console.log(
+        `${r.source}: scanned ${r.scanned}, ingested ${r.ingested}, skipped ${r.skipped}, sessions ${r.sessions}, errors ${r.errors}`
+      );
+    }
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
+}
+
+function addIngestCommand(name: string, description: string) {
+  program
+    .command(name)
+    .description(description)
+    .option("-s, --source <source>", "Only ingest one provider: claude, codex, or gemini")
+    .option("-f, --force", "Re-ingest even files that are unchanged since last run")
+    .option("-v, --verbose", "Print each file as it is ingested")
+    .option("--json", "Output the result as JSON")
+    .action(runIngestCommand);
+}
+
+addIngestCommand("ingest", "Index AI coding sessions (claude, codex, gemini) into the searchable database");
+addIngestCommand("reindex", "Alias for ingest; refresh the searchable session index");
 
 program.parse();

@@ -1,11 +1,11 @@
-import { SqliteAdapter } from "@hasna/cloud";
+import { SqliteAdapter } from "./sqlite-adapter.js";
 import { getSessionsDbPath } from "../lib/paths.js";
 
 export type Database = SqliteAdapter;
 
 /**
  * SQLite schema for the session index. Kept in lock-step with the PostgreSQL
- * mirror in pg-migrations.ts (column-for-column) so @hasna/cloud sync works.
+ * mirror in pg-migrations.ts (column-for-column) so local/remote sync works.
  * FTS5 virtual tables + triggers provide full-text search.
  */
 const SCHEMA: string[] = [
@@ -121,6 +121,16 @@ const SCHEMA: string[] = [
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
 
+  `CREATE TABLE IF NOT EXISTS feedback (
+    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    message TEXT NOT NULL,
+    email TEXT,
+    category TEXT DEFAULT 'general',
+    version TEXT,
+    machine_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+
   // Indexes
   `CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_project_path ON sessions(project_path)`,
@@ -132,6 +142,7 @@ const SCHEMA: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_messages_session_sequence ON messages(session_id, sequence_num)`,
   `CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role)`,
   `CREATE INDEX IF NOT EXISTS idx_tool_calls_session_id ON tool_calls(session_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_tool_calls_message_id ON tool_calls(message_id)`,
   `CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_name ON tool_calls(tool_name)`,
   `CREATE INDEX IF NOT EXISTS idx_embeddings_session_id ON embeddings(session_id)`,
 
@@ -148,57 +159,37 @@ const SCHEMA: string[] = [
     tool_call_id UNINDEXED, session_id UNINDEXED, tool_name, tool_input, tool_output,
     tokenize='porter unicode61'
   )`,
+  `CREATE TABLE IF NOT EXISTS messages_fts_refs (
+    rowid INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    message_id TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS tool_calls_fts_refs (
+    rowid INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_fts_refs_session ON messages_fts_refs(session_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_tool_calls_fts_refs_session ON tool_calls_fts_refs(session_id)`,
 
-  // Triggers to keep FTS in sync with base tables
-  `CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN
-    INSERT INTO sessions_fts(session_id, title, project_name, project_path)
-    VALUES (new.id, new.title, new.project_name, new.project_path);
-  END`,
-  `CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
-    DELETE FROM sessions_fts WHERE session_id = old.id;
-  END`,
-  `CREATE TRIGGER IF NOT EXISTS sessions_au AFTER UPDATE ON sessions BEGIN
-    DELETE FROM sessions_fts WHERE session_id = old.id;
-    INSERT INTO sessions_fts(session_id, title, project_name, project_path)
-    VALUES (new.id, new.title, new.project_name, new.project_path);
-  END`,
-
-  `CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(message_id, session_id, content)
-    VALUES (new.id, new.session_id, new.content);
-  END`,
-  `CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-    DELETE FROM messages_fts WHERE message_id = old.id;
-  END`,
-  `CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    DELETE FROM messages_fts WHERE message_id = old.id;
-    INSERT INTO messages_fts(message_id, session_id, content)
-    VALUES (new.id, new.session_id, new.content);
-  END`,
-
-  `CREATE TRIGGER IF NOT EXISTS tool_calls_ai AFTER INSERT ON tool_calls BEGIN
-    INSERT INTO tool_calls_fts(tool_call_id, session_id, tool_name, tool_input, tool_output)
-    VALUES (new.id, new.session_id, new.tool_name, new.tool_input, new.tool_output);
-  END`,
-  `CREATE TRIGGER IF NOT EXISTS tool_calls_ad AFTER DELETE ON tool_calls BEGIN
-    DELETE FROM tool_calls_fts WHERE tool_call_id = old.id;
-  END`,
-  `CREATE TRIGGER IF NOT EXISTS tool_calls_au AFTER UPDATE ON tool_calls BEGIN
-    DELETE FROM tool_calls_fts WHERE tool_call_id = old.id;
-    INSERT INTO tool_calls_fts(tool_call_id, session_id, tool_name, tool_input, tool_output)
-    VALUES (new.id, new.session_id, new.tool_name, new.tool_input, new.tool_output);
-  END`,
+  // FTS tables are maintained explicitly in db/sessions.ts. Earlier versions
+  // used per-row triggers, but replacing large sessions was very slow because
+  // each trigger deleted from standalone FTS tables by unindexed text columns.
 ];
 
 let _db: SqliteAdapter | null = null;
 
 /** Apply the schema (idempotent) to a database connection. */
 export function initSchema(db: SqliteAdapter): void {
+  // Set the lock wait before any other PRAGMA. A database can be in WAL
+  // recovery when another `sessions ingest` was interrupted; without this,
+  // the first write-ish PRAGMA can fail immediately with SQLITE_BUSY_RECOVERY.
+  db.exec("PRAGMA busy_timeout=30000");
   db.exec("PRAGMA journal_mode=WAL");
+  db.exec("PRAGMA synchronous=NORMAL");
   db.exec("PRAGMA foreign_keys=ON");
-  // Wait (up to 5s) for locks instead of failing immediately — `sessions watch`
+  // Wait for locks instead of failing immediately — `sessions watch`
   // ingests while queries/relocate run against the same DB.
-  db.exec("PRAGMA busy_timeout=5000");
   for (const stmt of SCHEMA) db.exec(stmt);
   runMigrations(db);
 }
@@ -216,6 +207,152 @@ function runMigrations(db: SqliteAdapter): void {
     // Column already exists — nothing to do.
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine)");
+  for (const trigger of [
+    "sessions_ai",
+    "sessions_ad",
+    "sessions_au",
+    "messages_ai",
+    "messages_ad",
+    "messages_au",
+    "tool_calls_ai",
+    "tool_calls_ad",
+    "tool_calls_au",
+  ]) {
+    db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+  }
+  ensureFtsRowidRefs(db);
+}
+
+function tableCount(db: SqliteAdapter, table: string): number {
+  const row = db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number } | undefined;
+  return Number(row?.c ?? 0);
+}
+
+function insertFtsMessage(db: SqliteAdapter, messageId: string, sessionId: string, content: string | null): void {
+  const result = db
+    .prepare("INSERT INTO messages_fts_refs(session_id, message_id) VALUES (?, ?)")
+    .run(sessionId, messageId) as { lastInsertRowid?: number | bigint };
+  if (result.lastInsertRowid == null) throw new Error("failed to allocate messages_fts rowid");
+  db.prepare("INSERT INTO messages_fts(rowid, message_id, session_id, content) VALUES (?, ?, ?, ?)")
+    .run(result.lastInsertRowid, messageId, sessionId, content);
+}
+
+function insertFtsToolCall(
+  db: SqliteAdapter,
+  toolCallId: string,
+  sessionId: string,
+  toolName: string,
+  toolInput: string | null,
+  toolOutput: string | null
+): void {
+  const result = db
+    .prepare("INSERT INTO tool_calls_fts_refs(session_id, tool_call_id) VALUES (?, ?)")
+    .run(sessionId, toolCallId) as { lastInsertRowid?: number | bigint };
+  if (result.lastInsertRowid == null) throw new Error("failed to allocate tool_calls_fts rowid");
+  db.prepare(
+    "INSERT INTO tool_calls_fts(rowid, tool_call_id, session_id, tool_name, tool_input, tool_output) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(result.lastInsertRowid, toolCallId, sessionId, toolName, toolInput, toolOutput);
+}
+
+export function rebuildFtsTables(db: SqliteAdapter): void {
+  db.exec("DROP TABLE IF EXISTS sessions_fts");
+  db.exec("DROP TABLE IF EXISTS messages_fts");
+  db.exec("DROP TABLE IF EXISTS tool_calls_fts");
+  db.exec(`CREATE VIRTUAL TABLE sessions_fts USING fts5(
+    session_id UNINDEXED, title, project_name, project_path,
+    tokenize='porter unicode61'
+  )`);
+  db.exec(`CREATE VIRTUAL TABLE messages_fts USING fts5(
+    message_id UNINDEXED, session_id UNINDEXED, content,
+    tokenize='porter unicode61'
+  )`);
+  db.exec(`CREATE VIRTUAL TABLE tool_calls_fts USING fts5(
+    tool_call_id UNINDEXED, session_id UNINDEXED, tool_name, tool_input, tool_output,
+    tokenize='porter unicode61'
+  )`);
+  db.exec("DELETE FROM messages_fts_refs");
+  db.exec("DELETE FROM tool_calls_fts_refs");
+
+  const insertSession = db.prepare(
+    "INSERT INTO sessions_fts(session_id, title, project_name, project_path) VALUES (?, ?, ?, ?)"
+  );
+  const sessions = db
+    .prepare("SELECT id, title, project_name, project_path FROM sessions")
+    .all() as Record<string, unknown>[];
+  for (const session of sessions) {
+    insertSession.run(
+      session.id as string,
+      (session.title as string) ?? null,
+      (session.project_name as string) ?? null,
+      (session.project_path as string) ?? null
+    );
+  }
+
+  const messages = db
+    .prepare("SELECT id, session_id, content FROM messages ORDER BY session_id, sequence_num")
+    .all() as Record<string, unknown>[];
+  for (const message of messages) {
+    insertFtsMessage(
+      db,
+      message.id as string,
+      message.session_id as string,
+      (message.content as string) ?? null
+    );
+  }
+
+  const toolCalls = db
+    .prepare("SELECT id, session_id, tool_name, tool_input, tool_output FROM tool_calls ORDER BY session_id, timestamp")
+    .all() as Record<string, unknown>[];
+  for (const toolCall of toolCalls) {
+    insertFtsToolCall(
+      db,
+      toolCall.id as string,
+      toolCall.session_id as string,
+      toolCall.tool_name as string,
+      (toolCall.tool_input as string) ?? null,
+      (toolCall.tool_output as string) ?? null
+    );
+  }
+}
+
+function ensureFtsRowidRefs(db: SqliteAdapter): void {
+  const messageCount = tableCount(db, "messages");
+  const toolCallCount = tableCount(db, "tool_calls");
+  const messageRefCount = tableCount(db, "messages_fts_refs");
+  const toolCallRefCount = tableCount(db, "tool_calls_fts_refs");
+
+  if (messageRefCount !== messageCount) {
+    const messageFtsCount = tableCount(db, "messages_fts");
+    if (messageFtsCount === messageCount) {
+      db.exec("DELETE FROM messages_fts_refs");
+      db.exec(
+        `INSERT INTO messages_fts_refs(rowid, session_id, message_id)
+         SELECT rowid, session_id, message_id FROM messages_fts
+         WHERE session_id IS NOT NULL AND message_id IS NOT NULL`
+      );
+    }
+  }
+
+  if (toolCallRefCount !== toolCallCount) {
+    const toolCallFtsCount = tableCount(db, "tool_calls_fts");
+    if (toolCallFtsCount === toolCallCount) {
+      db.exec("DELETE FROM tool_calls_fts_refs");
+      db.exec(
+        `INSERT INTO tool_calls_fts_refs(rowid, session_id, tool_call_id)
+         SELECT rowid, session_id, tool_call_id FROM tool_calls_fts
+         WHERE session_id IS NOT NULL AND tool_call_id IS NOT NULL`
+      );
+    }
+  }
+
+  const repairedMessageRefCount = tableCount(db, "messages_fts_refs");
+  const repairedToolCallRefCount = tableCount(db, "tool_calls_fts_refs");
+  if (
+    process.env.HASNA_SESSIONS_REBUILD_FTS_ON_OPEN === "1" &&
+    (repairedMessageRefCount !== messageCount || repairedToolCallRefCount !== toolCallCount)
+  ) {
+    rebuildFtsTables(db);
+  }
 }
 
 /** Get the process-wide database singleton, creating + migrating it on first use. */

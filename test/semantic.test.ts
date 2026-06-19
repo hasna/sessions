@@ -70,6 +70,15 @@ describe("cosineSimilarity", () => {
 });
 
 describe("embedSessions + semanticSearch", () => {
+  it("does not call the query embedder when no embeddings are stored", async () => {
+    const hits = await semanticSearch("kubernetes deployment", {
+      embedder: async () => {
+        throw new Error("embedder should not be called");
+      },
+    });
+    expect(hits).toEqual([]);
+  });
+
   it("embeds messages and ranks the semantically-closest session first", async () => {
     const res = await embedSessions({ embedder: fakeEmbedder });
     expect(res.messagesProcessed).toBe(2);

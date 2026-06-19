@@ -15,6 +15,10 @@ function runCli(args: string[]) {
     env: {
       ...process.env,
       CLAUDE_PATH: TEST_DIR,
+      CODEX_PATH: TEST_DIR,
+      HASNA_SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
+      SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
+      HASNA_SESSIONS_DIR: join(TEST_DIR, "sessions-home"),
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -52,11 +56,28 @@ function setupProjectFixtures() {
 
   writeFileSync(
     join(projectDir, "sess-001.jsonl"),
-    JSON.stringify({
-      type: "user",
-      cwd: "/Users/test/old/project",
-      message: { role: "user", content: "hello" },
-    }),
+    [
+      JSON.stringify({
+        type: "user",
+        timestamp: "2026-04-10T09:00:00.000Z",
+        uuid: "u1",
+        cwd: "/Users/test/old/project",
+        sessionId: "sess-001",
+        message: { role: "user", content: "hello" },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-04-10T09:01:00.000Z",
+        uuid: "a1",
+        cwd: "/Users/test/old/project",
+        sessionId: "sess-001",
+        message: {
+          role: "assistant",
+          model: "claude-sonnet-4-6",
+          content: [{ type: "text", text: "done" }],
+        },
+      }),
+    ].join("\n"),
     "utf-8"
   );
 }
@@ -167,5 +188,38 @@ describe("CLI JSON output", () => {
     expect(payload.dryRun).toBe(true);
     expect(payload.pathsRemapped).toBe(1);
     expect(payload.projectsImported).toBe(1);
+  });
+
+  it("respects the message preview limit for indexed show JSON", () => {
+    const ingestResult = runCli(["ingest", "--source", "claude", "--json"]);
+    const ingestPayload = parseJsonOutput(ingestResult);
+    expect(ingestPayload[0]).toMatchObject({ source: "claude", sessions: 1, errors: 0 });
+
+    const result = runCli(["show", "sess-001", "--messages", "1", "--json"]);
+    const payload = parseJsonOutput(result);
+    expect(payload.session.source_id).toBe("sess-001");
+    expect(payload.messages).toHaveLength(1);
+    expect(payload.messages[0].content).toBe("hello");
+  });
+
+  it("emits parseable JSON for watch-ingest status and reindex alias", () => {
+    const statusResult = runCli(["watch-ingest", "--status", "--json"]);
+    const status = parseJsonOutput(statusResult);
+    expect(status.sources).toContain("claude");
+    expect(status.roots.some((root: { source: string; exists: boolean }) => root.source === "claude" && root.exists)).toBe(true);
+
+    const reindexResult = runCli(["reindex", "--json"]);
+    const reindex = parseJsonOutput(reindexResult);
+    expect(reindex.some((entry: { source: string }) => entry.source === "claude")).toBe(true);
+  });
+
+  it("rejects invalid watch-ingest numeric options", () => {
+    const badPoll = runCli(["watch-ingest", "--status", "--poll", "nope", "--json"]);
+    expect(badPoll.exitCode).toBe(1);
+    expect(Buffer.from(badPoll.stderr).toString("utf-8")).toContain("--poll must be a non-negative integer");
+
+    const badDebounce = runCli(["watch-ingest", "--status", "--debounce", "-1", "--json"]);
+    expect(badDebounce.exitCode).toBe(1);
+    expect(Buffer.from(badDebounce.stderr).toString("utf-8")).toContain("--debounce must be a positive integer");
   });
 });

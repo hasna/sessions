@@ -1,6 +1,6 @@
 import { getDatabase } from "../db/database.js";
 import { deserializeVector, openaiEmbedder, type Embedder } from "./embeddings.js";
-import { searchMessages, type SearchHit, type SearchOptions } from "./search.js";
+import { search, type SearchHit, type SearchOptions } from "./search.js";
 
 /** Cosine similarity of two equal-ish-length vectors (0 when either is zero). */
 export function cosineSimilarity(a: Float32Array | number[], b: Float32Array | number[]): number {
@@ -26,7 +26,7 @@ export interface SemanticOptions extends SearchOptions {
 export function vectorSearchByEmbedding(queryVec: number[], opts: SemanticOptions = {}): SearchHit[] {
   const db = getDatabase();
   const where: string[] = [];
-  const params: unknown[] = [];
+  const params: any[] = [];
   if (opts.source) {
     where.push("s.source = ?");
     params.push(opts.source);
@@ -34,6 +34,10 @@ export function vectorSearchByEmbedding(queryVec: number[], opts: SemanticOption
   if (opts.project_path) {
     where.push("s.project_path = ?");
     params.push(opts.project_path);
+  }
+  if (opts.machine) {
+    where.push("s.machine = ?");
+    params.push(opts.machine);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
@@ -73,9 +77,38 @@ export function vectorSearchByEmbedding(queryVec: number[], opts: SemanticOption
 
 /** Semantic search: embed the query, then cosine-rank stored embeddings. */
 export async function semanticSearch(query: string, opts: SemanticOptions = {}): Promise<SearchHit[]> {
+  if (!hasStoredEmbeddings(opts)) return [];
   const embedder = opts.embedder ?? openaiEmbedder();
   const [queryVec] = await embedder([query]);
   return vectorSearchByEmbedding(queryVec, opts);
+}
+
+function hasStoredEmbeddings(opts: SemanticOptions = {}): boolean {
+  const db = getDatabase();
+  const where: string[] = ["e.embedding IS NOT NULL"];
+  const params: any[] = [];
+  if (opts.source) {
+    where.push("s.source = ?");
+    params.push(opts.source);
+  }
+  if (opts.project_path) {
+    where.push("s.project_path = ?");
+    params.push(opts.project_path);
+  }
+  if (opts.machine) {
+    where.push("s.machine = ?");
+    params.push(opts.machine);
+  }
+  const row = db
+    .prepare(
+      `SELECT 1 AS present
+       FROM embeddings e
+       JOIN sessions s ON s.id = e.session_id
+       WHERE ${where.join(" AND ")}
+       LIMIT 1`
+    )
+    .get(...params) as { present: number } | undefined;
+  return Boolean(row?.present);
 }
 
 /** Reciprocal-rank fusion of multiple ranked result lists. */
@@ -98,7 +131,7 @@ export function reciprocalRankFusion(lists: SearchHit[][], limit: number, k = 60
 /** Hybrid search: blend full-text (FTS5) and semantic (vector) results via RRF. */
 export async function hybridSearch(query: string, opts: SemanticOptions = {}): Promise<SearchHit[]> {
   const limit = opts.limit ?? 20;
-  const fts = searchMessages(query, { ...opts, limit: limit * 2 });
+  const fts = search(query, { ...opts, limit: limit * 2 });
   const semantic = await semanticSearch(query, { ...opts, limit: limit * 2 });
   return reciprocalRankFusion([fts, semantic], limit);
 }

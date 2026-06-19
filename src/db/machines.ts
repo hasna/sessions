@@ -32,7 +32,6 @@ export function recomputeMachineCounts(): void {
 
 export function listMachines(): Machine[] {
   const db = getDatabase();
-  recomputeMachineCounts();
   const rows = db
     .prepare("SELECT * FROM machines ORDER BY session_count DESC, name ASC")
     .all() as Record<string, unknown>[];

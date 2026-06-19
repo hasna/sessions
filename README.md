@@ -37,6 +37,10 @@ sessions embed
 sessions search "how did I fix the auth bug" --semantic
 sessions search "auth bug" --hybrid          # blend full-text + semantic (RRF)
 
+# High-level recall for coding threads: FTS + optional semantic + tools + graph
+sessions recall "find the thread where we implemented stripe webhooks"
+sessions recall "resume building the CLI storage sync" --json
+
 # Knowledge graph — entities (projects/tools/models/repos) and their links
 sessions graph                               # all entities with counts
 sessions graph --type tool
@@ -45,12 +49,16 @@ sessions graph --session <id>                # a session's neighborhood
 
 # Browse
 sessions recent                # most recently active sessions
-sessions list --project /path  # filter by project
+sessions indexed-list --project /path  # filter indexed sessions by project
 sessions show <id>             # full details + message previews
 sessions stats                 # per-source + top-project counts
 
 # Keep the index continuously fresh (fs.watch + periodic safety re-scan)
-sessions watch
+sessions watch-ingest
+sessions watch-ingest --status
+
+# Manual refresh / reindex
+sessions reindex
 ```
 
 ## Friendly names & resume
@@ -58,10 +66,14 @@ sessions watch
 ```bash
 sessions list --json
 sessions history --today
+sessions transcript-search "raw Claude-only query"
 sessions rename <id-or-name> "my friendly name"
 sessions resume --last --print-command
 sessions resume <friendly-name-or-id>
 ```
+
+`sessions list` is the friendly-name registry used for resume workflows.
+Use `sessions indexed-list` to browse the SQLite search index.
 
 Existing maintenance commands (`relocate`, `transfer`, `migrate`, `paths`)
 remain available.
@@ -73,11 +85,11 @@ sessions-mcp
 ```
 
 Exposes session tools for agents/orchestrators: `search_sessions`,
-`search_tool_calls`, `semantic_search`, `recent_sessions`, `list_sessions`,
+`search_tool_calls`, `recall_session`, `semantic_search`, `recent_sessions`, `list_sessions`,
 `get_session`, `ingest`, `embed`, `session_stats`, `knowledge_graph`, plus
 registry-backed tools (`sessions_list`, `sessions_history`, `sessions_search`,
 `sessions_resume`, `sessions_rename`, `sessions_watch`, `sessions_stats`),
-cross-adapter import tools, agent registry, feedback, and cloud-sync tools.
+cross-adapter import tools, agent registry, feedback, and storage-sync tools.
 
 ## HTTP mode
 
@@ -103,18 +115,31 @@ Uses stateless `StreamableHTTPServerTransport` (shared process, many clients).
 sessions-serve
 ```
 
-Endpoints: `/search?q=`, `/tool-calls?q=`, `/recent`, `/list`, `/sessions/:id`,
+Endpoints: `/search?q=`, `/recall?q=`, `/tool-calls?q=`, `/recent`, `/list`, `/sessions/:id`,
 `/stats`, `/health`, `/info`.
 
-## Cloud Sync
+## Storage Sync
 
-This package supports cloud sync via `@hasna/cloud`:
+Storage sync is optional. By default sessions use local SQLite at `~/.hasna/sessions/`.
 
 ```bash
-cloud setup
-cloud sync push --service sessions
-cloud sync pull --service sessions
+sessions storage status
+sessions storage push
+sessions storage pull
+sessions storage sync
 ```
+
+Set `HASNA_SESSIONS_DATABASE_URL` or configure
+`~/.hasna/sessions/storage/config.json` to run in hybrid/remote mode with
+PostgreSQL. `SESSIONS_DATABASE_URL` is accepted as a short non-deprecated
+fallback for local development.
+
+## Adapter notes
+
+Indexed ingestion currently uses stable local files for Claude Code, local Codex
+JSONL, and Gemini. Cursor/cloud Codex/cloud Claude sources should be added
+through the existing `SessionParser`/`SessionAdapter` interfaces when they expose
+a durable local export or API; avoid scraping transient cloud/cache formats.
 
 ## Data Directory
 

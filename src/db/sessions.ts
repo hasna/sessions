@@ -183,6 +183,12 @@ export function upsertSession(input: SessionInsert): Session {
     meta
   );
 
+  db.prepare("DELETE FROM sessions_fts WHERE session_id = ?").run(id);
+  db.prepare(
+    `INSERT INTO sessions_fts(session_id, title, project_name, project_path)
+     VALUES (?, ?, ?, ?)`
+  ).run(id, input.title ?? null, input.project_name ?? null, input.project_path ?? null);
+
   return getSession(id);
 }
 
@@ -228,7 +234,7 @@ export interface ListSessionsOptions {
 export function listSessions(opts: ListSessionsOptions = {}): Session[] {
   const db = getDatabase();
   const where: string[] = [];
-  const params: unknown[] = [];
+  const params: any[] = [];
   if (opts.source) {
     where.push("source = ?");
     params.push(opts.source);
@@ -298,20 +304,35 @@ export function getProjectStats(): ProjectStat[] {
 
 export function deleteSession(id: string): void {
   const db = getDatabase();
+  db.prepare("DELETE FROM tool_calls_fts WHERE rowid IN (SELECT rowid FROM tool_calls_fts_refs WHERE session_id = ?)").run(id);
+  db.prepare("DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages_fts_refs WHERE session_id = ?)").run(id);
+  db.prepare("DELETE FROM tool_calls_fts_refs WHERE session_id = ?").run(id);
+  db.prepare("DELETE FROM messages_fts_refs WHERE session_id = ?").run(id);
+  db.prepare("DELETE FROM sessions_fts WHERE session_id = ?").run(id);
   db.prepare("DELETE FROM tool_calls WHERE session_id = ?").run(id);
   db.prepare("DELETE FROM messages WHERE session_id = ?").run(id);
   db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
 }
 
-function insertMessage(sessionId: string, input: MessageInsert): void {
-  const db = getDatabase();
-  db.prepare(
-    `INSERT INTO messages (
+const INSERT_MESSAGE_SQL = `INSERT INTO messages (
       id, session_id, source_id, parent_message_id, role, content, content_preview,
       model, is_sidechain, sequence_num, input_tokens, output_tokens,
       cache_read_tokens, cache_write_tokens, thinking_tokens, timestamp, metadata
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+const INSERT_TOOL_CALL_SQL = `INSERT INTO tool_calls (
+      id, message_id, session_id, tool_name, tool_input, tool_output,
+      duration_ms, status, timestamp, metadata
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+const INSERT_MESSAGE_FTS_REF_SQL = `INSERT INTO messages_fts_refs(session_id, message_id)
+     VALUES (?, ?)`;
+
+const INSERT_TOOL_CALL_FTS_REF_SQL = `INSERT INTO tool_calls_fts_refs(session_id, tool_call_id)
+     VALUES (?, ?)`;
+
+function messageInsertValues(sessionId: string, input: MessageInsert): any[] {
+  return [
     input.id ?? uuid(),
     sessionId,
     input.source_id ?? null,
@@ -329,17 +350,11 @@ function insertMessage(sessionId: string, input: MessageInsert): void {
     input.thinking_tokens ?? 0,
     input.timestamp ?? null,
     JSON.stringify(input.metadata ?? {})
-  );
+  ];
 }
 
-function insertToolCall(sessionId: string, input: ToolCallInsert): void {
-  const db = getDatabase();
-  db.prepare(
-    `INSERT INTO tool_calls (
-      id, message_id, session_id, tool_name, tool_input, tool_output,
-      duration_ms, status, timestamp, metadata
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
+function toolCallInsertValues(sessionId: string, input: ToolCallInsert): any[] {
+  return [
     input.id ?? uuid(),
     input.message_id ?? null,
     sessionId,
@@ -350,7 +365,31 @@ function insertToolCall(sessionId: string, input: ToolCallInsert): void {
     input.status ?? null,
     input.timestamp ?? null,
     JSON.stringify(input.metadata ?? {})
-  );
+  ];
+}
+
+function insertMessage(sessionId: string, input: MessageInsert): void {
+  const db = getDatabase();
+  const values = messageInsertValues(sessionId, input);
+  db.prepare(INSERT_MESSAGE_SQL).run(...values);
+  const ref = db.prepare(INSERT_MESSAGE_FTS_REF_SQL).run(sessionId, values[0]) as { lastInsertRowid?: number | bigint };
+  if (ref.lastInsertRowid == null) throw new Error("failed to allocate messages_fts rowid");
+  db.prepare(
+    `INSERT INTO messages_fts(rowid, message_id, session_id, content)
+     VALUES (?, ?, ?, ?)`
+  ).run(ref.lastInsertRowid, values[0], sessionId, values[5]);
+}
+
+function insertToolCall(sessionId: string, input: ToolCallInsert): void {
+  const db = getDatabase();
+  const values = toolCallInsertValues(sessionId, input);
+  db.prepare(INSERT_TOOL_CALL_SQL).run(...values);
+  const ref = db.prepare(INSERT_TOOL_CALL_FTS_REF_SQL).run(sessionId, values[0]) as { lastInsertRowid?: number | bigint };
+  if (ref.lastInsertRowid == null) throw new Error("failed to allocate tool_calls_fts rowid");
+  db.prepare(
+    `INSERT INTO tool_calls_fts(rowid, tool_call_id, session_id, tool_name, tool_input, tool_output)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(ref.lastInsertRowid, values[0], sessionId, values[3], values[4], values[5]);
 }
 
 /**
@@ -378,11 +417,39 @@ export function saveParsedSession(parsed: ParsedSession): Session {
       total_thinking_tokens: parsed.session.total_thinking_tokens ?? thinking,
     });
 
+    db.prepare("DELETE FROM tool_calls_fts WHERE rowid IN (SELECT rowid FROM tool_calls_fts_refs WHERE session_id = ?)").run(session.id);
+    db.prepare("DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages_fts_refs WHERE session_id = ?)").run(session.id);
+    db.prepare("DELETE FROM tool_calls_fts_refs WHERE session_id = ?").run(session.id);
+    db.prepare("DELETE FROM messages_fts_refs WHERE session_id = ?").run(session.id);
     db.prepare("DELETE FROM tool_calls WHERE session_id = ?").run(session.id);
     db.prepare("DELETE FROM messages WHERE session_id = ?").run(session.id);
 
-    for (const msg of parsed.messages) insertMessage(session.id, msg);
-    for (const tc of parsed.toolCalls) insertToolCall(session.id, tc);
+    const insertMessageStmt = db.prepare(INSERT_MESSAGE_SQL);
+    const insertToolCallStmt = db.prepare(INSERT_TOOL_CALL_SQL);
+    const insertMessageFtsRefStmt = db.prepare(INSERT_MESSAGE_FTS_REF_SQL);
+    const insertToolCallFtsRefStmt = db.prepare(INSERT_TOOL_CALL_FTS_REF_SQL);
+    const insertMessageFtsStmt = db.prepare(
+      `INSERT INTO messages_fts(rowid, message_id, session_id, content)
+       VALUES (?, ?, ?, ?)`
+    );
+    const insertToolCallFtsStmt = db.prepare(
+      `INSERT INTO tool_calls_fts(rowid, tool_call_id, session_id, tool_name, tool_input, tool_output)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    for (const msg of parsed.messages) {
+      const values = messageInsertValues(session.id, msg);
+      insertMessageStmt.run(...values);
+      const ref = insertMessageFtsRefStmt.run(session.id, values[0]) as { lastInsertRowid?: number | bigint };
+      if (ref.lastInsertRowid == null) throw new Error("failed to allocate messages_fts rowid");
+      insertMessageFtsStmt.run(ref.lastInsertRowid, values[0], session.id, values[5]);
+    }
+    for (const tc of parsed.toolCalls) {
+      const values = toolCallInsertValues(session.id, tc);
+      insertToolCallStmt.run(...values);
+      const ref = insertToolCallFtsRefStmt.run(session.id, values[0]) as { lastInsertRowid?: number | bigint };
+      if (ref.lastInsertRowid == null) throw new Error("failed to allocate tool_calls_fts rowid");
+      insertToolCallFtsStmt.run(ref.lastInsertRowid, values[0], session.id, values[3], values[4], values[5]);
+    }
 
     return getSession(session.id);
   });

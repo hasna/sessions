@@ -146,7 +146,7 @@ describe("ClaudeParser", () => {
     expect(ps.messages).toHaveLength(2);
     expect(ps.toolCalls).toHaveLength(1);
     expect(ps.toolCalls[0].tool_name).toBe("Bash");
-    expect(ps.toolCalls[0].message_id).toBe("a1");
+    expect(ps.toolCalls[0].message_id).toBe("sess-claude-1:a1");
   });
 
   it("listSessionFiles finds the fixture under CLAUDE_PATH", () => {

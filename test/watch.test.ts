@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startWatch, type Watcher } from "../src/lib/watch.js";
+import { getWatchStatus, startWatch, type Watcher } from "../src/lib/watch.js";
 import { getDatabase, resetDatabase, closeDatabase } from "../src/db/database.js";
 import { listSessions } from "../src/db/sessions.js";
 
@@ -44,10 +44,28 @@ afterEach(() => {
 });
 
 describe("startWatch", () => {
+  it("reports watch status without starting the watcher", () => {
+    const status = getWatchStatus({ debounceMs: 25, pollMs: 0 });
+    expect(status.debounceMs).toBe(25);
+    expect(status.pollMs).toBe(0);
+    expect(status.sources).toContain("claude");
+    expect(status.roots.some((root) => root.source === "claude" && root.exists)).toBe(true);
+    expect(status.roots.some((root) => root.source === "codex" && !root.exists)).toBe(true);
+  });
+
   it("watches only providers whose dirs exist", () => {
     watcher = startWatch({ debounceMs: 50, pollMs: 200 });
     expect(watcher.sources).toContain("claude");
     expect(watcher.sources).not.toContain("codex"); // dir missing
+    expect(watcher.roots.every((root) => root.exists)).toBe(true);
+  });
+
+  it("can restrict watched providers", () => {
+    const codexRoot = join(root, "codex");
+    mkdirSync(join(codexRoot, "sessions"), { recursive: true });
+    process.env.CODEX_PATH = codexRoot;
+    watcher = startWatch({ sources: ["codex"], debounceMs: 50, pollMs: 0 });
+    expect(watcher.sources).toEqual(["codex"]);
   });
 
   it("ingests a newly written session file via the poll safety net", async () => {
