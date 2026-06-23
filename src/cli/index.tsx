@@ -49,11 +49,30 @@ import {
   renameSession,
   searchSessions,
 } from "../lib/sessions.js";
+import {
+  formatLivePaneTable,
+  listLivePanes,
+  parseLiveStatusFilter,
+} from "../lib/live.js";
+import {
+  buildBulkSessionPlan,
+  formatBulkSessionPlan,
+  isBulkSessionAction,
+  listBulkLivePanes,
+  parseConcurrency,
+  parseJitterMs,
+} from "../lib/bulk.js";
 
 const program = new Command();
 
 function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
+}
+
+async function writeStdout(text: string): Promise<void> {
+  await new Promise<void>((resolve) => {
+    process.stdout.write(text, () => resolve());
+  });
 }
 
 function parsePositiveIntOption(raw: string | undefined, fallback: number, name: string): number {
@@ -71,6 +90,16 @@ function parseNonNegativeIntOption(raw: string | undefined, fallback: number, na
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 0) {
     console.error(`Error: ${name} must be a non-negative integer`);
+    process.exit(1);
+  }
+  return value;
+}
+
+function parseOptionalNonNegativeNumberOption(raw: string | undefined, name: string): number | undefined {
+  if (raw == null || raw === "") return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    console.error(`Error: ${name} must be a non-negative number`);
     process.exit(1);
   }
   return value;
@@ -668,6 +697,136 @@ program
     for (const match of matches) {
       console.log(`${match.session.friendlyName}  ${match.session.projectSlug}`);
       console.log(`  ${match.snippet}`);
+    }
+  });
+
+program
+  .command("live")
+  .description("List live tmux-backed Codewith/session panes")
+  .option("--open-only", "Only include open-* tmux sessions or projects")
+  .option("-p, --project <value>", "Filter by project slug or path")
+  .option("-m, --machine <name>", "Filter by machine name")
+  .option("--status <values>", "Filter by status: active,idle,needs_attention,dead")
+  .option("--interval <seconds>", "Refresh interval with --watch", "5")
+  .option("--json", "Output JSON")
+  .option("--once", "Render a single snapshot and exit")
+  .option("--watch", "Keep refreshing until interrupted")
+  .action(async (opts: any) => {
+    const intervalSeconds = Number.parseInt(opts.interval, 10);
+    if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
+      console.error("Error: --interval must be a positive integer");
+      process.exit(1);
+    }
+
+    let statuses;
+    try {
+      statuses = parseLiveStatusFilter(opts.status);
+    } catch (error: any) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+
+    const shouldWatch = Boolean(opts.watch) && !opts.once;
+    const render = async () => {
+      const panes = listLivePanes({
+        openOnly: Boolean(opts.openOnly),
+        project: opts.project,
+        machine: opts.machine,
+        statuses,
+      });
+
+      if (opts.json) {
+        await writeStdout(`${JSON.stringify(panes, null, shouldWatch ? 0 : 2)}\n`);
+        return;
+      }
+
+      if (shouldWatch) console.clear();
+      console.log(`sessions live (${new Date().toISOString()})\n`);
+      console.log(formatLivePaneTable(panes));
+    };
+
+    await render();
+    if (!shouldWatch) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      void render();
+    }, intervalSeconds * 1000);
+    process.on("SIGINT", () => {
+      clearInterval(timer);
+      process.exit(0);
+    });
+  });
+
+program
+  .command("bulk <action>")
+  .description("Plan safe bulk operations for live tmux-backed sessions")
+  .option("--open-only", "Only include open-* tmux sessions or projects")
+  .option("-p, --project <value>", "Filter by project slug or path")
+  .option("-m, --machine <name>", "Filter by machine name")
+  .option("--status <values>", "Filter by status: active,idle,needs_attention,dead")
+  .option("--json", "Output JSON")
+  .option("--dry-run", "Show the plan without mutating tmux")
+  .option("--yes", "Confirm a mutating bulk operation")
+  .option("--no-queue", "Do not mark confirmed work as locally queued")
+  .option("--concurrency <count>", "Maximum queued operations to run at once", "2")
+  .option("--jitter <ms>", "Deterministic delay jitter per target in milliseconds", "0")
+  .option("--max-active-agents <count>", "Refuse mutating work when active agent count is above this value", "12")
+  .option("--max-load1 <value>", "Refuse mutating work when 1 minute load is above this value")
+  .option("--max-load-per-core <value>", "Refuse mutating work when 1 minute load per CPU core is above this value", "1.5")
+  .action(async (action: string, opts: any) => {
+    if (!isBulkSessionAction(action)) {
+      console.error(`Error: unknown bulk action '${action}'. Use: status, capture, ensure, start, stop, restart, doctor`);
+      process.exit(1);
+    }
+
+    let statuses;
+    let concurrency;
+    let jitterMs;
+    try {
+      statuses = parseLiveStatusFilter(opts.status);
+      concurrency = parseConcurrency(opts.concurrency);
+      jitterMs = parseJitterMs(opts.jitter);
+    } catch (error: any) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+
+    const panes = listBulkLivePanes({
+      openOnly: Boolean(opts.openOnly),
+      project: opts.project,
+    });
+    const plan = buildBulkSessionPlan({
+      action,
+      panes,
+      openOnly: Boolean(opts.openOnly),
+      project: opts.project,
+      machine: opts.machine,
+      statuses,
+      statusFilterExplicit: Boolean(opts.status),
+      dryRun: Boolean(opts.dryRun),
+      yes: Boolean(opts.yes),
+      queue: opts.queue !== false,
+      executionEnabled: false,
+      concurrency,
+      jitterMs,
+      maxActiveAgents: parsePositiveIntOption(opts.maxActiveAgents, 12, "--max-active-agents"),
+      maxLoad1: parseOptionalNonNegativeNumberOption(opts.maxLoad1, "--max-load1"),
+      maxLoadPerCore: parseOptionalNonNegativeNumberOption(opts.maxLoadPerCore, "--max-load-per-core"),
+    });
+
+    if (opts.json) {
+      await writeStdout(`${JSON.stringify(plan, null, 2)}\n`);
+    } else {
+      console.log(formatBulkSessionPlan(plan));
+      if (!opts.dryRun && ["ensure", "start", "stop", "restart"].includes(action)) {
+        console.log("\nMutating execution is intentionally disabled in this build; use --dry-run for planning.");
+      }
+    }
+
+    if (["ensure", "start", "stop", "restart"].includes(action) && (!plan.guard.ok || plan.summary.refused > 0)) {
+      process.exit(1);
     }
   });
 
