@@ -56,6 +56,7 @@ describe("entrypoint help and version", () => {
     expect(stderr).not.toContain("already have command");
     expect(stdout).toContain("watch");
     expect(stdout).toContain("live");
+    expect(stdout).toContain("bulk");
     expect(stdout).toContain("ingest-watch");
     expect(stdout).toContain("watch-ingest");
     expect(stdout).toContain("list");
@@ -82,5 +83,16 @@ describe("entrypoint help and version", () => {
     expect(output).toContain("--source");
     expect(output).toContain("--no-initial");
     expect(output).toContain("--poll");
+  });
+
+  it("prints bulk help with safety controls", () => {
+    const result = runBun(["run", "src/cli/index.tsx", "bulk", "--help"]);
+    const output = Buffer.from(result.stdout).toString("utf-8");
+
+    expect(result.exitCode).toBe(0);
+    expect(output).toContain("--open-only");
+    expect(output).toContain("--dry-run");
+    expect(output).toContain("--concurrency");
+    expect(output).toContain("--max-active-agents");
   });
 });
