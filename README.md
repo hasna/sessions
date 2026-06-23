@@ -53,6 +53,12 @@ sessions indexed-list --project /path  # filter indexed sessions by project
 sessions show <id>             # full details + message previews
 sessions stats                 # per-source + top-project counts
 
+# Live tmux-backed Codewith/session activity (does not require indexed history)
+sessions live --open-only
+sessions live --open-only --status active
+sessions live --open-only --status idle,dead,needs_attention
+sessions live --open-only --json | jq '.[] | {target,status,projectPath,lastVisibleLine}'
+
 # Keep the index continuously fresh (fs.watch + periodic safety re-scan)
 sessions watch-ingest
 sessions watch-ingest --status
@@ -74,6 +80,9 @@ sessions resume <friendly-name-or-id>
 
 `sessions list` is the friendly-name registry used for resume workflows.
 Use `sessions indexed-list` to browse the SQLite search index.
+Use `sessions live` when you need current tmux/Codewith pane state; it reports
+active, idle, needs_attention, and dead panes from tmux even when no indexed
+session history exists yet.
 
 Existing maintenance commands (`relocate`, `transfer`, `migrate`, `paths`)
 remain available.

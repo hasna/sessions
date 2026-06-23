@@ -49,11 +49,22 @@ import {
   renameSession,
   searchSessions,
 } from "../lib/sessions.js";
+import {
+  formatLivePaneTable,
+  listLivePanes,
+  parseLiveStatusFilter,
+} from "../lib/live.js";
 
 const program = new Command();
 
 function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
+}
+
+async function writeStdout(text: string): Promise<void> {
+  await new Promise<void>((resolve) => {
+    process.stdout.write(text, () => resolve());
+  });
 }
 
 function parsePositiveIntOption(raw: string | undefined, fallback: number, name: string): number {
@@ -669,6 +680,65 @@ program
       console.log(`${match.session.friendlyName}  ${match.session.projectSlug}`);
       console.log(`  ${match.snippet}`);
     }
+  });
+
+program
+  .command("live")
+  .description("List live tmux-backed Codewith/session panes")
+  .option("--open-only", "Only include open-* tmux sessions or projects")
+  .option("-p, --project <value>", "Filter by project slug or path")
+  .option("-m, --machine <name>", "Filter by machine name")
+  .option("--status <values>", "Filter by status: active,idle,needs_attention,dead")
+  .option("--interval <seconds>", "Refresh interval with --watch", "5")
+  .option("--json", "Output JSON")
+  .option("--once", "Render a single snapshot and exit")
+  .option("--watch", "Keep refreshing until interrupted")
+  .action(async (opts: any) => {
+    const intervalSeconds = Number.parseInt(opts.interval, 10);
+    if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
+      console.error("Error: --interval must be a positive integer");
+      process.exit(1);
+    }
+
+    let statuses;
+    try {
+      statuses = parseLiveStatusFilter(opts.status);
+    } catch (error: any) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+
+    const shouldWatch = Boolean(opts.watch) && !opts.once;
+    const render = async () => {
+      const panes = listLivePanes({
+        openOnly: Boolean(opts.openOnly),
+        project: opts.project,
+        machine: opts.machine,
+        statuses,
+      });
+
+      if (opts.json) {
+        await writeStdout(`${JSON.stringify(panes, null, shouldWatch ? 0 : 2)}\n`);
+        return;
+      }
+
+      if (shouldWatch) console.clear();
+      console.log(`sessions live (${new Date().toISOString()})\n`);
+      console.log(formatLivePaneTable(panes));
+    };
+
+    await render();
+    if (!shouldWatch) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      void render();
+    }, intervalSeconds * 1000);
+    process.on("SIGINT", () => {
+      clearInterval(timer);
+      process.exit(0);
+    });
   });
 
 program

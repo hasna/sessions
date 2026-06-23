@@ -43,6 +43,26 @@ export {
 export type { SessionRecord, SessionSearchResult, SessionStatus } from "./lib/sessions.js";
 
 export {
+  buildLivePane,
+  classifyLivePane,
+  filterLivePanes,
+  formatLivePaneTable,
+  listLivePanes,
+  listLivePanesFromTmuxOutput,
+  normalizeProjectPath,
+  parseLiveStatusFilter,
+  parseTmuxPaneLine,
+} from "./lib/live.js";
+export type {
+  LivePane,
+  LivePaneStatus,
+  ListLivePanesOptions,
+  TmuxCommandResult,
+  TmuxPaneRecord,
+  TmuxRunner,
+} from "./lib/live.js";
+
+export {
   recallSessions,
   buildQueryVariants,
   extractCodingEntities,

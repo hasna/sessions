@@ -55,6 +55,7 @@ describe("entrypoint help and version", () => {
     expect(result.exitCode).toBe(0);
     expect(stderr).not.toContain("already have command");
     expect(stdout).toContain("watch");
+    expect(stdout).toContain("live");
     expect(stdout).toContain("ingest-watch");
     expect(stdout).toContain("watch-ingest");
     expect(stdout).toContain("list");
