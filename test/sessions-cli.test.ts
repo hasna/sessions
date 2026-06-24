@@ -73,6 +73,37 @@ function setupFixtures() {
   );
 }
 
+function addRegistrySessions(count: number) {
+  const projectDir = join(PROJECTS_DIR, "-Users-test-sample-project");
+  for (let i = 2; i <= count; i += 1) {
+    const id = `session-${String(i).padStart(3, "0")}`;
+    writeFileSync(
+      join(projectDir, `${id}.jsonl`),
+      [
+        JSON.stringify({
+          type: "user",
+          timestamp: `2026-04-10T10:${String(i).padStart(2, "0")}:00.000Z`,
+          cwd: "/Users/test/sample-project",
+          sessionId: id,
+          message: { role: "user", content: `hello ${i}` },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          timestamp: `2026-04-10T10:${String(i).padStart(2, "0")}:30.000Z`,
+          cwd: "/Users/test/sample-project",
+          sessionId: id,
+          message: {
+            role: "assistant",
+            model: "claude-sonnet-4-6",
+            content: [{ type: "text", text: "done" }],
+          },
+        }),
+      ].join("\n"),
+      "utf-8"
+    );
+  }
+}
+
 beforeEach(() => {
   setupFixtures();
 });
@@ -93,6 +124,30 @@ describe("sessions CLI registry flows", () => {
     expect(payload[0].customTitle).toBe("legacy-title");
     expect(payload[0].agentName).toBe("legacy-agent");
     expect(payload[0].lastModel).toBe("claude-sonnet-4-6");
+  });
+
+  it("keeps registry list output compact by default while JSON stays complete", () => {
+    addRegistrySessions(26);
+
+    const compact = runCli(["list"]);
+    expect(compact.exitCode).toBe(0);
+    const stdout = Buffer.from(compact.stdout).toString("utf-8");
+    expect(stdout).toContain("Showing 20 of 26.");
+    expect(stdout.split(/\r?\n/).filter((line) => line.includes("sample-project-"))).toHaveLength(20);
+
+    const fullJson = parseJsonOutput(runCli(["list", "--json"]));
+    expect(fullJson).toHaveLength(26);
+
+    const limitedJson = parseJsonOutput(runCli(["list", "--json", "--limit", "5"]));
+    expect(limitedJson).toHaveLength(5);
+  });
+
+  it("rejects invalid explicit limits even when --all is present", () => {
+    addRegistrySessions(26);
+
+    const result = runCli(["list", "--all", "--limit", "nope"]);
+    expect(result.exitCode).toBe(1);
+    expect(Buffer.from(result.stderr).toString("utf-8")).toContain("--limit must be a positive integer");
   });
 
   it("renames sessions and preserves the manual name", () => {

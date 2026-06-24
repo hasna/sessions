@@ -53,11 +53,12 @@ const RELATED_SQL: Record<EntityType, string> = {
 };
 
 /** Find sessions linked to a specific entity (e.g. all sessions that used tool "Bash"). */
-export function relatedSessions(type: EntityType, name: string, limit = 50): RelatedSession[] {
+export function relatedSessions(type: EntityType, name: string, limit: number | null = 50): RelatedSession[] {
   const db = getDatabase();
-  const rows = db
-    .prepare(`${RELATED_SQL[type]} ORDER BY COALESCE(started_at, ingested_at) DESC LIMIT ?`)
-    .all(name, limit) as Record<string, unknown>[];
+  const sql = `${RELATED_SQL[type]} ORDER BY COALESCE(started_at, ingested_at) DESC${limit == null ? "" : " LIMIT ?"}`;
+  const rows = (limit == null
+    ? db.prepare(sql).all(name)
+    : db.prepare(sql).all(name, limit)) as Record<string, unknown>[];
   return rows.map((r) => ({
     session_id: r.session_id as string,
     source: r.source as string,

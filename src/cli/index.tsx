@@ -51,9 +51,23 @@ import {
 } from "../lib/sessions.js";
 
 const program = new Command();
+const DEFAULT_HUMAN_ROWS = 20;
+const DEFAULT_GRAPH_ROWS = 50;
 
 function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
+}
+
+function truncateText(value: string, max = 120): string {
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  if (oneLine.length <= max) return oneLine;
+  if (max <= 3) return oneLine.slice(0, max);
+  return `${oneLine.slice(0, max - 3)}...`;
+}
+
+function parseOptionalPositiveIntOption(raw: string | undefined, name: string): number | undefined {
+  if (raw == null) return undefined;
+  return parsePositiveIntOption(raw, 1, name);
 }
 
 function parsePositiveIntOption(raw: string | undefined, fallback: number, name: string): number {
@@ -64,6 +78,26 @@ function parsePositiveIntOption(raw: string | undefined, fallback: number, name:
     process.exit(1);
   }
   return value;
+}
+
+function compactLimit(opts: { limit?: string; all?: boolean; verbose?: boolean }, fallback = DEFAULT_HUMAN_ROWS): number | undefined {
+  const explicitLimit = parseOptionalPositiveIntOption(opts.limit, "--limit");
+  if (opts.all || opts.verbose) return undefined;
+  return explicitLimit ?? fallback;
+}
+
+function explicitJsonLimit(opts: { limit?: string; all?: boolean }): number | undefined {
+  const explicitLimit = parseOptionalPositiveIntOption(opts.limit, "--limit");
+  return opts.all ? undefined : explicitLimit;
+}
+
+function limitedRows<T>(rows: T[], limit: number | undefined): T[] {
+  return limit == null ? rows : rows.slice(0, limit);
+}
+
+function printLimitHint(displayed: number, total: number, detail: string): void {
+  if (total <= displayed) return;
+  console.log(`\nShowing ${displayed} of ${total}. ${detail}`);
 }
 
 function parseNonNegativeIntOption(raw: string | undefined, fallback: number, name: string): number {
@@ -532,15 +566,24 @@ program
   .command("list")
   .description("List known sessions with friendly names")
   .option("-p, --project <value>", "Filter by project slug or path")
+  .option("-l, --limit <n>", "Max rows to print; with --json, limits JSON when set")
+  .option("--all", "Print all rows in human output")
+  .option("-v, --verbose", "Print all rows in human output")
   .option("--json", "Output as JSON")
-  .action((opts: any) => {
+  .action((opts: { project?: string; limit?: string; all?: boolean; verbose?: boolean; json?: boolean }) => {
     const sessions = listSessions({ project: opts.project });
     if (opts.json) {
-      printJson(sessions);
+      printJson(limitedRows(sessions, explicitJsonLimit(opts)));
       return;
     }
 
-    console.log(formatSessionTable(sessions));
+    const visible = limitedRows(sessions, compactLimit(opts));
+    console.log(formatSessionTable(visible));
+    printLimitHint(
+      visible.length,
+      sessions.length,
+      "Use --limit N, --all, --json, or sessions resume <name> for more."
+    );
   });
 
 program
@@ -624,8 +667,11 @@ program
   .option("-p, --project <value>", "Filter by project slug or path")
   .option("--today", "Only include sessions active today")
   .option("--agent <value>", "Filter by provider, agent name, or custom title")
+  .option("-l, --limit <n>", "Max rows to print; with --json, limits JSON when set")
+  .option("--all", "Print all rows in human output")
+  .option("-v, --verbose", "Print all rows in human output")
   .option("--json", "Output as JSON")
-  .action((opts: any) => {
+  .action((opts: { project?: string; today?: boolean; agent?: string; limit?: string; all?: boolean; verbose?: boolean; json?: boolean }) => {
     const sessions = historySessions({
       project: opts.project,
       today: Boolean(opts.today),
@@ -633,11 +679,17 @@ program
     });
 
     if (opts.json) {
-      printJson(sessions);
+      printJson(limitedRows(sessions, explicitJsonLimit(opts)));
       return;
     }
 
-    console.log(formatSessionTable(sessions));
+    const visible = limitedRows(sessions, compactLimit(opts));
+    console.log(formatSessionTable(visible));
+    printLimitHint(
+      visible.length,
+      sessions.length,
+      "Use --limit N, --all, --json, or sessions resume <name> for more."
+    );
   });
 
 program
@@ -676,10 +728,13 @@ program
   .description("Watch session activity in a live-updating table")
   .option("-p, --project <value>", "Filter by project slug or path")
   .option("--interval <seconds>", "Refresh interval in seconds", "5")
+  .option("-l, --limit <n>", "Max rows to print; with --json, limits JSON when set")
+  .option("--all", "Print all rows in human output")
+  .option("-v, --verbose", "Print all rows in human output")
   .option("--json", "Output one JSON snapshot and exit")
   .option("--once", "Render a single snapshot and exit")
-  .action((opts: any) => {
-    const intervalSeconds = Number.parseInt(opts.interval, 10);
+  .action((opts: { project?: string; interval?: string; limit?: string; all?: boolean; verbose?: boolean; json?: boolean; once?: boolean }) => {
+    const intervalSeconds = Number.parseInt(opts.interval ?? "5", 10);
     if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
       console.error("Error: --interval must be a positive integer");
       process.exit(1);
@@ -688,7 +743,7 @@ program
     const render = () => {
       const sessions = listSessions({ project: opts.project });
       if (opts.json) {
-        printJson(sessions);
+        printJson(limitedRows(sessions, explicitJsonLimit(opts)));
         return;
       }
 
@@ -696,7 +751,13 @@ program
       console.log(
         `sessions watch (${new Date().toISOString()})\n`
       );
-      console.log(formatSessionTable(sessions));
+      const visible = limitedRows(sessions, compactLimit(opts));
+      console.log(formatSessionTable(visible));
+      printLimitHint(
+        visible.length,
+        sessions.length,
+        "Use --limit N, --all, --json, or sessions resume <name> for more."
+      );
     };
 
     render();
@@ -714,8 +775,11 @@ program
 program
   .command("paths")
   .description("List all project paths with session counts")
+  .option("-l, --limit <n>", "Max rows to print; with --json, limits JSON when set")
+  .option("--all", "Print all rows in human output")
+  .option("-v, --verbose", "Print all rows in human output")
   .option("--json", "Output as JSON")
-  .action((opts: any) => {
+  .action((opts: { limit?: string; all?: boolean; verbose?: boolean; json?: boolean }) => {
     const projectsDir = getClaudeProjectsDir();
 
     if (!existsSync(projectsDir)) {
@@ -756,16 +820,17 @@ program
     projects.sort((a, b) => b.sessions - a.sessions);
 
     if (opts.json) {
-      console.log(JSON.stringify(projects, null, 2));
+      console.log(JSON.stringify(limitedRows(projects, explicitJsonLimit(opts)), null, 2));
     } else {
       console.log("Claude Code Session Paths\n");
-      const maxPath = Math.max(60, ...projects.map((p) => p.path.length));
+      const visible = limitedRows(projects, compactLimit(opts));
+      const maxPath = Math.min(100, Math.max(60, ...visible.map((p) => p.path.length)));
 
-      for (const p of projects) {
+      for (const p of visible) {
         const marker = p.exists ? " " : "!";
         const countStr = String(p.sessions).padStart(4);
         console.log(
-          `${marker} ${p.path.padEnd(maxPath)} ${countStr} sessions`
+          `${marker} ${truncateText(p.path, maxPath).padEnd(maxPath)} ${countStr} sessions`
         );
       }
 
@@ -776,6 +841,11 @@ program
         );
       }
       console.log(`\nTotal: ${projects.length} projects, ${projects.reduce((s, p) => s + p.sessions, 0)} sessions`);
+      printLimitHint(
+        visible.length,
+        projects.length,
+        "Use --limit N, --all, or --json for the complete path list."
+      );
     }
   });
 
@@ -931,13 +1001,15 @@ program
   .option("--json", "Output as JSON")
   .action(async (opts: { machine?: string; limit?: string; json?: boolean }) => {
     const { listSessions } = await import("../db/sessions.js");
-    const sessions = listSessions({ machine: opts.machine, limit: parseInt(opts.limit ?? "20", 10) || 20 });
+    const limit = parsePositiveIntOption(opts.limit, 20, "--limit");
+    const sessions = listSessions({ machine: opts.machine, limit });
     if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
     for (const s of sessions) {
       console.log(
         `${(s.started_at ?? "").slice(0, 16).padEnd(16)}  ${(s.machine ?? "?").padEnd(9)} ${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(18)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`
       );
     }
+    if (sessions.length === limit) console.log(`\nShowing up to ${limit} sessions. Use --limit N or sessions show <id> for details.`);
   });
 
 program
@@ -951,24 +1023,27 @@ program
   .option("--json", "Output as JSON")
   .action(async (opts: { source?: string; project?: string; machine?: string; limit?: string; json?: boolean }) => {
     const { listSessions } = await import("../db/sessions.js");
+    const limit = parsePositiveIntOption(opts.limit, 50, "--limit");
     const sessions = listSessions({
       source: opts.source,
       project_path: opts.project,
       machine: opts.machine,
-      limit: parseInt(opts.limit ?? "50", 10) || 50,
+      limit,
     });
     if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
     for (const s of sessions) {
       console.log(`${(s.machine ?? "?").padEnd(9)} ${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(18)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`);
     }
+    if (sessions.length === limit) console.log(`\nShowing up to ${limit} sessions. Use --limit N, --json, or sessions show <id> for details.`);
   });
 
 program
   .command("show <id>")
   .description("Show a session's details and message previews (id or unique prefix)")
   .option("-m, --messages <n>", "How many messages to preview", "12")
+  .option("-v, --verbose", "Show all message previews and tool names in human output")
   .option("--json", "Output as JSON")
-  .action(async (id: string, opts: { messages?: string; json?: boolean }) => {
+  .action(async (id: string, opts: { messages?: string; verbose?: boolean; json?: boolean }) => {
     const { getSessionByPrefix, getMessages, getToolCalls } = await import("../db/sessions.js");
     const s = getSessionByPrefix(id);
     if (!s) {
@@ -977,7 +1052,7 @@ program
     }
     const messages = getMessages(s.id);
     const tools = getToolCalls(s.id);
-    const n = parsePositiveIntOption(opts.messages, 12, "--messages");
+    const n = opts.verbose ? messages.length : parsePositiveIntOption(opts.messages, 12, "--messages");
     const previewMessages = messages.slice(0, n);
     if (opts.json) return void console.log(JSON.stringify({ session: s, messages: previewMessages, tools }, null, 2));
     console.log(`${s.title ?? "(untitled)"}`);
@@ -989,9 +1064,17 @@ program
     console.log(`  id:       ${s.id}`);
     console.log("");
     for (const m of previewMessages) {
-      console.log(`  [${m.role}] ${(m.content ?? "").replace(/\s+/g, " ").slice(0, 200)}`);
+      console.log(`  [${m.role}] ${truncateText(m.content ?? "", 200)}`);
     }
-    if (tools.length) console.log(`\n  tools used: ${[...new Set(tools.map((t) => t.tool_name))].join(", ")}`);
+    if (messages.length > previewMessages.length) {
+      console.log(`\n  Showing ${previewMessages.length} of ${messages.length} messages. Use --messages N or --verbose for more previews; add --json for machine-readable output.`);
+    }
+    if (tools.length) {
+      const toolNames = [...new Set(tools.map((t) => t.tool_name))];
+      const visibleToolNames = opts.verbose ? toolNames : toolNames.slice(0, 20);
+      const suffix = toolNames.length > visibleToolNames.length ? ` (+${toolNames.length - visibleToolNames.length} more; use --verbose)` : "";
+      console.log(`\n  tools used: ${visibleToolNames.join(", ")}${suffix}`);
+    }
   });
 
 program
@@ -1012,6 +1095,7 @@ program
     for (const p of projects.slice(0, 15)) {
       console.log(`  ${String(p.session_count).padStart(4)}  ${p.project_name ?? p.project_path}`);
     }
+    if (projects.length > 15) console.log("\nShowing 15 top projects. Use --json for the full project list.");
   });
 
 program
@@ -1020,13 +1104,15 @@ program
   .option("-t, --type <type>", "List one entity type: project, tool, model, provider, repo")
   .option("-r, --related <type:name>", "Sessions related to an entity, e.g. tool:Bash or project:infra")
   .option("--session <id>", "Show a single session's entity neighborhood")
-  .option("-l, --limit <n>", "Max results", "50")
+  .option("-l, --limit <n>", "Max entity/tool/session rows; with --json, limits entity JSON when set")
+  .option("--all", "Print all entity/session rows in human output")
+  .option("-v, --verbose", "Print all entity/session rows in human output")
   .option("--json", "Output as JSON")
-  .action(async (opts: { type?: string; related?: string; session?: string; limit?: string; json?: boolean }) => {
+  .action(async (opts: { type?: string; related?: string; session?: string; limit?: string; all?: boolean; verbose?: boolean; json?: boolean }) => {
     const { listEntities, relatedSessions, sessionGraph } = await import("../lib/graph.js");
     type EntityType = "project" | "tool" | "model" | "provider" | "repo";
     const TYPES = ["project", "tool", "model", "provider", "repo"];
-    const limit = parseInt(opts.limit ?? "50", 10) || 50;
+    const limit = parseOptionalPositiveIntOption(opts.limit, "--limit") ?? DEFAULT_GRAPH_ROWS;
 
     if (opts.session) {
       const { getSessionByPrefix } = await import("../db/sessions.js");
@@ -1040,7 +1126,10 @@ program
       console.log(`project: ${g?.project ?? "?"}`);
       console.log(`model:   ${g?.model ?? "?"} (${g?.provider ?? "?"})`);
       console.log(`repo:    ${g?.repo ?? "?"}`);
-      console.log(`tools:   ${g?.tools.join(", ") || "none"}`);
+      const tools = g?.tools ?? [];
+      const visibleTools = opts.all || opts.verbose ? tools : tools.slice(0, limit);
+      const suffix = tools.length > visibleTools.length ? ` (+${tools.length - visibleTools.length} more; use --limit N, --all, or --json)` : "";
+      console.log(`tools:   ${visibleTools.join(", ") || "none"}${suffix}`);
       return;
     }
 
@@ -1052,11 +1141,13 @@ program
         console.error("--related must be <type>:<name>, e.g. tool:Bash (type: project|tool|model|provider|repo)");
         process.exit(1);
       }
-      const sessions = relatedSessions(type as EntityType, name, limit);
+      const relatedLimit = opts.all || opts.verbose ? null : limit;
+      const sessions = relatedSessions(type as EntityType, name, relatedLimit);
       if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
       for (const s of sessions) {
         console.log(`${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(20)} ${s.title ?? "(untitled)"}  ${s.session_id.slice(0, 8)}`);
       }
+      if (relatedLimit != null && sessions.length === relatedLimit) console.log(`\nShowing up to ${relatedLimit} sessions. Use --limit N or --all for more.`);
       return;
     }
 
@@ -1065,15 +1156,21 @@ program
       process.exit(1);
     }
     const entities = listEntities(opts.type as EntityType | undefined);
-    if (opts.json) return void console.log(JSON.stringify(entities, null, 2));
+    if (opts.json) return void console.log(JSON.stringify(limitedRows(entities, explicitJsonLimit(opts)), null, 2));
+    const visible = limitedRows(entities, compactLimit(opts, DEFAULT_GRAPH_ROWS));
     let lastType = "";
-    for (const e of entities.slice(0, opts.type ? entities.length : 100)) {
+    for (const e of visible) {
       if (e.type !== lastType) {
         console.log(`\n${e.type}:`);
         lastType = e.type;
       }
       console.log(`  ${String(e.session_count).padStart(4)}  ${e.name}`);
     }
+    printLimitHint(
+      visible.length,
+      entities.length,
+      "Use --limit N, --all, --json, or --related type:name for details."
+    );
   });
 
 program
