@@ -51,10 +51,44 @@ describe("sessions storage CLI", () => {
     }
   });
 
-  it("sync exits non-zero when storage is not configured", () => {
+  it("top-level sync indexes locally and skips remote storage when storage is not configured", () => {
     const home = mkdtempSync(join(tmpdir(), "open-sessions-sync-cli-"));
     try {
-      const result = runCli(["sync", "--no-ingest", "--no-pull", "--json"], {
+      const result = runCli(["sync", "--no-ingest", "--json"], {
+        HOME: home,
+        SESSIONS_DB_PATH: ":memory:",
+        HASNA_SESSIONS_DIR: join(home, ".hasna", "sessions"),
+        HASNA_SESSIONS_DATABASE_URL: "",
+        SESSIONS_DATABASE_URL: "",
+        HASNA_SESSIONS_STORAGE_MODE: "",
+        SESSIONS_STORAGE_MODE: "",
+      });
+      const output = Buffer.from(result.stdout).toString("utf-8");
+
+      expect(result.exitCode).toBe(0);
+      const payload = JSON.parse(output) as {
+        push: { code: number; output: string; skipped?: boolean };
+        pull: { code: number; output: string; skipped?: boolean };
+      };
+      expect(payload.push).toEqual({
+        code: 0,
+        output: "storage not configured; skipped remote push",
+        skipped: true,
+      });
+      expect(payload.pull).toEqual({
+        code: 0,
+        output: "storage not configured; skipped remote pull",
+        skipped: true,
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("explicit storage sync exits non-zero when storage is not configured", () => {
+    const home = mkdtempSync(join(tmpdir(), "open-sessions-storage-sync-cli-"));
+    try {
+      const result = runCli(["storage", "sync", "--json"], {
         HOME: home,
         SESSIONS_DB_PATH: ":memory:",
         HASNA_SESSIONS_DIR: join(home, ".hasna", "sessions"),
@@ -66,9 +100,10 @@ describe("sessions storage CLI", () => {
       const output = Buffer.from(result.stdout).toString("utf-8");
 
       expect(result.exitCode).toBe(1);
-      const payload = JSON.parse(output) as { push: { code: number; output: string } };
-      expect(payload.push.code).toBe(1);
-      expect(payload.push.output).toContain("Storage database is not configured");
+      const payload = JSON.parse(output) as { error: string };
+      expect(payload.error).toContain("Storage database is not configured");
+      expect(payload.error).toContain("HASNA_SESSIONS_DATABASE_URL");
+      expect(payload.error).toContain("SESSIONS_DATABASE_URL");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

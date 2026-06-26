@@ -26,6 +26,7 @@ projects, and time.
 sessions ingest                # all providers
 sessions ingest --source codex # one provider
 sessions ingest --force        # re-index everything
+sessions sync --json           # ingest locally; remote sync is skipped unless storage is configured
 
 # Full-text search across every session
 sessions search "kubernetes deploy"
@@ -121,6 +122,9 @@ Endpoints: `/search?q=`, `/recall?q=`, `/tool-calls?q=`, `/recent`, `/list`, `/s
 ## Storage Sync
 
 Storage sync is optional. By default sessions use local SQLite at `~/.hasna/sessions/`.
+The top-level `sessions sync` command refreshes the local index first and skips
+remote push/pull when no storage database is configured. Use the explicit
+`sessions storage ...` commands when you want remote PostgreSQL sync.
 
 ```bash
 sessions storage status

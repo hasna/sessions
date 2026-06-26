@@ -5,6 +5,7 @@ import {
   getStorageConfig,
   getStorageConnectionString,
   getStorageDatabaseEnvName,
+  hasStorageDatabaseConfig,
 } from "../src/db/storage-config.js";
 import { SESSIONS_STORAGE_TABLES, STORAGE_TABLES, getStorageStatus, pullStorageChangesFromRemote } from "../src/db/storage-sync.js";
 import { saveParsedSession } from "../src/db/sessions.js";
@@ -90,6 +91,13 @@ describe("sessions storage sync", () => {
     expect(getStorageConnectionString()).toBe("postgres://fallback.example/sessions");
     expect(getStorageDatabaseEnvName()).toBe("SESSIONS_DATABASE_URL");
     expect(getStorageConfig().mode).toBe("hybrid");
+  });
+
+  it("detects when no storage database is configured", () => {
+    expect(hasStorageDatabaseConfig()).toBe(false);
+
+    process.env.HASNA_SESSIONS_DATABASE_URL = "postgres://new.example/sessions";
+    expect(hasStorageDatabaseConfig()).toBe(true);
   });
 
   it("canonical storage mode wins over the short fallback", () => {

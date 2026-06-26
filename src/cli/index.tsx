@@ -805,6 +805,7 @@ program
   .action(async (opts: { ingest?: boolean; pull?: boolean; json?: boolean }) => {
     const { ingestAll } = await import("../lib/ingest/index.js");
     const { recomputeMachineCounts } = await import("../db/machines.js");
+    const { getStorageConfig, hasStorageDatabaseConfig } = await import("../db/storage-config.js");
 
     const runStorage = async (direction: "push" | "pull") => {
       try {
@@ -818,17 +819,30 @@ program
         return { code: 1, output: `failed to run storage ${direction}: ${(e as Error).message}` };
       }
     };
+    const skipStorage = (direction: "push" | "pull") => ({
+      code: 0,
+      output: `storage not configured; skipped remote ${direction}`,
+      skipped: true,
+    });
 
     const result: Record<string, unknown> = {};
     if (opts.ingest !== false) {
       result.ingest = ingestAll();
       if (!opts.json) for (const r of (result.ingest as { source: string; sessions: number }[])) console.log(`ingest ${r.source}: +${r.sessions} sessions`);
     }
-    if (!opts.json) console.log("pushing to storage...");
-    result.push = await runStorage("push");
-    if (opts.pull !== false) {
-      if (!opts.json) console.log("pulling from storage...");
-      result.pull = await runStorage("pull");
+    const storageConfig = getStorageConfig();
+    const shouldSkipStorage = storageConfig.mode === "local" && !hasStorageDatabaseConfig();
+    if (shouldSkipStorage) {
+      if (!opts.json) console.log("storage not configured; local index updated only");
+      result.push = skipStorage("push");
+      if (opts.pull !== false) result.pull = skipStorage("pull");
+    } else {
+      if (!opts.json) console.log("pushing to storage...");
+      result.push = await runStorage("push");
+      if (opts.pull !== false) {
+        if (!opts.json) console.log("pulling from storage...");
+        result.pull = await runStorage("pull");
+      }
     }
     recomputeMachineCounts();
 

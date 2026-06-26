@@ -1,6 +1,6 @@
 {
   "name": "@hasna/sessions",
-  "version": "0.11.32",
+  "version": "0.11.33",
   "description": "Search and sync AI coding sessions (Claude, Codex, Gemini) — unified SQLite index with full-text search",
   "type": "module",
   "main": "dist/index.js",
@@ -49,6 +49,10 @@
   ],
   "author": "Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hasna/sessions.git"
+  },
   "dependencies": {
     "@hasna/cloud": "0.1.24",
     "@hasna/events": "^0.1.7",

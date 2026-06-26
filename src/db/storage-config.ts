@@ -15,7 +15,7 @@ export interface StorageConfig {
   };
 }
 
-const STORAGE_CONFIG_PATH = join(homedir(), ".hasna", "sessions", "storage", "config.json");
+export const STORAGE_CONFIG_PATH = join(homedir(), ".hasna", "sessions", "storage", "config.json");
 
 export const SESSIONS_STORAGE_ENV = {
   databaseUrl: "HASNA_SESSIONS_DATABASE_URL",
@@ -79,6 +79,13 @@ export function getStorageDatabaseUrl(): string | null {
   return env ? process.env[env.name]?.trim() || null : null;
 }
 
+export function hasStorageDatabaseConfig(): boolean {
+  if (getStorageDatabaseUrl()) return true;
+
+  const config = getStorageConfig();
+  return Boolean(config.rds.host && config.rds.username);
+}
+
 export function getStorageConfig(): StorageConfig {
   const config: StorageConfig = {
     mode: "local",
@@ -119,7 +126,7 @@ export function getStorageConnectionString(dbName = "sessions"): string {
   const config = getStorageConfig();
   const { host, port, username, password_env, ssl } = config.rds;
   if (!host || !username) {
-    throw new Error("Storage database is not configured. Set HASNA_SESSIONS_DATABASE_URL or configure ~/.hasna/sessions/storage/config.json.");
+    throw new Error(`Storage database is not configured. Set HASNA_SESSIONS_DATABASE_URL, set SESSIONS_DATABASE_URL, or configure ${STORAGE_CONFIG_PATH}.`);
   }
 
   const password = process.env[password_env];
