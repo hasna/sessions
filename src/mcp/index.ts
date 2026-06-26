@@ -39,19 +39,123 @@ import {
   renameSession,
   searchSessions,
 } from "../lib/sessions.js";
+import {
+  buildActiveAgentsResponse,
+  buildSessionHealthResponse,
+} from "../lib/agent-state.js";
 import { listAdapters, getAdapter } from "../lib/adapters/index.js";
-import type { CanonicalSession } from "../lib/adapters/types.js";
+import type { CanonicalEvent, CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
 import { registerSessionsStorageTools } from "./storage-tools.js";
 
 const packageInfo = getPackageInfo();
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
+const okCompact = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 const fail = (e: unknown) => ({ content: [{ type: "text" as const, text: String((e as Error)?.message ?? e) }], isError: true });
+const DEFAULT_MCP_LIST_LIMIT = 20;
+const DEFAULT_MCP_GRAPH_LIMIT = 50;
+const DEFAULT_MCP_PREVIEW_CHARS = 600;
 
 function textJson(value: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+  };
+}
+
+function normalizeLimit(value: number | undefined, fallback: number): number {
+  if (value == null) return fallback;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error("limit values must be positive integers");
+  }
+  return value;
+}
+
+function truncateText(value: string | null | undefined, max = DEFAULT_MCP_PREVIEW_CHARS): string | null {
+  if (value == null) return null;
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  if (oneLine.length <= max) return oneLine;
+  if (max <= 3) return oneLine.slice(0, max);
+  return `${oneLine.slice(0, max - 3)}...`;
+}
+
+function compactList<T>(items: T[], limit: number, label: string) {
+  const rows = items.slice(0, limit);
+  return {
+    total: items.length,
+    returned: rows.length,
+    limit,
+    truncated: items.length > rows.length,
+    [label]: rows,
+    hint: items.length > rows.length ? "Increase limit or request include_full for the full payload." : undefined,
+  };
+}
+
+function compactMessage(message: ReturnType<typeof getMessages>[number]) {
+  return {
+    id: message.id,
+    role: message.role,
+    sequence_num: message.sequence_num,
+    timestamp: message.timestamp,
+    model: message.model,
+    input_tokens: message.input_tokens,
+    output_tokens: message.output_tokens,
+    content: truncateText(message.content),
+  };
+}
+
+function compactToolCall(toolCall: ReturnType<typeof getToolCalls>[number]) {
+  return {
+    id: toolCall.id,
+    tool_name: toolCall.tool_name,
+    status: toolCall.status,
+    timestamp: toolCall.timestamp,
+    duration_ms: toolCall.duration_ms,
+    tool_input: truncateText(toolCall.tool_input),
+    tool_output: truncateText(toolCall.tool_output),
+  };
+}
+
+function compactCanonicalEvent(event: CanonicalEvent) {
+  return {
+    type: event.type,
+    timestamp: event.timestamp,
+    model: event.model,
+    toolName: event.toolName,
+    content: truncateText(event.content),
+    toolArgs: event.toolArgs == null ? undefined : truncateText(JSON.stringify(event.toolArgs)),
+    toolResult: truncateText(event.toolResult),
+  };
+}
+
+function compactSessionDetail(
+  session: ReturnType<typeof getSessionByPrefix>,
+  options: { message_limit?: number; tool_call_limit?: number } = {}
+) {
+  if (!session) throw new Error("session is required");
+  const messages = getMessages(session.id);
+  const toolCalls = getToolCalls(session.id);
+  const messageLimit = normalizeLimit(options.message_limit, DEFAULT_MCP_LIST_LIMIT);
+  const toolCallLimit = normalizeLimit(options.tool_call_limit, DEFAULT_MCP_LIST_LIMIT);
+  const previewMessages = messages.slice(0, messageLimit).map(compactMessage);
+  const previewToolCalls = toolCalls.slice(0, toolCallLimit).map(compactToolCall);
+  const truncated = {
+    messages: messages.length > previewMessages.length,
+    tool_calls: toolCalls.length > previewToolCalls.length,
+  };
+  return {
+    ok: true,
+    session,
+    counts: {
+      messages: messages.length,
+      tool_calls: toolCalls.length,
+    },
+    messages: previewMessages,
+    tool_calls: previewToolCalls,
+    truncated,
+    hint: truncated.messages || truncated.tool_calls
+      ? "Use get_session with include_full=true, or raise message_limit/tool_call_limit, for full details."
+      : undefined,
   };
 }
 
@@ -97,6 +201,18 @@ function jsonResource(uri: URL, value: unknown) {
   };
 }
 
+function compactJsonResource(uri: URL, value: unknown) {
+  return {
+    contents: [
+      {
+        uri: uri.href,
+        mimeType: "application/json",
+        text: JSON.stringify(value),
+      },
+    ],
+  };
+}
+
 server.registerResource(
   "sessions_stats",
   "sessions://stats",
@@ -120,18 +236,40 @@ server.registerResource(
 );
 
 server.registerResource(
+  "active_agents",
+  "sessions://active-agents",
+  {
+    title: "Active Agent Panes",
+    description: "Compact bounded state for live tmux agent panes.",
+    mimeType: "application/json",
+  },
+  async (uri) => compactJsonResource(uri, buildActiveAgentsResponse())
+);
+
+server.registerResource(
+  "session_health",
+  "sessions://session-health",
+  {
+    title: "Session Health",
+    description: "Compact bounded health and evidence summary for recent indexed sessions.",
+    mimeType: "application/json",
+  },
+  async (uri) => compactJsonResource(uri, buildSessionHealthResponse())
+);
+
+server.registerResource(
   "session_detail",
   new ResourceTemplate("sessions://session/{id}", { list: undefined }),
   {
     title: "Session Detail",
-    description: "Indexed session metadata, messages, and tool calls by exact ID or unique prefix.",
+    description: "Indexed session metadata with compact message/tool previews by exact ID or unique prefix.",
     mimeType: "application/json",
   },
   async (uri, variables) => {
     const id = String(variables.id ?? "");
     const session = getSessionByPrefix(id);
     if (!session) return jsonResource(uri, { ok: false, error: `session not found: ${id}` });
-    return jsonResource(uri, { ok: true, session, messages: getMessages(session.id), tool_calls: getToolCalls(session.id) });
+    return jsonResource(uri, compactSessionDetail(session));
   }
 );
 
@@ -319,19 +457,93 @@ server.tool(
 );
 
 server.tool(
+  "active_agents",
+  "Return compact bounded JSON for live tmux agent panes: cwd, command, composer state, dispatch classification, and evidence refs.",
+  {
+    limit: z.number().int().positive().optional().describe("Max agent panes returned (default 20, capped)"),
+    include_unknown: z.boolean().optional().describe("Include shell/unknown panes as well as recognized agent panes"),
+    capture_lines: z.number().int().nonnegative().optional().describe("Bounded pane lines to inspect for composer state (default 80)"),
+    capture: z.boolean().optional().describe("Set false to skip capture and only classify from pane command"),
+  },
+  async (a: { limit?: number; include_unknown?: boolean; capture_lines?: number; capture?: boolean }) => {
+    try {
+      return okCompact(buildActiveAgentsResponse({
+        limit: a.limit,
+        includeUnknown: a.include_unknown,
+        captureLines: a.capture_lines,
+        capture: a.capture,
+      }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "session_health",
+  "Return compact bounded JSON for indexed session state: cwd, resume command, activity/health classification, issues, and evidence paths.",
+  {
+    id: z.string().optional().describe("Optional session id or unique prefix"),
+    source: z.string().optional().describe("Filter by provider: claude, codex, gemini"),
+    project_path: z.string().optional().describe("Filter by exact cwd/project path"),
+    machine: z.string().optional().describe("Filter by machine"),
+    limit: z.number().int().positive().optional().describe("Max sessions returned (default 20, capped)"),
+    active_minutes: z.number().int().positive().optional().describe("Classify sessions this recent as active"),
+    stale_minutes: z.number().int().positive().optional().describe("Classify sessions older than this as stale"),
+    issue_limit: z.number().int().positive().optional().describe("Max issues returned per session"),
+  },
+  async (a: {
+    id?: string;
+    source?: string;
+    project_path?: string;
+    machine?: string;
+    limit?: number;
+    active_minutes?: number;
+    stale_minutes?: number;
+    issue_limit?: number;
+  }) => {
+    try {
+      return okCompact(buildSessionHealthResponse({
+        id: a.id,
+        source: a.source,
+        project_path: a.project_path,
+        machine: a.machine,
+        limit: a.limit,
+        activeMinutes: a.active_minutes,
+        staleMinutes: a.stale_minutes,
+        issueLimit: a.issue_limit,
+      }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
   "get_session",
-  "Get a session's full details, messages, and tool calls by id or unique id prefix.",
+  "Get a session by id or unique prefix. Defaults to compact message/tool previews; set include_full=true for full records.",
   {
     id: z.string().describe("Session id or unique prefix"),
-    message_limit: z.number().optional().describe("Cap messages returned (default all)"),
+    message_limit: z.number().int().positive().optional().describe("Messages returned in compact preview (default 20)"),
+    tool_call_limit: z.number().int().positive().optional().describe("Tool calls returned in compact preview (default 20)"),
+    include_full: z.boolean().optional().describe("Return full message and tool call records instead of compact previews"),
   },
-  async (a: { id: string; message_limit?: number }) => {
+  async (a: { id: string; message_limit?: number; tool_call_limit?: number; include_full?: boolean }) => {
     try {
       const session = getSessionByPrefix(a.id);
       if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
-      let messages = getMessages(session.id);
-      if (a.message_limit) messages = messages.slice(0, a.message_limit);
-      return ok({ session, messages, tool_calls: getToolCalls(session.id) });
+      if (a.include_full) {
+        const messages = getMessages(session.id);
+        const toolCalls = getToolCalls(session.id);
+        const messageLimit = a.message_limit == null ? undefined : normalizeLimit(a.message_limit, DEFAULT_MCP_LIST_LIMIT);
+        const toolCallLimit = a.tool_call_limit == null ? undefined : normalizeLimit(a.tool_call_limit, DEFAULT_MCP_LIST_LIMIT);
+        return ok({
+          session,
+          messages: messageLimit == null ? messages : messages.slice(0, messageLimit),
+          tool_calls: toolCallLimit == null ? toolCalls : toolCalls.slice(0, toolCallLimit),
+        });
+      }
+      return ok(compactSessionDetail(session, { message_limit: a.message_limit, tool_call_limit: a.tool_call_limit }));
     } catch (e) {
       return fail(e);
     }
@@ -405,13 +617,14 @@ server.tool(
 
 server.tool(
   "knowledge_graph",
-  "Explore the session knowledge graph: list entities (projects/tools/models/providers/repos), find sessions related to an entity, or a session's entity neighborhood.",
+  "Explore the session knowledge graph. Defaults to compact entity/tool lists; set include_full=true for full entity/session neighborhoods.",
   {
     type: z.enum(["project", "tool", "model", "provider", "repo"]).optional().describe("List entities of this type"),
     related_type: z.enum(["project", "tool", "model", "provider", "repo"]).optional(),
     related_name: z.string().optional().describe("With related_type: sessions linked to this entity"),
     session_id: z.string().optional().describe("A session's entity neighborhood"),
-    limit: z.number().optional(),
+    limit: z.number().int().positive().optional(),
+    include_full: z.boolean().optional().describe("Return the full entity/session neighborhood where supported"),
   },
   async (a: {
     type?: "project" | "tool" | "model" | "provider" | "repo";
@@ -419,11 +632,28 @@ server.tool(
     related_name?: string;
     session_id?: string;
     limit?: number;
+    include_full?: boolean;
   }) => {
     try {
-      if (a.session_id) return ok(sessionGraph(a.session_id));
-      if (a.related_type && a.related_name) return ok(relatedSessions(a.related_type, a.related_name, a.limit ?? 50));
-      return ok(listEntities(a.type));
+      const limit = normalizeLimit(a.limit, DEFAULT_MCP_GRAPH_LIMIT);
+      if (a.session_id) {
+        const graph = sessionGraph(a.session_id);
+        if (!graph || a.include_full) return ok(graph);
+        const tools = graph.tools.slice(0, limit);
+        return ok({
+          ...graph,
+          tools,
+          total_tools: graph.tools.length,
+          truncated: graph.tools.length > tools.length,
+          hint: graph.tools.length > tools.length ? "Increase limit or request include_full for all tools." : undefined,
+        });
+      }
+      if (a.related_type && a.related_name) {
+        return ok(relatedSessions(a.related_type, a.related_name, a.include_full ? null : limit));
+      }
+      const entities = listEntities(a.type);
+      if (a.include_full) return ok(entities);
+      return ok(compactList(entities, limit, "entities"));
     } catch (e) {
       return fail(e);
     }
@@ -434,29 +664,37 @@ server.tool(
 
 server.tool(
   "sessions_list",
-  "List known sessions with friendly names and metadata.",
-  { project: z.string().optional() },
-  async (args: { project?: string }) => {
-    return textJson(listRegistrySessions({ project: args.project }));
+  "List known sessions with friendly names and metadata. Defaults to a compact first page.",
+  {
+    project: z.string().optional(),
+    limit: z.number().int().positive().optional(),
+    include_full: z.boolean().optional().describe("Return the full raw session array"),
+  },
+  async (args: { project?: string; limit?: number; include_full?: boolean }) => {
+    const sessions = listRegistrySessions({ project: args.project });
+    if (args.include_full) return textJson(sessions);
+    return textJson(compactList(sessions, normalizeLimit(args.limit, DEFAULT_MCP_LIST_LIMIT), "sessions"));
   }
 );
 
 server.tool(
   "sessions_history",
-  "List historical sessions with optional today/project/agent filters.",
+  "List historical sessions with optional today/project/agent filters. Defaults to a compact first page.",
   {
     project: z.string().optional(),
     today: z.boolean().optional(),
     agent: z.string().optional(),
+    limit: z.number().int().positive().optional(),
+    include_full: z.boolean().optional().describe("Return the full raw session array"),
   },
-  async (args: { project?: string; today?: boolean; agent?: string }) => {
-    return textJson(
-      historySessions({
-        project: args.project,
-        today: args.today,
-        agent: args.agent,
-      })
-    );
+  async (args: { project?: string; today?: boolean; agent?: string; limit?: number; include_full?: boolean }) => {
+    const sessions = historySessions({
+      project: args.project,
+      today: args.today,
+      agent: args.agent,
+    });
+    if (args.include_full) return textJson(sessions);
+    return textJson(compactList(sessions, normalizeLimit(args.limit, DEFAULT_MCP_LIST_LIMIT), "sessions"));
   }
 );
 
@@ -528,12 +766,23 @@ server.tool(
 
 server.tool(
   "sessions_watch",
-  "Return the current watch snapshot for known sessions.",
-  { project: z.string().optional() },
-  async (args: { project?: string }) => {
+  "Return the current watch snapshot for known sessions. Defaults to a compact first page.",
+  {
+    project: z.string().optional(),
+    limit: z.number().int().positive().optional(),
+    include_full: z.boolean().optional().describe("Return all sessions in the snapshot"),
+  },
+  async (args: { project?: string; limit?: number; include_full?: boolean }) => {
+    const sessions = listRegistrySessions({ project: args.project });
+    if (args.include_full) {
+      return textJson({
+        generated_at: new Date().toISOString(),
+        sessions,
+      });
+    }
     return textJson({
       generated_at: new Date().toISOString(),
-      sessions: listRegistrySessions({ project: args.project }),
+      ...compactList(sessions, normalizeLimit(args.limit, DEFAULT_MCP_LIST_LIMIT), "sessions"),
     });
   }
 );
@@ -653,12 +902,14 @@ server.tool(
 
 server.tool(
   "sessions_read",
-  "Read the full transcript of a session from a specific adapter.",
+  "Read a session transcript from a specific adapter. Defaults to compact event previews; set include_full=true for full events.",
   {
     adapter_id: z.string().describe("Adapter ID: 'codex', 'claude', etc."),
     session_path: z.string().describe("Full path to the session file."),
+    event_limit: z.number().int().positive().optional().describe("Events returned in compact preview (default 20)"),
+    include_full: z.boolean().optional().describe("Return full transcript events instead of compact previews"),
   },
-  async (args: { adapter_id: string; session_path: string }) => {
+  async (args: { adapter_id: string; session_path: string; event_limit?: number; include_full?: boolean }) => {
     const adapter = getAdapter(args.adapter_id);
     if (!adapter) {
       return {
@@ -673,6 +924,11 @@ server.tool(
         isError: true,
       };
     }
+    const eventLimit = normalizeLimit(args.event_limit, DEFAULT_MCP_LIST_LIMIT);
+    const events = args.include_full
+      ? session.events
+      : session.events.slice(0, eventLimit).map(compactCanonicalEvent);
+    const truncated = !args.include_full && session.events.length > events.length;
     return textJson({
       id: session.id,
       cwd: session.cwd,
@@ -682,7 +938,11 @@ server.tool(
       agentName: session.agentName,
       title: session.title,
       source: session.source,
-      events: session.events,
+      event_count: session.events.length,
+      returned_events: events.length,
+      events,
+      truncated,
+      hint: truncated ? "Use sessions_read with include_full=true, or raise event_limit, for the full transcript." : undefined,
     });
   }
 );

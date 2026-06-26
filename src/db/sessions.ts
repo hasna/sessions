@@ -209,18 +209,31 @@ export function getSessionBySource(source: string, sourceId: string): Session | 
   return row ? rowToSession(row) : null;
 }
 
-/** Resolve a session by full id or a unique id/source_id prefix (null if none or ambiguous). */
-export function getSessionByPrefix(idOrPrefix: string): Session | null {
+export type SessionLookupStatus = "found" | "not_found" | "ambiguous";
+
+export interface SessionLookupResult {
+  status: SessionLookupStatus;
+  session: Session | null;
+  matches: number;
+}
+
+/** Resolve a session by full id or a unique id/source_id prefix with explicit status. */
+export function resolveSessionByPrefix(idOrPrefix: string): SessionLookupResult {
   const db = getDatabase();
   const exact = db.prepare("SELECT * FROM sessions WHERE id = ? OR source_id = ?").get(idOrPrefix, idOrPrefix) as
     | Record<string, unknown>
     | undefined;
-  if (exact) return rowToSession(exact);
+  if (exact) return { status: "found", session: rowToSession(exact), matches: 1 };
   const rows = db
     .prepare("SELECT * FROM sessions WHERE id LIKE ? OR source_id LIKE ? LIMIT 2")
     .all(`${idOrPrefix}%`, `${idOrPrefix}%`) as Record<string, unknown>[];
-  if (rows.length === 1) return rowToSession(rows[0]);
-  return null;
+  if (rows.length === 1) return { status: "found", session: rowToSession(rows[0]), matches: 1 };
+  return { status: rows.length > 1 ? "ambiguous" : "not_found", session: null, matches: rows.length };
+}
+
+/** Resolve a session by full id or a unique id/source_id prefix (null if none or ambiguous). */
+export function getSessionByPrefix(idOrPrefix: string): Session | null {
+  return resolveSessionByPrefix(idOrPrefix).session;
 }
 
 export interface ListSessionsOptions {
@@ -231,8 +244,10 @@ export interface ListSessionsOptions {
   offset?: number;
 }
 
-export function listSessions(opts: ListSessionsOptions = {}): Session[] {
-  const db = getDatabase();
+function sessionWhere(opts: Pick<ListSessionsOptions, "source" | "project_path" | "machine">): {
+  clause: string;
+  params: any[];
+} {
   const where: string[] = [];
   const params: any[] = [];
   if (opts.source) {
@@ -247,12 +262,42 @@ export function listSessions(opts: ListSessionsOptions = {}): Session[] {
     where.push("machine = ?");
     params.push(opts.machine);
   }
-  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  return {
+    clause: where.length ? `WHERE ${where.join(" AND ")}` : "",
+    params,
+  };
+}
+
+export function listSessions(opts: ListSessionsOptions = {}): Session[] {
+  const db = getDatabase();
+  const { clause, params } = sessionWhere(opts);
   const limit = opts.limit ?? 50;
   const offset = opts.offset ?? 0;
   const rows = db
     .prepare(
       `SELECT * FROM sessions ${clause} ORDER BY COALESCE(started_at, ingested_at) DESC LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset) as Record<string, unknown>[];
+  return rows.map(rowToSession);
+}
+
+export function countSessions(opts: Pick<ListSessionsOptions, "source" | "project_path" | "machine"> = {}): number {
+  const db = getDatabase();
+  const { clause, params } = sessionWhere(opts);
+  const row = db.prepare(`SELECT COUNT(*) AS c FROM sessions ${clause}`).get(...params) as { c: number } | undefined;
+  return Number(row?.c ?? 0);
+}
+
+export function listSessionsByLastActivity(opts: ListSessionsOptions = {}): Session[] {
+  const db = getDatabase();
+  const { clause, params } = sessionWhere(opts);
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+  const rows = db
+    .prepare(
+      `SELECT * FROM sessions ${clause}
+       ORDER BY COALESCE(ended_at, updated_at, started_at, ingested_at) DESC
+       LIMIT ? OFFSET ?`
     )
     .all(...params, limit, offset) as Record<string, unknown>[];
   return rows.map(rowToSession);
