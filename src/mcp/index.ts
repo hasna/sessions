@@ -39,6 +39,10 @@ import {
   renameSession,
   searchSessions,
 } from "../lib/sessions.js";
+import {
+  buildActiveAgentsResponse,
+  buildSessionHealthResponse,
+} from "../lib/agent-state.js";
 import { listAdapters, getAdapter } from "../lib/adapters/index.js";
 import type { CanonicalEvent, CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
@@ -47,6 +51,7 @@ import { registerSessionsStorageTools } from "./storage-tools.js";
 const packageInfo = getPackageInfo();
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
+const okCompact = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 const fail = (e: unknown) => ({ content: [{ type: "text" as const, text: String((e as Error)?.message ?? e) }], isError: true });
 const DEFAULT_MCP_LIST_LIMIT = 20;
 const DEFAULT_MCP_GRAPH_LIMIT = 50;
@@ -196,6 +201,18 @@ function jsonResource(uri: URL, value: unknown) {
   };
 }
 
+function compactJsonResource(uri: URL, value: unknown) {
+  return {
+    contents: [
+      {
+        uri: uri.href,
+        mimeType: "application/json",
+        text: JSON.stringify(value),
+      },
+    ],
+  };
+}
+
 server.registerResource(
   "sessions_stats",
   "sessions://stats",
@@ -216,6 +233,28 @@ server.registerResource(
     mimeType: "application/json",
   },
   async (uri) => jsonResource(uri, { sessions: getRecentSessions(20) })
+);
+
+server.registerResource(
+  "active_agents",
+  "sessions://active-agents",
+  {
+    title: "Active Agent Panes",
+    description: "Compact bounded state for live tmux agent panes.",
+    mimeType: "application/json",
+  },
+  async (uri) => compactJsonResource(uri, buildActiveAgentsResponse())
+);
+
+server.registerResource(
+  "session_health",
+  "sessions://session-health",
+  {
+    title: "Session Health",
+    description: "Compact bounded health and evidence summary for recent indexed sessions.",
+    mimeType: "application/json",
+  },
+  async (uri) => compactJsonResource(uri, buildSessionHealthResponse())
 );
 
 server.registerResource(
@@ -411,6 +450,69 @@ server.tool(
   async () => {
     try {
       return ok(listMachines());
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "active_agents",
+  "Return compact bounded JSON for live tmux agent panes: cwd, command, composer state, dispatch classification, and evidence refs.",
+  {
+    limit: z.number().int().positive().optional().describe("Max agent panes returned (default 20, capped)"),
+    include_unknown: z.boolean().optional().describe("Include shell/unknown panes as well as recognized agent panes"),
+    capture_lines: z.number().int().nonnegative().optional().describe("Bounded pane lines to inspect for composer state (default 80)"),
+    capture: z.boolean().optional().describe("Set false to skip capture and only classify from pane command"),
+  },
+  async (a: { limit?: number; include_unknown?: boolean; capture_lines?: number; capture?: boolean }) => {
+    try {
+      return okCompact(buildActiveAgentsResponse({
+        limit: a.limit,
+        includeUnknown: a.include_unknown,
+        captureLines: a.capture_lines,
+        capture: a.capture,
+      }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "session_health",
+  "Return compact bounded JSON for indexed session state: cwd, resume command, activity/health classification, issues, and evidence paths.",
+  {
+    id: z.string().optional().describe("Optional session id or unique prefix"),
+    source: z.string().optional().describe("Filter by provider: claude, codex, gemini"),
+    project_path: z.string().optional().describe("Filter by exact cwd/project path"),
+    machine: z.string().optional().describe("Filter by machine"),
+    limit: z.number().int().positive().optional().describe("Max sessions returned (default 20, capped)"),
+    active_minutes: z.number().int().positive().optional().describe("Classify sessions this recent as active"),
+    stale_minutes: z.number().int().positive().optional().describe("Classify sessions older than this as stale"),
+    issue_limit: z.number().int().positive().optional().describe("Max issues returned per session"),
+  },
+  async (a: {
+    id?: string;
+    source?: string;
+    project_path?: string;
+    machine?: string;
+    limit?: number;
+    active_minutes?: number;
+    stale_minutes?: number;
+    issue_limit?: number;
+  }) => {
+    try {
+      return okCompact(buildSessionHealthResponse({
+        id: a.id,
+        source: a.source,
+        project_path: a.project_path,
+        machine: a.machine,
+        limit: a.limit,
+        activeMinutes: a.active_minutes,
+        staleMinutes: a.stale_minutes,
+        issueLimit: a.issue_limit,
+      }));
     } catch (e) {
       return fail(e);
     }

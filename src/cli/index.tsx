@@ -49,6 +49,12 @@ import {
   renameSession,
   searchSessions,
 } from "../lib/sessions.js";
+import {
+  buildActiveAgentsResponse,
+  buildSessionHealthResponse,
+  type ActiveAgentsResponse,
+  type SessionHealthResponse,
+} from "../lib/agent-state.js";
 
 const program = new Command();
 const DEFAULT_HUMAN_ROWS = 20;
@@ -56,6 +62,10 @@ const DEFAULT_GRAPH_ROWS = 50;
 
 function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
+}
+
+function printCompactJson(value: unknown): void {
+  console.log(JSON.stringify(value));
 }
 
 function truncateText(value: string, max = 120): string {
@@ -108,6 +118,50 @@ function parseNonNegativeIntOption(raw: string | undefined, fallback: number, na
     process.exit(1);
   }
   return value;
+}
+
+function printActiveAgentsHuman(response: ActiveAgentsResponse): void {
+  if (!response.source.available) {
+    console.log(`tmux unavailable: ${response.source.errors.join("; ") || "unknown error"}`);
+    return;
+  }
+  if (response.agents.length === 0) {
+    console.log("No active agent panes found.");
+    return;
+  }
+  console.log("TARGET                 AGENT      STATE    CAN_SEND  CWD");
+  for (const agent of response.agents) {
+    const send = agent.classification.can_receive_prompt
+      ? "enter"
+      : agent.classification.can_queue_prompt
+        ? "queue"
+        : "-";
+    console.log(
+      `${agent.target.padEnd(22)} ${agent.classification.agent_kind.padEnd(10)} ${agent.classification.composer_state.padEnd(8)} ${send.padEnd(8)} ${agent.cwd ?? "-"}`
+    );
+  }
+  if (response.truncated) {
+    console.log(`\nShowing ${response.returned} of ${response.total}. Use --limit N for more.`);
+  }
+}
+
+function printSessionHealthHuman(response: SessionHealthResponse): void {
+  if (response.sessions.length === 0) {
+    console.log("No matching indexed sessions found.");
+    return;
+  }
+  console.log("SESSION       SOURCE   ACTIVITY  HEALTH    CWD");
+  for (const session of response.sessions) {
+    console.log(
+      `${session.source_id.slice(0, 12).padEnd(12)} ${session.source.padEnd(8)} ${session.classification.activity.padEnd(9)} ${session.classification.health.padEnd(9)} ${session.cwd ?? "-"}`
+    );
+    if (session.issues.length > 0) {
+      console.log(`  issues: ${session.issues.map((issue) => `${issue.type}:${issue.severity}`).join(", ")}`);
+    }
+  }
+  if (response.truncated) {
+    console.log(`\nShowing ${response.returned} of ${response.total}. Use --limit N for more.`);
+  }
 }
 
 async function pickSessionFromList() {
@@ -864,6 +918,77 @@ program
     for (const m of machines) {
       console.log(`${m.name.padEnd(10)} ${String(m.session_count).padStart(6)} sessions   ${(m.platform ?? "").padEnd(8)} last seen ${m.last_seen_at}`);
     }
+  });
+
+program
+  .command("active-agents")
+  .description("Return compact JSON for live tmux agent panes and composer state")
+  .option("-l, --limit <n>", "Maximum agent panes to return", "20")
+  .option("--include-unknown", "Include shell/unknown panes in addition to recognized agents")
+  .option("--capture-lines <n>", "Bounded pane lines to inspect for composer state", "80")
+  .option("--no-capture", "Skip pane capture; composer_state will usually be unknown")
+  .option("--human", "Print a compact table instead of JSON")
+  .option("--json", "Output as JSON (default)")
+  .action((opts: { limit?: string; includeUnknown?: boolean; captureLines?: string; capture?: boolean; human?: boolean; json?: boolean }) => {
+    const response = buildActiveAgentsResponse({
+      limit: parsePositiveIntOption(opts.limit, 20, "--limit"),
+      includeUnknown: Boolean(opts.includeUnknown),
+      captureLines: parseNonNegativeIntOption(opts.captureLines, 80, "--capture-lines"),
+      capture: opts.capture !== false,
+    });
+    if (opts.human) {
+      printActiveAgentsHuman(response);
+      return;
+    }
+    printCompactJson(response);
+  });
+
+program
+  .command("session-health [id]")
+  .description("Return compact JSON session state, classification, resume command, and evidence paths")
+  .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
+  .option("-p, --project <path>", "Filter by exact project path/cwd")
+  .option("-m, --machine <name>", "Filter by machine")
+  .option("-l, --limit <n>", "Maximum sessions to return", "20")
+  .option("--active-minutes <n>", "Classify sessions this recent as active", "15")
+  .option("--stale-minutes <n>", "Classify sessions older than this as stale", "60")
+  .option("--issue-limit <n>", "Maximum issues returned per session", "8")
+  .option("--human", "Print a compact table instead of JSON")
+  .option("--json", "Output as JSON (default)")
+  .action((
+    id: string | undefined,
+    opts: {
+      source?: string;
+      project?: string;
+      machine?: string;
+      limit?: string;
+      activeMinutes?: string;
+      staleMinutes?: string;
+      issueLimit?: string;
+      human?: boolean;
+      json?: boolean;
+    }
+  ) => {
+    const response = buildSessionHealthResponse({
+      id,
+      source: opts.source,
+      project_path: opts.project,
+      machine: opts.machine,
+      limit: parsePositiveIntOption(opts.limit, 20, "--limit"),
+      activeMinutes: parsePositiveIntOption(opts.activeMinutes, 15, "--active-minutes"),
+      staleMinutes: parsePositiveIntOption(opts.staleMinutes, 60, "--stale-minutes"),
+      issueLimit: parsePositiveIntOption(opts.issueLimit, 8, "--issue-limit"),
+    });
+    if (id && response.returned === 0) {
+      const status = response.lookup?.status ?? "not_found";
+      console.error(`Session lookup ${status.replace(/_/g, " ")}: ${id}`);
+      process.exit(1);
+    }
+    if (opts.human) {
+      printSessionHealthHuman(response);
+      return;
+    }
+    printCompactJson(response);
   });
 
 program

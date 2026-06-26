@@ -171,6 +171,8 @@ describe("sessions MCP server", () => {
     expect(tools).toContain("embed");
     expect(tools).toContain("knowledge_graph");
     expect(tools).toContain("machines");
+    expect(tools).toContain("active_agents");
+    expect(tools).toContain("session_health");
     // Preserved from the original stub
     expect(tools).toContain("send_feedback");
     expect(tools).toContain("register_agent");
@@ -180,6 +182,8 @@ describe("sessions MCP server", () => {
     const resources = await listMcpNames("resources/list", "resources");
     expect(resources).toContain("sessions_stats");
     expect(resources).toContain("recent_sessions");
+    expect(resources).toContain("active_agents");
+    expect(resources).toContain("session_health");
 
     const prompts = await listMcpNames("prompts/list", "prompts");
     expect(prompts).toContain("recall_coding_session");
@@ -211,6 +215,14 @@ describe("sessions MCP server", () => {
 
       const fullGraph = JSON.parse(toolText(await callMcpTool("knowledge_graph", { type: "tool", include_full: true }, env)));
       expect(fullGraph).toHaveLength(25);
+
+      const healthText = toolText(await callMcpTool("session_health", { id: "mcp-compact-session" }, env));
+      expect(healthText).not.toContain("\n  ");
+      const health = JSON.parse(healthText);
+      expect(health.schema_version).toBe("sessions.session_health.v1");
+      expect(health.sessions).toHaveLength(1);
+      expect(health.sessions[0].cwd).toBe("/tmp/mcp");
+      expect(health.sessions[0].command.shell).toBe("claude --resume mcp-compact-session");
     } finally {
       rmSync(TEST_DIR, { recursive: true, force: true });
     }

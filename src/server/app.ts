@@ -11,6 +11,7 @@ import {
 import { getIngestionStats } from "../db/ingestion.js";
 import { listMachines } from "../db/machines.js";
 import { recallSessions } from "../lib/recall.js";
+import { buildActiveAgentsResponse, buildSessionHealthResponse } from "../lib/agent-state.js";
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
@@ -20,12 +21,19 @@ function json(payload: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(payload, null, 2), { status, headers: jsonHeaders });
 }
 
+function compactJson(payload: Record<string, unknown>, status = 200): Response {
+  return new Response(JSON.stringify(payload), { status, headers: jsonHeaders });
+}
+
 const ENDPOINTS = [
   "/health",
   "/info",
   "/search?q=…",
   "/recall?q=…",
   "/tool-calls?q=…",
+  "/active-agents",
+  "/session-health",
+  "/session-health/:id",
   "/recent",
   "/list",
   "/sessions/:id",
@@ -115,6 +123,45 @@ export function createSessionsServer(options: {
             limit: intParam(url, "limit", 20),
           });
           return json({ ok: true, query: q, count: results.length, results });
+        }
+
+        if (url.pathname === "/active-agents") {
+          return compactJson({
+            ok: true,
+            ...buildActiveAgentsResponse({
+              limit: intParam(url, "limit", 20),
+              includeUnknown: booleanParam(url, "include_unknown", false),
+              captureLines: intParam(url, "capture_lines", 80),
+              capture: booleanParam(url, "capture", true),
+            }),
+          });
+        }
+
+        if (url.pathname === "/session-health") {
+          return compactJson({
+            ok: true,
+            ...buildSessionHealthResponse({
+              source: url.searchParams.get("source") ?? undefined,
+              project_path: url.searchParams.get("project") ?? undefined,
+              machine: url.searchParams.get("machine") ?? undefined,
+              limit: intParam(url, "limit", 20),
+              activeMinutes: intParam(url, "active_minutes", 15),
+              staleMinutes: intParam(url, "stale_minutes", 60),
+              issueLimit: intParam(url, "issue_limit", 8),
+            }),
+          });
+        }
+
+        if (url.pathname.startsWith("/session-health/")) {
+          const id = decodeURIComponent(url.pathname.slice("/session-health/".length));
+          const response = buildSessionHealthResponse({
+            id,
+            activeMinutes: intParam(url, "active_minutes", 15),
+            staleMinutes: intParam(url, "stale_minutes", 60),
+            issueLimit: intParam(url, "issue_limit", 8),
+          });
+          if (response.returned === 0) return compactJson({ ok: false, error: `session not found: ${id}`, lookup: response.lookup }, 404);
+          return compactJson({ ok: true, ...response });
         }
 
         if (url.pathname === "/recent") {

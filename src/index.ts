@@ -60,6 +60,32 @@ export type {
   RecallToolCall,
 } from "./lib/recall.js";
 
+export {
+  ACTIVE_AGENTS_SCHEMA_VERSION,
+  SESSION_HEALTH_SCHEMA_VERSION,
+  buildActiveAgentsResponse,
+  buildSessionHealthResponse,
+  redactAndBoundString,
+  redactSensitive,
+} from "./lib/agent-state.js";
+export type {
+  ActiveAgentSummary,
+  ActiveAgentsOptions,
+  ActiveAgentsResponse,
+  AgentClassification,
+  AgentKind,
+  ComposerState,
+  HealthLevel,
+  IssueSeverity,
+  SessionActivity,
+  SessionHealthIssue,
+  SessionHealthOptions,
+  SessionHealthResponse,
+  SessionHealthSummary,
+  SessionResumeCommand,
+  TargetKind,
+} from "./lib/agent-state.js";
+
 export { SqliteAdapter } from "./db/sqlite-adapter.js";
 export { getDatabase, closeDatabase, resetDatabase, initSchema } from "./db/database.js";
 export {

@@ -54,6 +54,12 @@ sessions show <id>             # details + compact message previews
 sessions show <id> --messages 50
 sessions stats                 # per-source + top-project counts
 
+# Agent automation state (compact JSON by default)
+sessions active-agents                 # live tmux agent panes, cwd, command, composer state
+sessions active-agents --human         # compact table for operators
+sessions session-health                # recent indexed sessions with health/classification
+sessions session-health <id>           # one session by id or unique prefix
+
 # Keep the index continuously fresh (fs.watch + periodic safety re-scan)
 sessions watch-ingest
 sessions watch-ingest --status
@@ -112,6 +118,12 @@ sessions show <id> --json      # machine-readable detail payload
 keep their prior payload shape; commands with new `--limit` support only limit
 JSON when you pass `--limit` explicitly.
 
+`sessions active-agents` and `sessions session-health` are agent-first APIs and
+therefore emit compact deterministic JSON by default. They include stable
+`schema_version` values, bounded arrays, redacted command/path fields, and raw
+artifacts only as evidence paths such as `tmux://…`, `sessions://session/…`, or
+the indexed transcript path. Use `--human` for a table view.
+
 ## MCP Server
 
 ```bash
@@ -120,7 +132,8 @@ sessions-mcp
 
 Exposes session tools for agents/orchestrators: `search_sessions`,
 `search_tool_calls`, `recall_session`, `semantic_search`, `recent_sessions`, `list_sessions`,
-`get_session`, `ingest`, `embed`, `session_stats`, `knowledge_graph`, plus
+`get_session`, `ingest`, `embed`, `session_stats`, `knowledge_graph`,
+`active_agents`, `session_health`, plus
 registry-backed tools (`sessions_list`, `sessions_history`, `sessions_search`,
 `sessions_resume`, `sessions_rename`, `sessions_watch`, `sessions_stats`),
 cross-adapter import tools, agent registry, feedback, and storage-sync tools.
@@ -132,6 +145,12 @@ raise `message_limit` / `tool_call_limit` for full detail. `knowledge_graph`,
 unless callers raise `limit` or request `include_full`. `sessions_read`
 returns compact adapter-event previews unless callers raise `event_limit` or
 request `include_full`.
+
+`active_agents` returns live tmux agent composer summaries for dispatch and
+loops: target, cwd, pane command, composer state, send/queue capability,
+classification reason, and evidence refs. `session_health` returns indexed
+session cwd, resume command when available, activity/health classification,
+bounded issue lists, and transcript evidence paths.
 
 ## HTTP mode
 
@@ -157,7 +176,8 @@ Uses stateless `StreamableHTTPServerTransport` (shared process, many clients).
 sessions-serve
 ```
 
-Endpoints: `/search?q=`, `/recall?q=`, `/tool-calls?q=`, `/recent`, `/list`, `/sessions/:id`,
+Endpoints: `/search?q=`, `/recall?q=`, `/tool-calls?q=`, `/active-agents`,
+`/session-health`, `/session-health/:id`, `/recent`, `/list`, `/sessions/:id`,
 `/stats`, `/health`, `/info`.
 
 ## Storage Sync

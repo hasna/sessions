@@ -85,6 +85,22 @@ describe("query endpoints", () => {
       expect(filteredToolCalls.ok).toBe(true);
       expect(filteredToolCalls.count).toBe(0);
 
+      const activeAgentsResponse = await fetch(`${base}/active-agents?capture=0`);
+      const activeAgentsText = await activeAgentsResponse.text();
+      expect(activeAgentsText).not.toContain("\n  ");
+      const activeAgents = JSON.parse(activeAgentsText);
+      expect(activeAgents.ok).toBe(true);
+      expect(activeAgents.schema_version).toBe("sessions.active_agents.v1");
+      expect(activeAgents.source.backend).toBe("tmux");
+
+      const healthResponse = await fetch(`${base}/session-health/${sessionId}`);
+      const healthText = await healthResponse.text();
+      expect(healthText).not.toContain("\n  ");
+      const health = JSON.parse(healthText);
+      expect(health.ok).toBe(true);
+      expect(health.schema_version).toBe("sessions.session_health.v1");
+      expect(health.sessions[0].cwd).toBe("/p/infra");
+
       const recent = await (await fetch(`${base}/recent`)).json();
       expect(recent.sessions).toHaveLength(1);
 
