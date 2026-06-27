@@ -5,7 +5,7 @@
  * where the encoded path replaces / with - (e.g., /Users/hasna/Workspace → -Users-hasna-Workspace)
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 
@@ -50,16 +50,13 @@ export function getSessionsDir(): string {
     return dir;
   }
 
-  const home = homedir();
+  const home = getHomeDir();
   const newDir = join(home, ".hasna", "sessions");
-  const legacyDir = join(home, ".sessions");
 
-  // Auto-migrate: if legacy exists and new doesn't, copy config forward
-  if (existsSync(legacyDir) && !existsSync(newDir)) {
-    mkdirSync(newDir, { recursive: true });
-  } else if (!existsSync(newDir)) {
+  if (!existsSync(newDir)) {
     mkdirSync(newDir, { recursive: true });
   }
+  migrateLegacySessionsDb(home);
 
   return newDir;
 }
@@ -81,22 +78,29 @@ export function getSessionsDbPath(): string {
     return join(dir, "sessions.db");
   }
 
-  const home = homedir();
+  const home = getHomeDir();
   const newDbPath = join(home, ".hasna", "sessions", "sessions.db");
-  const legacyDbPath = join(home, ".sessions", "sessions.db");
 
-  // Use legacy DB if it exists and new one doesn't yet (backward compat)
-  if (!existsSync(newDbPath) && existsSync(legacyDbPath)) {
-    return legacyDbPath;
-  }
-
-  // Ensure directory exists
-  const dir = join(home, ".hasna", "sessions");
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
+  migrateLegacySessionsDb(home);
 
   return newDbPath;
+}
+
+function migrateLegacySessionsDb(home: string): void {
+  const newDir = join(home, ".hasna", "sessions");
+  const newDbPath = join(newDir, "sessions.db");
+  const legacyDbPath = join(home, ".sessions", "sessions.db");
+
+  if (!existsSync(newDir)) {
+    mkdirSync(newDir, { recursive: true });
+  }
+  if (!existsSync(newDbPath) && existsSync(legacyDbPath)) {
+    copyFileSync(legacyDbPath, newDbPath);
+  }
+}
+
+function getHomeDir(): string {
+  return process.env.HOME || process.env.USERPROFILE || homedir();
 }
 
 /**

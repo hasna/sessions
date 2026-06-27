@@ -1,6 +1,6 @@
 {
   "name": "@hasna/sessions",
-  "version": "0.11.33",
+  "version": "0.11.34",
   "description": "Search and sync AI coding sessions (Claude, Codex, Gemini) — unified SQLite index with full-text search",
   "type": "module",
   "main": "dist/index.js",
@@ -55,7 +55,7 @@
   },
   "dependencies": {
     "@hasna/cloud": "0.1.24",
-    "@hasna/events": "^0.1.7",
+    "@hasna/events": "^0.1.11",
     "@inkjs/ui": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "chalk": "^5.6.2",

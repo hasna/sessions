@@ -6,7 +6,7 @@
       "name": "@hasna/sessions",
       "dependencies": {
         "@hasna/cloud": "0.1.24",
-        "@hasna/events": "^0.1.7",
+        "@hasna/events": "^0.1.11",
         "@inkjs/ui": "^2.0.0",
         "@modelcontextprotocol/sdk": "^1.27.1",
         "chalk": "^5.6.2",
@@ -29,7 +29,7 @@
 
     "@hasna/cloud": ["@hasna/cloud@0.1.24", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.12.1", "commander": "^13.1.0", "pg": "^8.13.3", "zod": "^3.24.2" }, "bin": { "cloud": "dist/cli/index.js", "cloud-mcp": "dist/mcp/index.js" } }, "sha512-s8Vv+VdvOxN0UzlYgonMaT/V7X4YTuejvT45NQB7LIeLLp0IS/gF7DnNiRoQCl0P+pPrJVjCl61F34jmczzFTA=="],
 
-    "@hasna/events": ["@hasna/events@0.1.8", "", { "dependencies": { "commander": "^13.1.0" }, "bin": { "events": "dist/cli/index.js", "hasna-events": "dist/cli/index.js" } }, "sha512-NftaVpt/Rlc81DVdyIliEqa77SB/jtOFP/5YHTNeH8c7MNM999G8noWHXWMTIeZ59NviqnxFgnHK8t/NQMH9qQ=="],
+    "@hasna/events": ["@hasna/events@0.1.11", "", { "dependencies": { "commander": "^13.1.0" }, "bin": { "events": "dist/cli/index.js", "hasna-events": "dist/cli/index.js" } }, "sha512-X36W9TB8mKxtS5UeW1n2IlvW6nPUcoYCQWNMMV+/JM4YNzlnnk1FRm8Aay02tt1LjQOGICCHF3hz/l//EHEe+Q=="],
 
     "@hono/node-server": ["@hono/node-server@1.19.14", "", { "peerDependencies": { "hono": "^4" } }, "sha512-GwtvgtXxnWsucXvbQXkRgqksiH2Qed37H9xHZocE5sA3N8O8O8/8FA3uclQXxXVzc9XBZuEOMK7+r02FmSpHtw=="],
 
