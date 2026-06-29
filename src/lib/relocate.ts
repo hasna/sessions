@@ -194,7 +194,7 @@ export function relocate(
       });
     }
     // Still update the DB below (covers Codex rows), then return.
-    if (updateDb) updateSessionsDb(oldPath, newPath, result, verbose);
+    if (updateDb && !dryRun) updateSessionsDb(oldPath, newPath, result, verbose);
     return result;
   }
 
@@ -348,7 +348,7 @@ export function relocate(
   }
 
   // Phase 3: Update sessions DB
-  if (updateDb) updateSessionsDb(oldPath, newPath, result, verbose);
+  if (updateDb && !dryRun) updateSessionsDb(oldPath, newPath, result, verbose);
 
   return result;
 }

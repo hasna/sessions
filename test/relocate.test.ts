@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "fs";
 import { join } from "path";
+import { Database } from "bun:sqlite";
 import { relocate } from "../src/lib/relocate";
 
 const TEST_DIR = join(import.meta.dir, ".test-relocate");
@@ -53,6 +54,7 @@ function setup() {
 function cleanup() {
   rmSync(TEST_DIR, { recursive: true, force: true });
   delete process.env.CODEX_PATH;
+  delete process.env.HASNA_SESSIONS_DB_PATH;
 }
 
 describe("relocate", () => {
@@ -118,6 +120,67 @@ describe("relocate", () => {
     expect(
       existsSync(join(PROJECTS_DIR, "-Users-test-new-project"))
     ).toBe(false);
+  });
+
+  it("dry-run does not modify the sessions database", () => {
+    const origClaude = process.env.CLAUDE_PATH;
+    const origDbPath = process.env.HASNA_SESSIONS_DB_PATH;
+    process.env.CLAUDE_PATH = TEST_DIR;
+    process.env.HASNA_SESSIONS_DB_PATH = join(TEST_DIR, "sessions.db");
+
+    const db = new Database(process.env.HASNA_SESSIONS_DB_PATH);
+    db.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        source TEXT,
+        source_id TEXT,
+        project_path TEXT,
+        source_path TEXT
+      );
+      CREATE TABLE ingestion_state (
+        source TEXT,
+        file_path TEXT,
+        PRIMARY KEY (source, file_path)
+      );
+    `);
+    db.prepare("INSERT INTO sessions (id, source, source_id, project_path, source_path) VALUES (?, ?, ?, ?, ?)").run(
+      "session-1",
+      "claude",
+      "abc-123",
+      "/Users/test/old/project",
+      "/Users/test/old/project/session.jsonl"
+    );
+    db.prepare("INSERT INTO ingestion_state (source, file_path) VALUES (?, ?)").run(
+      "claude",
+      "-Users-test-old-project/abc-123.jsonl"
+    );
+    db.close();
+
+    const result = relocate("/Users/test/old", "/Users/test/new", {
+      dryRun: true,
+      updateDb: true,
+    });
+
+    const after = new Database(process.env.HASNA_SESSIONS_DB_PATH);
+    const session = after
+      .query("SELECT project_path, source_path FROM sessions WHERE id = ?")
+      .get("session-1") as { project_path: string; source_path: string };
+    const state = after
+      .query("SELECT file_path FROM ingestion_state WHERE source = ?")
+      .get("claude") as { file_path: string };
+    after.close();
+
+    process.env.CLAUDE_PATH = origClaude;
+    if (origDbPath === undefined) {
+      delete process.env.HASNA_SESSIONS_DB_PATH;
+    } else {
+      process.env.HASNA_SESSIONS_DB_PATH = origDbPath;
+    }
+
+    expect(result.dbRowsUpdated).toBe(0);
+    expect(session.project_path).toBe("/Users/test/old/project");
+    expect(session.source_path).toBe("/Users/test/old/project/session.jsonl");
+    expect(state.file_path).toBe("-Users-test-old-project/abc-123.jsonl");
   });
 
   it("renames directory and updates files", () => {

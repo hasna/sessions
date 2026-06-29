@@ -27,13 +27,39 @@ describe("no-cloud package boundary", () => {
     expect(dependencyNames).not.toContain("@hasna/cloud");
   });
 
-  it("keeps MCP entrypoints on sessions-native storage tools", () => {
-    const entrypoints = ["src/mcp/index.ts", "src/mcp/http.ts", "src/mcp/storage-tools.ts", "bun.lock"];
+  it("keeps metadata, docs, source, lockfile, and MCP entrypoints on sessions-native storage", () => {
+    const forbiddenMarkers = [
+      "@hasna/cloud",
+      "open-cloud",
+      "cloud-mcp",
+      "registerCloudTools",
+      "registerCloudCommands",
+      ".hasna/cloud",
+      "HASNA_CLOUD_",
+      "HASNA_RDS_PASSWORD",
+      "--cloud",
+      "HASNA_SESSIONS_CLOUD",
+      "SESSIONS_CLOUD",
+    ];
+    const entrypoints = [
+      "README.md",
+      "package.json",
+      "bun.lock",
+      "src/cli/index.tsx",
+      "src/cli/storage.ts",
+      "src/db/storage-config.ts",
+      "src/db/storage-sync.ts",
+      "src/index.ts",
+      "src/mcp/index.ts",
+      "src/mcp/http.ts",
+      "src/mcp/storage-tools.ts",
+    ];
 
     for (const path of entrypoints) {
       const source = readRepoFile(path);
-      expect(source).not.toContain("@hasna/cloud");
-      expect(source).not.toContain("registerCloudTools");
+      for (const marker of forbiddenMarkers) {
+        expect(source.includes(marker), `${path} contains ${marker}`).toBe(false);
+      }
     }
 
     expect(readRepoFile("src/mcp/index.ts")).toContain("registerSessionsStorageTools");
