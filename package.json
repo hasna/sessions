@@ -1,6 +1,6 @@
 {
   "name": "@hasna/sessions",
-  "version": "0.11.34",
+  "version": "0.11.35",
   "description": "Search and sync AI coding sessions (Claude, Codex, Gemini) — unified SQLite index with full-text search",
   "type": "module",
   "main": "dist/index.js",
@@ -33,6 +33,7 @@
     "build:lib": "bun build src/index.ts src/storage.ts --outdir dist --target bun --packages external",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "prepublishOnly": "bun run typecheck && bun test && bun run build",
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:ingest": "bun run src/cli/index.tsx ingest --verbose",
     "postinstall": "mkdir -p $HOME/.hasna/sessions 2>/dev/null || true"
@@ -54,7 +55,6 @@
     "url": "git+https://github.com/hasna/sessions.git"
   },
   "dependencies": {
-    "@hasna/cloud": "0.1.24",
     "@hasna/events": "^0.1.11",
     "@inkjs/ui": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.27.1",

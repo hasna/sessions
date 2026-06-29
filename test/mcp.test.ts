@@ -70,6 +70,12 @@ describe("sessions MCP server", () => {
     // Preserved from the original stub
     expect(tools).toContain("send_feedback");
     expect(tools).toContain("register_agent");
+    expect(tools).toContain("sessions_storage_status");
+    expect(tools).toContain("sessions_storage_push");
+    expect(tools).toContain("sessions_storage_pull");
+    expect(tools).toContain("sessions_storage_sync");
+    expect(tools).toContain("sessions_storage_feedback");
+    expect(tools.some((name) => name.toLowerCase().includes("cloud"))).toBe(false);
   }, 15000);
 
   it("registers session resources and prompts", async () => {
