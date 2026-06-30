@@ -12,9 +12,35 @@ import type {
 } from "../../types/index.js";
 
 const VALID_ROLES: MessageRole[] = ["user", "assistant", "system", "tool", "info", "thinking"];
+const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/i;
+const HAS_COMMAND_TAG_RE = /<command-(?:message|name|args)>[\s\S]*?<\/command-(?:message|name|args)>/i;
+const COMMAND_TAG_RE = /<command-(?:message|name|args)>[\s\S]*?<\/command-(?:message|name|args)>/gi;
 
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+function normalizeTitle(content: string): string {
+  return content.replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+function titleFromClaudeUserContent(content: string, isMeta: boolean): string | null {
+  if (isMeta) return null;
+  const normalized = normalizeTitle(content);
+  if (!normalized) return null;
+
+  const commandArgs = content.match(COMMAND_ARGS_RE)?.[1];
+  if (commandArgs != null) {
+    const fromArgs = normalizeTitle(commandArgs);
+    return fromArgs || null;
+  }
+
+  // Slash-command wrapper records are often automation scaffolding. Index the
+  // message body, but do not let the wrapper become the session headline.
+  const withoutCommandTags = normalizeTitle(content.replace(COMMAND_TAG_RE, " "));
+  if (!withoutCommandTags && HAS_COMMAND_TAG_RE.test(content)) return null;
+
+  return normalized;
 }
 
 export class ClaudeParser implements SessionParser {
@@ -99,8 +125,8 @@ export class ClaudeParser implements SessionParser {
       }
 
       const content = flattenContent(message.content);
-      if (!title && role === "user" && content && !o.isMeta) {
-        title = content.replace(/\s+/g, " ").slice(0, 120);
+      if (!title && role === "user" && content) {
+        title = titleFromClaudeUserContent(content, o.isMeta === true) ?? undefined;
       }
 
       const rawMessageId = typeof o.uuid === "string" ? o.uuid : null;

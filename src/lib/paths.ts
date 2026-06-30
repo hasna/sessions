@@ -2,7 +2,7 @@
  * Path encoding/decoding for Claude Code session storage.
  *
  * Claude Code stores sessions in ~/.claude/projects/<encoded-path>/
- * where the encoded path replaces / with - (e.g., /Users/hasna/Workspace → -Users-hasna-Workspace)
+ * where the encoded path replaces / with - (e.g., /Users/alice/Workspace → -Users-alice-Workspace)
  */
 
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "fs";
@@ -142,22 +142,15 @@ export function resolveProjectPath(projectsDir: string, encodedDir: string): str
     }
   }
 
-  // Try reading cwd from first .jsonl file
+  // Try reading cwd from Claude transcript files. Do not rely on the first
+  // line or first file: many sessions start with command/meta records that do
+  // not include cwd, and the encoded directory name is lossy for hyphenated
+  // project names.
   try {
-    const files = readdirSync(dirPath);
+    const files = readdirSync(dirPath).filter((file) => file.endsWith(".jsonl")).sort();
     for (const file of files) {
-      if (!file.endsWith(".jsonl")) continue;
-      const content = readFileSync(join(dirPath, file), "utf-8");
-      const firstLine = content.split("\n").find((l) => l.trim());
-      if (firstLine) {
-        try {
-          const obj = JSON.parse(firstLine);
-          if (obj.cwd) return obj.cwd;
-        } catch {
-          // Not valid JSON
-        }
-      }
-      break; // Only check the first .jsonl
+      const cwd = findCwdInJsonl(join(dirPath, file));
+      if (cwd) return cwd;
     }
   } catch {
     // Fall through
@@ -165,6 +158,24 @@ export function resolveProjectPath(projectsDir: string, encodedDir: string): str
 
   // Fall back to naive decode
   return decodePath(encodedDir);
+}
+
+function findCwdInJsonl(filePath: string): string | null {
+  const maxLines = 200;
+  const content = readFileSync(filePath, "utf-8");
+  let checked = 0;
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+    checked++;
+    try {
+      const obj = JSON.parse(line);
+      if (typeof obj.cwd === "string" && obj.cwd.length > 0) return obj.cwd;
+    } catch {
+      // Ignore malformed transcript lines.
+    }
+    if (checked >= maxLines) break;
+  }
+  return null;
 }
 
 /**

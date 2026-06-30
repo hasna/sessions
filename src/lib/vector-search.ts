@@ -1,5 +1,6 @@
 import { getDatabase } from "../db/database.js";
 import { deserializeVector, openaiEmbedder, type Embedder } from "./embeddings.js";
+import { appendProjectFilter } from "./project-filter.js";
 import { search, type SearchHit, type SearchOptions } from "./search.js";
 
 /** Cosine similarity of two equal-ish-length vectors (0 when either is zero). */
@@ -32,8 +33,7 @@ export function vectorSearchByEmbedding(queryVec: number[], opts: SemanticOption
     params.push(opts.source);
   }
   if (opts.project_path) {
-    where.push("s.project_path = ?");
-    params.push(opts.project_path);
+    appendProjectFilter(where, params, opts.project_path);
   }
   if (opts.machine) {
     where.push("s.machine = ?");
@@ -92,8 +92,7 @@ function hasStoredEmbeddings(opts: SemanticOptions = {}): boolean {
     params.push(opts.source);
   }
   if (opts.project_path) {
-    where.push("s.project_path = ?");
-    params.push(opts.project_path);
+    appendProjectFilter(where, params, opts.project_path);
   }
   if (opts.machine) {
     where.push("s.machine = ?");

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../src/db/database.js";
 import {
   SESSIONS_STORAGE_FALLBACK_ENV,
@@ -16,10 +19,12 @@ const envKeys = [
   "SESSIONS_DATABASE_URL",
   "HASNA_SESSIONS_STORAGE_MODE",
   "SESSIONS_STORAGE_MODE",
+  "HASNA_SESSIONS_STORAGE_CONFIG_PATH",
 ] as const;
 
 const savedEnv = new Map<string, string | undefined>();
 let savedSessionsDbPath: string | undefined;
+let tempRoot: string | null = null;
 
 type Row = Record<string, unknown>;
 
@@ -59,6 +64,8 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   resetDatabase();
+  if (tempRoot) rmSync(tempRoot, { recursive: true, force: true });
+  tempRoot = null;
   if (savedSessionsDbPath === undefined) delete process.env.SESSIONS_DB_PATH;
   else process.env.SESSIONS_DB_PATH = savedSessionsDbPath;
   for (const [key, value] of savedEnv) {
@@ -98,6 +105,17 @@ describe("sessions storage sync", () => {
 
     process.env.HASNA_SESSIONS_DATABASE_URL = "postgres://new.example/sessions";
     expect(hasStorageDatabaseConfig()).toBe(true);
+  });
+
+  it("fails loudly when the storage config file is malformed", () => {
+    tempRoot = mkdtempSync(join(tmpdir(), "sessions-storage-config-"));
+    const configPath = join(tempRoot, "config.json");
+    mkdirSync(tempRoot, { recursive: true });
+    writeFileSync(configPath, "{ not json", "utf-8");
+    process.env.HASNA_SESSIONS_STORAGE_CONFIG_PATH = configPath;
+
+    expect(() => getStorageConfig()).toThrow(/Malformed sessions storage config/);
+    expect(() => hasStorageDatabaseConfig()).toThrow(/Malformed sessions storage config/);
   });
 
   it("canonical storage mode wins over the short fallback", () => {

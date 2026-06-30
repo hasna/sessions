@@ -140,7 +140,7 @@ server.registerPrompt(
     title: "Recall Coding Session",
     description: "Build a prompt that asks an agent to recall the most relevant prior coding session with evidence.",
     argsSchema: {
-      query: z.string().describe("What to recall, e.g. 'aws deployment socializer.co'"),
+      query: z.string().describe("What to recall, e.g. 'aws deployment example.com'"),
       limit: z.string().optional().describe("Maximum number of sessions to inspect"),
     },
   },
@@ -217,8 +217,8 @@ server.tool(
   {
     query: z.string().describe("Search query"),
     source: z.string().optional().describe("Filter by provider: claude, codex, gemini"),
-    project_path: z.string().optional().describe("Filter by project path"),
-    machine: z.string().optional().describe("Filter by machine (apple03, spark01, …)"),
+    project_path: z.string().optional().describe("Filter by project name or path"),
+    machine: z.string().optional().describe("Filter by machine (laptop-a, workstation-b, ...)"),
     limit: z.number().optional().describe("Max results (default 20)"),
   },
   async (a: { query: string; source?: string; project_path?: string; machine?: string; limit?: number }) => {
@@ -253,7 +253,7 @@ server.tool(
   {
     query: z.string().describe("Natural-language recall query, e.g. 'find the thread where we implemented stripe webhook'"),
     source: z.string().optional().describe("Filter by provider: claude, codex, gemini"),
-    project_path: z.string().optional().describe("Filter by project path"),
+    project_path: z.string().optional().describe("Filter by project name or path"),
     machine: z.string().optional().describe("Filter by machine"),
     limit: z.number().optional().describe("Max results (default 10)"),
     semantic: z.boolean().optional().describe("Set false to disable semantic/vector recall"),

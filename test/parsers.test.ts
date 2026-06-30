@@ -172,6 +172,63 @@ describe("ClaudeParser", () => {
     // the in-file sessionId is preserved in metadata
     expect(a.session.metadata?.claude_session_id).toBe("SHARED-PARENT");
   });
+
+  it("does not use slash-command wrapper records as session titles", () => {
+    const dir = join(root, "claude", "projects", "-Users-h-Workspace-client-dashboard");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "command-wrapper.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "user",
+          message: {
+            role: "user",
+            content:
+              "<command-message>skill-project-maintenance</command-message> <command-name>/skill-project-maintenance</command-name> <command-args></command-args>",
+          },
+          uuid: "cmd",
+          timestamp: "2026-05-01T10:00:00Z",
+          cwd: "/Users/h/Workspace/client-dashboard",
+          sessionId: "command-wrapper",
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: { role: "assistant", content: "done" },
+          uuid: "a",
+          timestamp: "2026-05-01T10:00:02Z",
+          sessionId: "command-wrapper",
+        }),
+      ].join("\n")
+    );
+
+    const [ps] = new ClaudeParser().parseFile(file);
+    expect(ps.session.title).toBeNull();
+  });
+
+  it("uses slash-command args as the title when they contain the user request", () => {
+    const dir = join(root, "claude", "projects", "-Users-h-Workspace-client-dashboard");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "goal-command.jsonl");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        type: "user",
+        message: {
+          role: "user",
+          content:
+            "<command-name>/goal</command-name> <command-message>goal</command-message> <command-args>check and fix every border radius in the dashboard</command-args>",
+        },
+        uuid: "goal",
+        timestamp: "2026-05-01T10:00:00Z",
+        cwd: "/Users/h/Workspace/client-dashboard",
+        sessionId: "goal-command",
+      })
+    );
+
+    const [ps] = new ClaudeParser().parseFile(file);
+    expect(ps.session.title).toBe("check and fix every border radius in the dashboard");
+  });
 });
 
 describe("CodexParser", () => {

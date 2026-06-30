@@ -39,9 +39,9 @@ export interface TransferManifest {
 }
 
 export interface TransferProject {
-  /** Original filesystem path (e.g., /Users/hasna/Workspace/foo) */
+  /** Original filesystem path (e.g., /Users/alice/Workspace/foo) */
   originalPath: string;
-  /** Encoded directory name (e.g., -Users-hasna-Workspace-foo) */
+  /** Encoded directory name (e.g., -Users-alice-Workspace-foo) */
   encodedDir: string;
   /** Number of session files in this project */
   sessionCount: number;
@@ -69,7 +69,7 @@ export interface ExportResult {
 }
 
 export interface ImportOptions {
-  /** Remap the home directory (e.g., /Users/hasna → /Users/john) */
+  /** Remap the home directory (e.g., /Users/alice -> /Users/bob) */
   remapHome?: string;
   /** Remap arbitrary path prefix (e.g., /old/path → /new/path) */
   remapPath?: { from: string; to: string };

@@ -1,8 +1,8 @@
 /**
  * Relocate Claude Code sessions from one filesystem path to another.
  *
- * When a project directory is moved (e.g., from /Users/hasna/Workspace/old
- * to /Users/hasna/Workspace/new), Claude Code can no longer find the sessions
+ * When a project directory is moved (e.g., from /Users/alice/Workspace/old
+ * to /Users/alice/Workspace/new), Claude Code can no longer find the sessions
  * because they're stored under path-encoded directory names.
  *
  * This module handles:

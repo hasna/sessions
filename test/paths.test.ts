@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,13 +8,14 @@ import {
   findMatchingProjectDirs,
   computeRelocatedDir,
   getSessionsDbPath,
+  resolveProjectPath,
 } from "../src/lib/paths";
 
 describe("encodePath", () => {
   it("encodes filesystem path to directory name", () => {
-    expect(encodePath("/Users/hasna/Workspace")).toBe("-Users-hasna-Workspace");
-    expect(encodePath("/Users/hasna/Workspace/foo/bar")).toBe(
-      "-Users-hasna-Workspace-foo-bar"
+    expect(encodePath("/Users/alice/Workspace")).toBe("-Users-alice-Workspace");
+    expect(encodePath("/Users/alice/Workspace/foo/bar")).toBe(
+      "-Users-alice-Workspace-foo-bar"
     );
   });
 
@@ -25,8 +26,8 @@ describe("encodePath", () => {
 
 describe("decodePath", () => {
   it("decodes directory name back to path (naive)", () => {
-    expect(decodePath("-Users-hasna-Workspace")).toBe(
-      "/Users/hasna/Workspace"
+    expect(decodePath("-Users-alice-Workspace")).toBe(
+      "/Users/alice/Workspace"
     );
   });
 
@@ -37,25 +38,25 @@ describe("decodePath", () => {
 
 describe("findMatchingProjectDirs", () => {
   const dirs = [
-    "-Users-hasna-Workspace",
-    "-Users-hasna-Workspace-foo",
-    "-Users-hasna-Workspace-foo-bar",
-    "-Users-hasna-Other",
+    "-Users-alice-Workspace",
+    "-Users-alice-Workspace-foo",
+    "-Users-alice-Workspace-foo-bar",
+    "-Users-alice-Other",
   ];
 
   it("finds exact match", () => {
-    const result = findMatchingProjectDirs(dirs, "/Users/hasna/Workspace");
-    expect(result).toContain("-Users-hasna-Workspace");
-    expect(result).toContain("-Users-hasna-Workspace-foo");
-    expect(result).toContain("-Users-hasna-Workspace-foo-bar");
-    expect(result).not.toContain("-Users-hasna-Other");
+    const result = findMatchingProjectDirs(dirs, "/Users/alice/Workspace");
+    expect(result).toContain("-Users-alice-Workspace");
+    expect(result).toContain("-Users-alice-Workspace-foo");
+    expect(result).toContain("-Users-alice-Workspace-foo-bar");
+    expect(result).not.toContain("-Users-alice-Other");
   });
 
   it("finds child matches", () => {
-    const result = findMatchingProjectDirs(dirs, "/Users/hasna/Workspace/foo");
-    expect(result).toContain("-Users-hasna-Workspace-foo");
-    expect(result).toContain("-Users-hasna-Workspace-foo-bar");
-    expect(result).not.toContain("-Users-hasna-Workspace");
+    const result = findMatchingProjectDirs(dirs, "/Users/alice/Workspace/foo");
+    expect(result).toContain("-Users-alice-Workspace-foo");
+    expect(result).toContain("-Users-alice-Workspace-foo-bar");
+    expect(result).not.toContain("-Users-alice-Workspace");
   });
 
   it("returns empty for no match", () => {
@@ -68,41 +69,90 @@ describe("computeRelocatedDir", () => {
   it("renames exact match", () => {
     expect(
       computeRelocatedDir(
-        "-Users-hasna-Workspace-old",
-        "/Users/hasna/Workspace/old",
-        "/Users/hasna/Workspace/new"
+        "-Users-alice-Workspace-old",
+        "/Users/alice/Workspace/old",
+        "/Users/alice/Workspace/new"
       )
-    ).toBe("-Users-hasna-Workspace-new");
+    ).toBe("-Users-alice-Workspace-new");
   });
 
   it("renames child paths", () => {
     expect(
       computeRelocatedDir(
-        "-Users-hasna-Workspace-old-sub-project",
-        "/Users/hasna/Workspace/old",
-        "/Users/hasna/Workspace/new"
+        "-Users-alice-Workspace-old-sub-project",
+        "/Users/alice/Workspace/old",
+        "/Users/alice/Workspace/new"
       )
-    ).toBe("-Users-hasna-Workspace-new-sub-project");
+    ).toBe("-Users-alice-Workspace-new-sub-project");
   });
 
   it("leaves unrelated paths unchanged", () => {
     expect(
       computeRelocatedDir(
-        "-Users-hasna-Other",
-        "/Users/hasna/Workspace/old",
-        "/Users/hasna/Workspace/new"
+        "-Users-alice-Other",
+        "/Users/alice/Workspace/old",
+        "/Users/alice/Workspace/new"
       )
-    ).toBe("-Users-hasna-Other");
+    ).toBe("-Users-alice-Other");
   });
 
   it("handles home directory change", () => {
     expect(
       computeRelocatedDir(
-        "-Users-hasna-Workspace-project",
-        "/Users/hasna",
-        "/Users/john"
+        "-Users-alice-Workspace-project",
+        "/Users/alice",
+        "/Users/bob"
       )
-    ).toBe("-Users-john-Workspace-project");
+    ).toBe("-Users-bob-Workspace-project");
+  });
+});
+
+describe("resolveProjectPath", () => {
+  let root: string | null = null;
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+    root = null;
+  });
+
+  it("uses cwd from transcript lines instead of lossy hyphen decoding", () => {
+    root = mkdtempSync(join(tmpdir(), "open-sessions-path-resolve-"));
+    const encodedDir = "-Users-dev-Workspace-hyphenated-project";
+    const projectDir = join(root, encodedDir);
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      join(projectDir, "a.jsonl"),
+      [
+        JSON.stringify({ type: "permission-mode", sessionId: "s1" }),
+        JSON.stringify({
+          type: "user",
+          cwd: "/Users/dev/Workspace/hyphenated-project",
+          message: { role: "user", content: "plan the project" },
+        }),
+      ].join("\n"),
+      "utf-8"
+    );
+
+    expect(resolveProjectPath(root, encodedDir)).toBe("/Users/dev/Workspace/hyphenated-project");
+  });
+
+  it("checks later transcript files when the first file has no cwd", () => {
+    root = mkdtempSync(join(tmpdir(), "open-sessions-path-resolve-"));
+    const encodedDir = "-Users-dev-Workspace-client-dashboard";
+    const projectDir = join(root, encodedDir);
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(join(projectDir, "a.jsonl"), JSON.stringify({ type: "summary" }), "utf-8");
+    writeFileSync(
+      join(projectDir, "b.jsonl"),
+      JSON.stringify({
+        type: "user",
+        cwd: "/Users/dev/Workspace/client-dashboard",
+        message: { role: "user", content: "continue" },
+      }),
+      "utf-8"
+    );
+
+    expect(resolveProjectPath(root, encodedDir)).toBe("/Users/dev/Workspace/client-dashboard");
   });
 });
 

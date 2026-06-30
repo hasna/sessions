@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -80,6 +80,55 @@ describe("sessions storage CLI", () => {
         output: "storage not configured; skipped remote pull",
         skipped: true,
       });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("top-level sync returns parseable JSON errors for malformed storage config", () => {
+    const home = mkdtempSync(join(tmpdir(), "open-sessions-bad-storage-cli-"));
+    const configPath = join(home, "storage-config.json");
+    try {
+      writeFileSync(configPath, "{ invalid json", "utf-8");
+      const result = runCli(["sync", "--no-ingest", "--json"], {
+        HOME: home,
+        SESSIONS_DB_PATH: ":memory:",
+        HASNA_SESSIONS_DIR: join(home, ".hasna", "sessions"),
+        HASNA_SESSIONS_STORAGE_CONFIG_PATH: configPath,
+        HASNA_SESSIONS_DATABASE_URL: "",
+        SESSIONS_DATABASE_URL: "",
+        HASNA_SESSIONS_STORAGE_MODE: "",
+        SESSIONS_STORAGE_MODE: "",
+      });
+      const output = Buffer.from(result.stdout).toString("utf-8");
+
+      expect(result.exitCode).toBe(1);
+      const payload = JSON.parse(output) as { error: string };
+      expect(payload.error).toContain("Malformed sessions storage config");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("storage status returns parseable JSON errors for malformed storage config", () => {
+    const home = mkdtempSync(join(tmpdir(), "open-sessions-bad-storage-status-"));
+    const configPath = join(home, "storage-config.json");
+    try {
+      writeFileSync(configPath, "{ invalid json", "utf-8");
+      const result = runCli(["storage", "status", "--json"], {
+        HOME: home,
+        SESSIONS_DB_PATH: ":memory:",
+        HASNA_SESSIONS_STORAGE_CONFIG_PATH: configPath,
+        HASNA_SESSIONS_DATABASE_URL: "",
+        SESSIONS_DATABASE_URL: "",
+        HASNA_SESSIONS_STORAGE_MODE: "",
+        SESSIONS_STORAGE_MODE: "",
+      });
+      const output = Buffer.from(result.stdout).toString("utf-8");
+
+      expect(result.exitCode).toBe(1);
+      const payload = JSON.parse(output) as { error: string };
+      expect(payload.error).toContain("Malformed sessions storage config");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

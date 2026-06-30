@@ -45,8 +45,8 @@ describe("toFtsQuery", () => {
   });
 
   it("adds punctuation-split variants for identifiers and domains", () => {
-    expect(toFtsQueries("socializer.co")).toEqual(['"socializer.co"', '"socializer" "co"']);
-    expect(toFtsQueries("platform-socializer")).toEqual(['"platform-socializer"', '"platform" "socializer"']);
+    expect(toFtsQueries("example.com")).toEqual(['"example.com"', '"example" "com"']);
+    expect(toFtsQueries("project-alpha")).toEqual(['"project-alpha"', '"project" "alpha"']);
   });
 });
 
@@ -92,6 +92,7 @@ describe("searchMessages", () => {
     expect(searchMessages("error", { source: "claude" })).toHaveLength(0);
     expect(searchMessages("kubernetes", { project_path: "/p/infra" })).toHaveLength(1);
     expect(searchMessages("kubernetes", { project_path: "/p/web" })).toHaveLength(0);
+    expect(searchMessages("kubernetes", { project_path: "infra" })).toHaveLength(1);
   });
 
   it("returns nothing for non-matching queries", () => {
@@ -108,14 +109,14 @@ describe("searchMessages", () => {
 
   it("matches dotted domains through punctuation-aware variants", () => {
     saveParsedSession({
-      session: { source: "codex", source_id: "domain", title: "Domain lookup", project_path: "/p/platform-socializer", project_name: "platform-socializer" },
-      messages: [{ session_id: "", role: "user", content: "ship socializer.co next", sequence_num: 0 }],
+      session: { source: "codex", source_id: "domain", title: "Domain lookup", project_path: "/p/project-alpha", project_name: "project-alpha" },
+      messages: [{ session_id: "", role: "user", content: "ship example.com next", sequence_num: 0 }],
       toolCalls: [],
     });
 
-    const hits = searchMessages("socializer.co");
+    const hits = searchMessages("example.com");
     expect(hits).toHaveLength(1);
-    expect(hits[0].project_name).toBe("platform-socializer");
+    expect(hits[0].project_name).toBe("project-alpha");
   });
 });
 
@@ -150,48 +151,76 @@ describe("searchToolCalls", () => {
 describe("search", () => {
   it("combines messages, session metadata, and tool-call output", () => {
     saveParsedSession({
-      session: { source: "codex", source_id: "socializer", title: "Repo inventory", project_path: "/p/platform-socializer", project_name: "platform-socializer" },
+      session: { source: "codex", source_id: "example-domain", title: "Repo inventory", project_path: "/p/project-alpha", project_name: "project-alpha" },
       messages: [{ session_id: "", role: "user", content: "inventory repos", sequence_num: 0 }],
       toolCalls: [
         {
           session_id: "",
           tool_name: "exec_command",
-          tool_input: "gh repo list hasnatools",
-          tool_output: "platform-socializer PRIVATE 2026-05-25T12:14:28Z socializer.co",
+          tool_input: "gh repo list example-org",
+          tool_output: "project-alpha public 2026-05-25T12:14:28Z example.com",
         },
       ],
     });
 
-    const domainHits = search("socializer.co");
+    const domainHits = search("example.com");
     expect(domainHits).toHaveLength(1);
-    expect(domainHits[0].project_name).toBe("platform-socializer");
+    expect(domainHits[0].project_name).toBe("project-alpha");
     expect(domainHits[0].snippet).toContain("exec_command");
 
-    const dashedHits = search("platform-socializer");
-    expect(dashedHits.some((hit) => hit.project_name === "platform-socializer")).toBe(true);
+    const dashedHits = search("project-alpha");
+    expect(dashedHits.some((hit) => hit.project_name === "project-alpha")).toBe(true);
   });
 
   it("prioritizes exact identifier metadata over generic message hits at small limits", () => {
     for (let index = 0; index < 8; index++) {
       saveParsedSession({
-        session: { source: "claude", source_id: `generic-social-${index}`, title: `Generic social ${index}` },
-        messages: [{ session_id: "", role: "user", content: `generic socializer discussion ${index}`, sequence_num: 0 }],
+        session: { source: "claude", source_id: `generic-alpha-${index}`, title: `Generic alpha ${index}` },
+        messages: [{ session_id: "", role: "user", content: `generic project alpha discussion ${index}`, sequence_num: 0 }],
         toolCalls: [],
       });
     }
     saveParsedSession({
       session: {
         source: "codex",
-        source_id: "exact-socializer",
+        source_id: "exact-alpha",
         title: "Exact domain repo",
-        project_path: "/repo/socializer.co/platform-socializer",
-        project_name: "platform-socializer",
+        project_path: "/repo/example.com/project-alpha",
+        project_name: "project-alpha",
       },
       messages: [{ session_id: "", role: "user", content: "repo inventory", sequence_num: 0 }],
       toolCalls: [],
     });
 
-    const hits = search("socializer", { limit: 5 });
-    expect(hits[0].project_name).toBe("platform-socializer");
+    const hits = search("project-alpha", { limit: 5 });
+    expect(hits[0].project_name).toBe("project-alpha");
+  });
+
+  it("prefers the exact project identity over a broad parent workspace match", () => {
+    saveParsedSession({
+      session: {
+        source: "claude",
+        source_id: "workspace-alpha",
+        title: "Broad workspace project-alpha notes",
+        project_path: "/repo",
+        project_name: "repo",
+      },
+      messages: [{ session_id: "", role: "user", content: "project-alpha project-alpha project-alpha", sequence_num: 0 }],
+      toolCalls: [],
+    });
+    saveParsedSession({
+      session: {
+        source: "codex",
+        source_id: "specific-alpha",
+        title: "Specific feature work",
+        project_path: "/repo/project-alpha",
+        project_name: "project-alpha",
+      },
+      messages: [{ session_id: "", role: "user", content: "project-alpha", sequence_num: 0 }],
+      toolCalls: [],
+    });
+
+    const hits = search("project-alpha", { limit: 2 });
+    expect(hits[0].project_name).toBe("project-alpha");
   });
 });

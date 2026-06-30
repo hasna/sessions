@@ -37,6 +37,8 @@ export const STORAGE_MODE_ENV = [
   SESSIONS_STORAGE_FALLBACK_ENV.mode,
 ] as const;
 
+const STORAGE_CONFIG_PATH_ENV = "HASNA_SESSIONS_STORAGE_CONFIG_PATH";
+
 type SessionsStorageEnvKey = keyof typeof SESSIONS_STORAGE_ENV;
 
 export interface StorageEnv {
@@ -86,6 +88,10 @@ export function hasStorageDatabaseConfig(): boolean {
   return Boolean(config.rds.host && config.rds.username);
 }
 
+export function getStorageConfigPath(): string {
+  return process.env[STORAGE_CONFIG_PATH_ENV]?.trim() || STORAGE_CONFIG_PATH;
+}
+
 export function getStorageConfig(): StorageConfig {
   const config: StorageConfig = {
     mode: "local",
@@ -98,13 +104,14 @@ export function getStorageConfig(): StorageConfig {
     },
   };
 
-  if (existsSync(STORAGE_CONFIG_PATH)) {
+  const configPath = getStorageConfigPath();
+  if (existsSync(configPath)) {
     try {
-      const raw = JSON.parse(readFileSync(STORAGE_CONFIG_PATH, "utf-8")) as Partial<StorageConfig>;
+      const raw = JSON.parse(readFileSync(configPath, "utf-8")) as Partial<StorageConfig>;
       config.mode = normalizeMode(raw.mode) ?? config.mode;
       config.rds = { ...config.rds, ...(raw.rds ?? {}) };
-    } catch {
-      // Ignore malformed storage config and keep local mode.
+    } catch (error) {
+      throw new Error(`Malformed sessions storage config at ${configPath}: ${(error as Error).message}`);
     }
   }
 
@@ -126,7 +133,7 @@ export function getStorageConnectionString(dbName = "sessions"): string {
   const config = getStorageConfig();
   const { host, port, username, password_env, ssl } = config.rds;
   if (!host || !username) {
-    throw new Error(`Storage database is not configured. Set HASNA_SESSIONS_DATABASE_URL, set SESSIONS_DATABASE_URL, or configure ${STORAGE_CONFIG_PATH}.`);
+    throw new Error(`Storage database is not configured. Set HASNA_SESSIONS_DATABASE_URL, set SESSIONS_DATABASE_URL, or configure ${getStorageConfigPath()}.`);
   }
 
   const password = process.env[password_env];

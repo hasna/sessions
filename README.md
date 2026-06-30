@@ -30,7 +30,7 @@ sessions sync --json           # ingest locally; remote sync is skipped unless s
 
 # Full-text search across every session
 sessions search "kubernetes deploy"
-sessions search "stripe webhook" --source codex --project /path/to/app
+sessions search "stripe webhook" --source codex --project app
 sessions search "kubectl apply" --tools     # search tool calls
 
 # Semantic / hybrid search (run `sessions embed` first; needs OPENAI_API_KEY)
@@ -50,7 +50,7 @@ sessions graph --session <id>                # a session's neighborhood
 
 # Browse
 sessions recent                # most recently active sessions
-sessions indexed-list --project /path  # filter indexed sessions by project
+sessions indexed-list --project app    # filter indexed sessions by project name or path
 sessions show <id>             # full details + message previews
 sessions stats                 # per-source + top-project counts
 

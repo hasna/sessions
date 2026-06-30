@@ -6,6 +6,7 @@ import {
 import type { Message, Session, ToolCall } from "../types/index.js";
 import { sessionGraph } from "./graph.js";
 import type { Embedder } from "./embeddings.js";
+import { appendProjectFilter } from "./project-filter.js";
 import {
   searchMessages,
   searchSessions as searchSessionFields,
@@ -577,8 +578,7 @@ function metadataAndGraphHits(
     params.push(opts.source);
   }
   if (opts.project_path) {
-    filters.push("s.project_path = ?");
-    params.push(opts.project_path);
+    appendProjectFilter(filters, params, opts.project_path);
   }
   if (opts.machine) {
     filters.push("s.machine = ?");

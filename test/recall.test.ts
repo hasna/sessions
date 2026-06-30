@@ -29,7 +29,7 @@ function seedRecallFixtures() {
       model_provider: "anthropic",
       git_branch: "feature/stripe-webhook",
       git_sha: "abc1234",
-      git_origin_url: "https://github.com/hasna/web.git",
+      git_origin_url: "https://github.com/example-org/web.git",
       started_at: "2026-05-01T10:00:00.000Z",
       machine: "test-machine",
     },

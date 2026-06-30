@@ -20,6 +20,7 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "fs";
 import { join } from "path";
 import { homedir } from "os";
@@ -53,7 +54,32 @@ import {
 const program = new Command();
 
 function printJson(value: unknown): void {
-  console.log(JSON.stringify(value, null, 2));
+  writeStdoutFully(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function writeStdoutFully(text: string): void {
+  const buffer = Buffer.from(text, "utf-8");
+  let offset = 0;
+  while (offset < buffer.length) {
+    try {
+      const written = writeSync(1, buffer, offset, buffer.length - offset);
+      if (written === 0) {
+        sleepSync(10);
+        continue;
+      }
+      offset += written;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EAGAIN") {
+        sleepSync(10);
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function parsePositiveIntOption(raw: string | undefined, fallback: number, name: string): number {
@@ -756,7 +782,7 @@ program
     projects.sort((a, b) => b.sessions - a.sessions);
 
     if (opts.json) {
-      console.log(JSON.stringify(projects, null, 2));
+      printJson(projects);
     } else {
       console.log("Claude Code Session Paths\n");
       const maxPath = Math.max(60, ...projects.map((p) => p.path.length));
@@ -786,7 +812,7 @@ program
   .action(async (opts: { json?: boolean }) => {
     const { listMachines } = await import("../db/machines.js");
     const machines = listMachines();
-    if (opts.json) return void console.log(JSON.stringify(machines, null, 2));
+    if (opts.json) return void printJson(machines);
     if (machines.length === 0) {
       console.log("No machines recorded yet. Run 'sessions ingest' or 'sessions sync'.");
       return;
@@ -803,65 +829,72 @@ program
   .option("--no-pull", "Push only — don't pull other machines' sessions")
   .option("--json", "Output as JSON")
   .action(async (opts: { ingest?: boolean; pull?: boolean; json?: boolean }) => {
-    const { ingestAll } = await import("../lib/ingest/index.js");
-    const { recomputeMachineCounts } = await import("../db/machines.js");
-    const { getStorageConfig, hasStorageDatabaseConfig } = await import("../db/storage-config.js");
+    try {
+      const { ingestAll } = await import("../lib/ingest/index.js");
+      const { recomputeMachineCounts } = await import("../db/machines.js");
+      const { getStorageConfig, hasStorageDatabaseConfig } = await import("../db/storage-config.js");
 
-    const runStorage = async (direction: "push" | "pull") => {
-      try {
-        const { pushStorageChanges, pullStorageChanges } = await import("../db/storage-sync.js");
-        const results = direction === "push"
-          ? await pushStorageChanges()
-          : await pullStorageChanges();
-        const errors = results.flatMap((result) => result.errors);
-        return { code: errors.length > 0 ? 1 : 0, output: errors.join("\n"), results };
-      } catch (e) {
-        return { code: 1, output: `failed to run storage ${direction}: ${(e as Error).message}` };
+      const runStorage = async (direction: "push" | "pull") => {
+        try {
+          const { pushStorageChanges, pullStorageChanges } = await import("../db/storage-sync.js");
+          const results = direction === "push"
+            ? await pushStorageChanges()
+            : await pullStorageChanges();
+          const errors = results.flatMap((result) => result.errors);
+          return { code: errors.length > 0 ? 1 : 0, output: errors.join("\n"), results };
+        } catch (e) {
+          return { code: 1, output: `failed to run storage ${direction}: ${(e as Error).message}` };
+        }
+      };
+      const skipStorage = (direction: "push" | "pull") => ({
+        code: 0,
+        output: `storage not configured; skipped remote ${direction}`,
+        skipped: true,
+      });
+
+      const result: Record<string, unknown> = {};
+      if (opts.ingest !== false) {
+        result.ingest = ingestAll();
+        if (!opts.json) for (const r of (result.ingest as { source: string; sessions: number }[])) console.log(`ingest ${r.source}: +${r.sessions} sessions`);
       }
-    };
-    const skipStorage = (direction: "push" | "pull") => ({
-      code: 0,
-      output: `storage not configured; skipped remote ${direction}`,
-      skipped: true,
-    });
-
-    const result: Record<string, unknown> = {};
-    if (opts.ingest !== false) {
-      result.ingest = ingestAll();
-      if (!opts.json) for (const r of (result.ingest as { source: string; sessions: number }[])) console.log(`ingest ${r.source}: +${r.sessions} sessions`);
-    }
-    const storageConfig = getStorageConfig();
-    const shouldSkipStorage = storageConfig.mode === "local" && !hasStorageDatabaseConfig();
-    if (shouldSkipStorage) {
-      if (!opts.json) console.log("storage not configured; local index updated only");
-      result.push = skipStorage("push");
-      if (opts.pull !== false) result.pull = skipStorage("pull");
-    } else {
-      if (!opts.json) console.log("pushing to storage...");
-      result.push = await runStorage("push");
-      if (opts.pull !== false) {
-        if (!opts.json) console.log("pulling from storage...");
-        result.pull = await runStorage("pull");
+      const storageConfig = getStorageConfig();
+      const shouldSkipStorage = storageConfig.mode === "local" && !hasStorageDatabaseConfig();
+      if (shouldSkipStorage) {
+        if (!opts.json) console.log("storage not configured; local index updated only");
+        result.push = skipStorage("push");
+        if (opts.pull !== false) result.pull = skipStorage("pull");
+      } else {
+        if (!opts.json) console.log("pushing to storage...");
+        result.push = await runStorage("push");
+        if (opts.pull !== false) {
+          if (!opts.json) console.log("pulling from storage...");
+          result.pull = await runStorage("pull");
+        }
       }
-    }
-    recomputeMachineCounts();
+      recomputeMachineCounts();
 
-    const push = result.push as { code: number };
-    const pull = result.pull as { code: number } | undefined;
-    const failed = push.code !== 0 || (pull?.code ?? 0) !== 0;
+      const push = result.push as { code: number };
+      const pull = result.pull as { code: number } | undefined;
+      const failed = push.code !== 0 || (pull?.code ?? 0) !== 0;
 
-    if (opts.json) {
-      console.log(JSON.stringify(result, null, 2));
+      if (opts.json) {
+        printJson(result);
+        if (failed) process.exit(1);
+        return;
+      }
+
+      console.log(`push: ${push.code === 0 ? "ok" : `FAILED (exit ${push.code})`}`);
+      if (pull) {
+        console.log(`pull: ${pull.code === 0 ? "ok" : `FAILED (exit ${pull.code})`}`);
+      }
       if (failed) process.exit(1);
-      return;
+      console.log("Done. Run 'sessions machines' to see contributors.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (opts.json) printJson({ error: message });
+      else console.error(message);
+      process.exit(1);
     }
-
-    console.log(`push: ${push.code === 0 ? "ok" : `FAILED (exit ${push.code})`}`);
-    if (pull) {
-      console.log(`pull: ${pull.code === 0 ? "ok" : `FAILED (exit ${pull.code})`}`);
-    }
-    if (failed) process.exit(1);
-    console.log("Done. Run 'sessions machines' to see contributors.");
   });
 
 program
@@ -872,7 +905,7 @@ program
     const { mergeFromDb } = await import("../db/merge.js");
     try {
       const r = mergeFromDb(path);
-      if (opts.json) return void console.log(JSON.stringify(r, null, 2));
+      if (opts.json) return void printJson(r);
       console.log(`Merged from ${path}: +${r.sessions} sessions, +${r.messages} messages, +${r.tool_calls} tool calls, +${r.embeddings} embeddings`);
     } catch (e) {
       console.error((e as Error).message);
@@ -898,7 +931,7 @@ program
     const pollMs = parseNonNegativeIntOption(opts.poll, 10000, "--poll");
     if (opts.status) {
       const status = getWatchStatus({ sources, debounceMs, pollMs });
-      if (opts.json) return void console.log(JSON.stringify(status, null, 2));
+      if (opts.json) return void printJson(status);
       console.log("watch-ingest status");
       console.log(`  sources:  ${status.sources.join(", ") || "(no provider dirs found)"}`);
       console.log(`  debounce: ${status.debounceMs}ms`);
@@ -946,7 +979,7 @@ program
   .action(async (opts: { machine?: string; limit?: string; json?: boolean }) => {
     const { listSessions } = await import("../db/sessions.js");
     const sessions = listSessions({ machine: opts.machine, limit: parseInt(opts.limit ?? "20", 10) || 20 });
-    if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
+    if (opts.json) return void printJson(sessions);
     for (const s of sessions) {
       console.log(
         `${(s.started_at ?? "").slice(0, 16).padEnd(16)}  ${(s.machine ?? "?").padEnd(9)} ${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(18)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`
@@ -959,7 +992,7 @@ program
   .alias("indexed-list")
   .description("List indexed sessions, optionally filtered")
   .option("-s, --source <source>", "Filter by provider")
-  .option("-p, --project <path>", "Filter by project path")
+  .option("-p, --project <value>", "Filter by project name or path")
   .option("-m, --machine <name>", "Filter by machine")
   .option("-l, --limit <n>", "Maximum results", "50")
   .option("--json", "Output as JSON")
@@ -971,7 +1004,7 @@ program
       machine: opts.machine,
       limit: parseInt(opts.limit ?? "50", 10) || 50,
     });
-    if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
+    if (opts.json) return void printJson(sessions);
     for (const s of sessions) {
       console.log(`${(s.machine ?? "?").padEnd(9)} ${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(18)} ${s.title ?? "(untitled)"}  ${s.id.slice(0, 8)}`);
     }
@@ -993,7 +1026,7 @@ program
     const tools = getToolCalls(s.id);
     const n = parsePositiveIntOption(opts.messages, 12, "--messages");
     const previewMessages = messages.slice(0, n);
-    if (opts.json) return void console.log(JSON.stringify({ session: s, messages: previewMessages, tools }, null, 2));
+    if (opts.json) return void printJson({ session: s, messages: previewMessages, tools });
     console.log(`${s.title ?? "(untitled)"}`);
     console.log(`  source:   ${s.source}   model: ${s.model ?? "?"}`);
     console.log(`  project:  ${s.project_name ?? "?"} (${s.project_path ?? "?"})`);
@@ -1017,7 +1050,7 @@ program
     const { getProjectStats } = await import("../db/sessions.js");
     const ingestion = getIngestionStats();
     const projects = getProjectStats();
-    if (opts.json) return void console.log(JSON.stringify({ ingestion, projects }, null, 2));
+    if (opts.json) return void printJson({ ingestion, projects });
     console.log("By source:");
     for (const s of ingestion) {
       console.log(`  ${s.source.padEnd(8)} ${s.session_count} sessions, ${s.message_count} messages, ${s.tool_call_count} tool calls`);
@@ -1050,7 +1083,7 @@ program
         process.exit(1);
       }
       const g = sessionGraph(s.id);
-      if (opts.json) return void console.log(JSON.stringify(g, null, 2));
+      if (opts.json) return void printJson(g);
       console.log(`project: ${g?.project ?? "?"}`);
       console.log(`model:   ${g?.model ?? "?"} (${g?.provider ?? "?"})`);
       console.log(`repo:    ${g?.repo ?? "?"}`);
@@ -1067,7 +1100,7 @@ program
         process.exit(1);
       }
       const sessions = relatedSessions(type as EntityType, name, limit);
-      if (opts.json) return void console.log(JSON.stringify(sessions, null, 2));
+      if (opts.json) return void printJson(sessions);
       for (const s of sessions) {
         console.log(`${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(20)} ${s.title ?? "(untitled)"}  ${s.session_id.slice(0, 8)}`);
       }
@@ -1079,7 +1112,7 @@ program
       process.exit(1);
     }
     const entities = listEntities(opts.type as EntityType | undefined);
-    if (opts.json) return void console.log(JSON.stringify(entities, null, 2));
+    if (opts.json) return void printJson(entities);
     let lastType = "";
     for (const e of entities.slice(0, opts.type ? entities.length : 100)) {
       if (e.type !== lastType) {
@@ -1099,7 +1132,7 @@ program
     const { embedSessions } = await import("../lib/embeddings.js");
     try {
       const result = await embedSessions({ limit: parseInt(opts.limit ?? "200", 10) || 200 });
-      if (opts.json) return void console.log(JSON.stringify(result, null, 2));
+      if (opts.json) return void printJson(result);
       console.log(`Embedded ${result.chunksEmbedded} chunks across ${result.messagesProcessed} messages.`);
     } catch (err) {
       console.error(`Embed failed (is OPENAI_API_KEY set?): ${(err as Error).message}`);
@@ -1112,8 +1145,8 @@ program
   .aliases(["search", "indexed-search"])
   .description("Full-text search across your indexed AI coding sessions")
   .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
-  .option("-p, --project <path>", "Filter by project path")
-  .option("-m, --machine <name>", "Filter by machine (apple03, spark01, …)")
+  .option("-p, --project <value>", "Filter by project name or path")
+  .option("-m, --machine <name>", "Filter by machine (laptop-a, workstation-b, ...)")
   .option("-l, --limit <n>", "Maximum results", "20")
   .option("--tools", "Search tool calls (name/input/output) instead of message content")
   .option("--semantic", "Semantic (embedding) search — requires 'sessions embed' first")
@@ -1130,7 +1163,7 @@ program
 
       if (opts.tools) {
         const hits = searchToolCalls(query, o);
-        if (opts.json) return void console.log(JSON.stringify(hits, null, 2));
+        if (opts.json) return void printJson(hits);
         if (hits.length === 0) return void console.log("No matching tool calls.");
         for (const h of hits) {
           console.log(`${h.source}  ${h.tool_name}${h.project_name ? `  [${h.project_name}]` : ""}`);
@@ -1151,7 +1184,7 @@ program
       } else {
         hits = search(query, o);
       }
-      if (opts.json) return void console.log(JSON.stringify(hits, null, 2));
+      if (opts.json) return void printJson(hits);
       if (hits.length === 0) return void console.log("No matching sessions.");
       for (const h of hits) {
         console.log(
@@ -1167,7 +1200,7 @@ program
   .command("recall <query>")
   .description("Recall a coding session by natural language, with evidence, touched files, graph context, and resume metadata")
   .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
-  .option("-p, --project <path>", "Filter by project path")
+  .option("-p, --project <value>", "Filter by project name or path")
   .option("-m, --machine <name>", "Filter by machine")
   .option("-l, --limit <n>", "Maximum results", "10")
   .option("--no-semantic", "Disable semantic/vector recall even when embeddings are available")
@@ -1187,7 +1220,7 @@ program
         semantic: opts.semantic,
       });
 
-      if (opts.json) return void console.log(JSON.stringify(response, null, 2));
+      if (opts.json) return void printJson(response);
       if (response.results.length === 0) {
         console.log("No matching sessions found.");
         if (response.metadata.semantic.reason) {
@@ -1232,7 +1265,7 @@ async function runIngestCommand(opts: { source?: string; force?: boolean; verbos
       ? [ingestSource(opts.source, { force: opts.force, onProgress })]
       : ingestAll({ force: opts.force, onProgress });
     if (opts.json) {
-      console.log(JSON.stringify(results, null, 2));
+      printJson(results);
       return;
     }
     for (const r of results) {

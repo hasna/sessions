@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
+import { closeDatabase, getDatabase, resetDatabase } from "../src/db/database.js";
+import { saveParsedSession } from "../src/db/sessions.js";
 
 const repoRoot = join(import.meta.dir, "..");
 const TEST_DIR = join(import.meta.dir, ".test-cli-json");
@@ -11,6 +13,23 @@ const IMPORT_SOURCE_DIR = join(TEST_DIR, "import-source");
 function runCli(args: string[]) {
   return Bun.spawnSync({
     cmd: ["bun", "run", "src/cli/index.tsx", ...args],
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CLAUDE_PATH: TEST_DIR,
+      CODEX_PATH: TEST_DIR,
+      HASNA_SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
+      SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
+      HASNA_SESSIONS_DIR: join(TEST_DIR, "sessions-home"),
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+}
+
+function runCliPipe(command: string) {
+  return Bun.spawnSync({
+    cmd: ["bash", "-o", "pipefail", "-c", command],
     cwd: repoRoot,
     env: {
       ...process.env,
@@ -125,6 +144,58 @@ function setupImportFixtures() {
   );
 }
 
+function seedLargeIndexedDb(count: number): void {
+  const previousDbPath = process.env.SESSIONS_DB_PATH;
+  const previousHasnaDbPath = process.env.HASNA_SESSIONS_DB_PATH;
+  process.env.SESSIONS_DB_PATH = join(TEST_DIR, "sessions.db");
+  process.env.HASNA_SESSIONS_DB_PATH = join(TEST_DIR, "sessions.db");
+  resetDatabase();
+  getDatabase();
+  try {
+    for (let index = 0; index < count; index++) {
+      saveParsedSession({
+        session: {
+          source: index % 2 === 0 ? "claude" : "codex",
+          source_id: `large-${index}`,
+          title: `Large JSON fixture ${index}`,
+          project_path: `/Users/test/client-dashboard/${index % 5}`,
+          project_name: "client-dashboard",
+          started_at: `2026-04-10T09:${String(index % 60).padStart(2, "0")}:00.000Z`,
+          machine: "machine-a",
+        },
+        messages: [
+          {
+            session_id: "",
+            role: "user",
+            content: `large-json-token request ${index}`,
+            sequence_num: 0,
+          },
+          {
+            session_id: "",
+            role: "assistant",
+            content: `large-json-token response ${index}`,
+            sequence_num: 1,
+          },
+        ],
+        toolCalls: [
+          {
+            session_id: "",
+            tool_name: "Bash",
+            tool_input: `echo large-json-token ${index}`,
+            tool_output: `large-json-token output ${index}`,
+          },
+        ],
+      });
+    }
+  } finally {
+    closeDatabase();
+    if (previousDbPath === undefined) delete process.env.SESSIONS_DB_PATH;
+    else process.env.SESSIONS_DB_PATH = previousDbPath;
+    if (previousHasnaDbPath === undefined) delete process.env.HASNA_SESSIONS_DB_PATH;
+    else process.env.HASNA_SESSIONS_DB_PATH = previousHasnaDbPath;
+  }
+}
+
 beforeEach(() => {
   setupProjectFixtures();
   setupImportFixtures();
@@ -190,6 +261,34 @@ describe("CLI JSON output", () => {
     expect(payload.projectsImported).toBe(1);
   });
 
+  it("resolves paths from transcript cwd for hyphenated Claude project directories", () => {
+    const projectDir = join(PROJECTS_DIR, "-Users-test-client-dashboard");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      join(projectDir, "sess-hyphenated.jsonl"),
+      [
+        JSON.stringify({ type: "permission-mode", sessionId: "sess-hyphenated" }),
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-04-10T09:00:00.000Z",
+          uuid: "u1",
+          cwd: "/Users/test/client-dashboard",
+          sessionId: "sess-hyphenated",
+          message: { role: "user", content: "continue dashboard work" },
+        }),
+      ].join("\n"),
+      "utf-8"
+    );
+
+    const result = runCli(["paths", "--json"]);
+    const payload = parseJsonOutput(result);
+    const project = payload.find((entry: { encodedDir: string }) => entry.encodedDir === "-Users-test-client-dashboard");
+    expect(project).toMatchObject({
+      path: "/Users/test/client-dashboard",
+      sessions: 1,
+    });
+  });
+
   it("respects the message preview limit for indexed show JSON", () => {
     const ingestResult = runCli(["ingest", "--source", "claude", "--json"]);
     const ingestPayload = parseJsonOutput(ingestResult);
@@ -200,6 +299,39 @@ describe("CLI JSON output", () => {
     expect(payload.session.source_id).toBe("sess-001");
     expect(payload.messages).toHaveLength(1);
     expect(payload.messages[0].content).toBe("hello");
+  });
+
+  it("filters indexed search and lists by project name or path substring", () => {
+    const ingestResult = runCli(["ingest", "--source", "claude", "--json"]);
+    const ingestPayload = parseJsonOutput(ingestResult);
+    expect(ingestPayload[0]).toMatchObject({ source: "claude", sessions: 1, errors: 0 });
+
+    const listResult = runCli(["indexed-list", "--project", "old", "--json"]);
+    const listed = parseJsonOutput(listResult);
+    expect(listed.map((session: { source_id: string }) => session.source_id)).toContain("sess-001");
+
+    const searchResult = runCli(["search", "hello", "--project", "project", "--json"]);
+    const hits = parseJsonOutput(searchResult);
+    expect(hits.map((hit: { source_id?: string; session_id?: string }) => hit.session_id ?? hit.source_id)).toHaveLength(1);
+  });
+
+  it("keeps large JSON output parseable when piped", () => {
+    seedLargeIndexedDb(220);
+    const parser = `bun -e 'const text = await new Response(Bun.stdin.stream()).text(); const value = JSON.parse(text); if (Array.isArray(value)) console.log(value.length); else console.log(value.count ?? value.results?.length ?? 0);'`;
+    const commands = [
+      `bun run src/cli/index.tsx indexed-list --json --limit 220 | ${parser}`,
+      `bun run src/cli/index.tsx recent --json --limit 220 | ${parser}`,
+      `bun run src/cli/index.tsx search large-json-token --json --limit 220 | ${parser}`,
+      `bun run src/cli/index.tsx search large-json-token --tools --json --limit 220 | ${parser}`,
+      `bun run src/cli/index.tsx recall large-json-token --no-semantic --json --limit 40 | ${parser}`,
+    ];
+
+    for (const command of commands) {
+      const result = runCliPipe(command);
+      expect(Buffer.from(result.stderr).toString("utf-8")).toBe("");
+      expect(result.exitCode).toBe(0);
+      expect(Number(Buffer.from(result.stdout).toString("utf-8").trim())).toBeGreaterThan(0);
+    }
   });
 
   it("emits parseable JSON for watch-ingest status and reindex alias", () => {

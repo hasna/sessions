@@ -1,5 +1,6 @@
 import { getDatabase } from "./database.js";
 import { getMachineName } from "../lib/machine.js";
+import { appendProjectFilter } from "../lib/project-filter.js";
 import {
   SessionNotFoundError,
   type Session,
@@ -240,8 +241,7 @@ export function listSessions(opts: ListSessionsOptions = {}): Session[] {
     params.push(opts.source);
   }
   if (opts.project_path) {
-    where.push("project_path = ?");
-    params.push(opts.project_path);
+    appendProjectFilter(where, params, opts.project_path, "");
   }
   if (opts.machine) {
     where.push("machine = ?");

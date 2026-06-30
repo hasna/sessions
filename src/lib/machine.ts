@@ -3,7 +3,7 @@ import { hostname, platform } from "node:os";
 let cachedAuto: string | undefined;
 
 /**
- * The canonical name of the machine this process runs on (e.g. apple03, spark01).
+ * The canonical name of the machine this process runs on (e.g. laptop-a, workstation-b).
  *
  * Resolution order:
  *  1. HASNA_MACHINE env (explicit override; always honored, never cached).

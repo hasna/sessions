@@ -1,4 +1,5 @@
 import { getDatabase } from "../db/database.js";
+import { appendProjectFilter } from "./project-filter.js";
 
 export interface SearchHit {
   session_id: string;
@@ -39,7 +40,7 @@ export function toFtsQuery(query: string): string {
  * Build safe FTS5 query variants. The first variant preserves the user's
  * whitespace tokens; the second splits identifiers on punctuation so domains,
  * repo names, paths, and dashed project IDs still match unicode61-tokenized
- * content (for example socializer.co -> "socializer" "co").
+ * content (for example example.com -> "example" "com").
  */
 export function toFtsQueries(query: string): string[] {
   const variants = new Set<string>();
@@ -64,8 +65,7 @@ function filterClause(opts: SearchOptions, params: unknown[]): string {
     params.push(opts.source);
   }
   if (opts.project_path) {
-    where.push("s.project_path = ?");
-    params.push(opts.project_path);
+    appendProjectFilter(where, params, opts.project_path);
   }
   if (opts.machine) {
     where.push("s.machine = ?");
@@ -260,12 +260,32 @@ function exactnessScore(query: string, hit: SearchHit): number {
   const parts = identifierParts(query).map((part) => part.toLowerCase());
   const metadata = [hit.title, hit.project_name, hit.project_path].filter(Boolean).join(" ").toLowerCase();
   const snippet = hit.snippet.toLowerCase();
+  let score = projectIdentityScore(normalizedQuery, parts, hit);
 
-  if (normalizedQuery && metadata.includes(normalizedQuery)) return 100;
-  if (normalizedQuery && snippet.includes(normalizedQuery)) return 70;
-  if (parts.length > 0 && parts.every((part) => metadata.includes(part))) return 60;
-  if (parts.length > 0 && parts.every((part) => snippet.includes(part))) return 35;
-  return 0;
+  if (normalizedQuery && metadata.includes(normalizedQuery)) score += 100;
+  if (normalizedQuery && snippet.includes(normalizedQuery)) score += 70;
+  if (parts.length > 0 && parts.every((part) => metadata.includes(part))) score += 60;
+  if (parts.length > 0 && parts.every((part) => snippet.includes(part))) score += 35;
+  return score;
+}
+
+function projectIdentityScore(query: string, parts: string[], hit: SearchHit): number {
+  const projectName = (hit.project_name ?? "").toLowerCase();
+  const projectPath = (hit.project_path ?? "").toLowerCase();
+  const pathSegments = projectPath.split("/").filter(Boolean);
+  const projectTerms = unique([query, ...parts]).filter(Boolean);
+
+  let score = 0;
+  for (const term of projectTerms) {
+    if (projectName === term) score = Math.max(score, 140);
+    else if (pathSegments.at(-1) === term) score = Math.max(score, 120);
+    else if (pathSegments.includes(term)) score = Math.max(score, 90);
+  }
+  return score;
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
 function toHit(r: Record<string, unknown>): SearchHit {

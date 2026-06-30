@@ -25,26 +25,26 @@ beforeEach(() => {
   srcPath = join(dir, "src.db");
   targetPath = join(dir, "target.db");
 
-  // Source DB — sessions tagged as if ingested on spark01
+  // Source DB — sessions tagged as if ingested on machine-b
   buildDb(srcPath, () => {
     saveParsedSession({
-      session: { source: "claude", source_id: "spark-1", title: "Spark deploy", machine: "spark01", project_name: "infra" },
-      messages: [{ session_id: "", role: "user", content: "restart the spark cluster", sequence_num: 0 }],
+      session: { source: "claude", source_id: "remote-1", title: "Remote deploy", machine: "machine-b", project_name: "infra" },
+      messages: [{ session_id: "", role: "user", content: "restart the remote cluster", sequence_num: 0 }],
       toolCalls: [{ session_id: "", tool_name: "Bash", tool_input: "systemctl restart" }],
     });
     saveParsedSession({
-      session: { source: "codex", source_id: "spark-2", title: "Spark fix", machine: "spark01" },
+      session: { source: "codex", source_id: "remote-2", title: "Remote fix", machine: "machine-b" },
       messages: [{ session_id: "", role: "user", content: "fix the disk full error", sequence_num: 0 }],
       toolCalls: [],
     });
   });
 
-  // Target DB — a local apple03 session
+  // Target DB — a local machine-a session
   process.env.SESSIONS_DB_PATH = targetPath;
   resetDatabase();
   getDatabase();
   saveParsedSession({
-    session: { source: "claude", source_id: "apple-1", title: "Local work", machine: "apple03", project_name: "app" },
+    session: { source: "claude", source_id: "local-1", title: "Local work", machine: "machine-a", project_name: "app" },
     messages: [{ session_id: "", role: "user", content: "build the local feature", sequence_num: 0 }],
     toolCalls: [],
   });
@@ -66,8 +66,8 @@ describe("mergeFromDb", () => {
     // target now has all three sessions
     expect(listSessions({})).toHaveLength(3);
     // machine tags preserved from source
-    expect(listSessions({ machine: "spark01" })).toHaveLength(2);
-    expect(listSessions({ machine: "apple03" })).toHaveLength(1);
+    expect(listSessions({ machine: "machine-b" })).toHaveLength(2);
+    expect(listSessions({ machine: "machine-a" })).toHaveLength(1);
   });
 
   it("makes merged sessions searchable (FTS repopulated via triggers)", () => {
@@ -80,7 +80,7 @@ describe("mergeFromDb", () => {
   it("records both machines in the registry", () => {
     mergeFromDb(srcPath);
     const names = listMachines().map((m) => m.name).sort();
-    expect(names).toEqual(["apple03", "spark01"]);
+    expect(names).toEqual(["machine-a", "machine-b"]);
   });
 
   it("is idempotent — merging twice does not duplicate", () => {
