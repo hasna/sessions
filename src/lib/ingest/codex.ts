@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import type { SessionParser } from "./types.js";
 import { flattenContent } from "./types.js";
+import { titleFromUserContent } from "../session-text.js";
 import type {
   MessageInsert,
   MessageRole,
@@ -125,7 +126,7 @@ export class CodexParser implements SessionParser {
       if (!content) continue;
 
       if (!title && role === "user") {
-        title = content.replace(/\s+/g, " ").slice(0, 120);
+        title = titleFromUserContent(content) ?? undefined;
       }
 
       messages.push({

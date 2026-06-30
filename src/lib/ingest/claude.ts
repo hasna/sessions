@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { getClaudeProjectsDir } from "../paths.js";
 import type { SessionParser } from "./types.js";
 import { flattenContent } from "./types.js";
+import { isInstructionPreamble, normalizeSessionTitle } from "../session-text.js";
 import type {
   MessageInsert,
   ParsedSession,
@@ -20,24 +21,20 @@ function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
 
-function normalizeTitle(content: string): string {
-  return content.replace(/\s+/g, " ").trim().slice(0, 120);
-}
-
 function titleFromClaudeUserContent(content: string, isMeta: boolean): string | null {
   if (isMeta) return null;
-  const normalized = normalizeTitle(content);
-  if (!normalized) return null;
+  const normalized = normalizeSessionTitle(content);
+  if (!normalized || isInstructionPreamble(normalized)) return null;
 
   const commandArgs = content.match(COMMAND_ARGS_RE)?.[1];
   if (commandArgs != null) {
-    const fromArgs = normalizeTitle(commandArgs);
+    const fromArgs = normalizeSessionTitle(commandArgs);
     return fromArgs || null;
   }
 
   // Slash-command wrapper records are often automation scaffolding. Index the
   // message body, but do not let the wrapper become the session headline.
-  const withoutCommandTags = normalizeTitle(content.replace(COMMAND_TAG_RE, " "));
+  const withoutCommandTags = normalizeSessionTitle(content.replace(COMMAND_TAG_RE, " "));
   if (!withoutCommandTags && HAS_COMMAND_TAG_RE.test(content)) return null;
 
   return normalized;

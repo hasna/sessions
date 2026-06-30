@@ -1,5 +1,6 @@
 import { getDatabase } from "../db/database.js";
 import { appendProjectFilter } from "./project-filter.js";
+import { isInstructionPreamble } from "./session-text.js";
 
 export interface SearchHit {
   session_id: string;
@@ -258,7 +259,8 @@ export function search(query: string, opts: SearchOptions = {}): SearchHit[] {
 function exactnessScore(query: string, hit: SearchHit): number {
   const normalizedQuery = query.trim().toLowerCase();
   const parts = identifierParts(query).map((part) => part.toLowerCase());
-  const metadata = [hit.title, hit.project_name, hit.project_path].filter(Boolean).join(" ").toLowerCase();
+  const title = isInstructionPreamble(hit.title) ? null : hit.title;
+  const metadata = [title, hit.project_name, hit.project_path].filter(Boolean).join(" ").toLowerCase();
   const snippet = hit.snippet.toLowerCase();
   let score = projectIdentityScore(normalizedQuery, parts, hit);
 
@@ -266,6 +268,8 @@ function exactnessScore(query: string, hit: SearchHit): number {
   if (normalizedQuery && snippet.includes(normalizedQuery)) score += 70;
   if (parts.length > 0 && parts.every((part) => metadata.includes(part))) score += 60;
   if (parts.length > 0 && parts.every((part) => snippet.includes(part))) score += 35;
+  if (isInstructionPreamble(hit.title)) score -= 90;
+  if (isInstructionPreamble(hit.snippet)) score -= 90;
   return score;
 }
 

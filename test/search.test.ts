@@ -223,4 +223,42 @@ describe("search", () => {
     const hits = search("project-alpha", { limit: 2 });
     expect(hits[0].project_name).toBe("project-alpha");
   });
+
+  it("deprioritizes instruction preambles when ranking project searches", () => {
+    saveParsedSession({
+      session: {
+        source: "codex",
+        source_id: "instruction-preamble",
+        title: "# AGENTS.md instructions for /Users/dev/Workspace/project-alpha <INSTRUCTIONS> project-alpha full plan",
+        project_path: "/Users/dev/Workspace/project-alpha",
+        project_name: "project-alpha",
+        started_at: "2026-05-03T00:00:00.000Z",
+      },
+      messages: [
+        {
+          session_id: "",
+          role: "user",
+          content:
+            "# AGENTS.md instructions for /Users/dev/Workspace/project-alpha\n\n<INSTRUCTIONS>\nproject-alpha full plan setup notes\n</INSTRUCTIONS>",
+          sequence_num: 0,
+        },
+      ],
+      toolCalls: [],
+    });
+    saveParsedSession({
+      session: {
+        source: "codex",
+        source_id: "real-plan",
+        title: "Project alpha full plan",
+        project_path: "/Users/dev/Workspace/project-alpha",
+        project_name: "project-alpha",
+        started_at: "2026-05-02T00:00:00.000Z",
+      },
+      messages: [{ session_id: "", role: "user", content: "project-alpha full plan implementation priorities", sequence_num: 0 }],
+      toolCalls: [],
+    });
+
+    const hits = search("project-alpha full plan", { project_path: "project-alpha", limit: 1 });
+    expect(hits[0].title).toBe("Project alpha full plan");
+  });
 });

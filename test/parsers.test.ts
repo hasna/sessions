@@ -251,6 +251,46 @@ describe("CodexParser", () => {
   it("listSessionFiles finds rollout files under CODEX_PATH", () => {
     expect(new CodexParser().listSessionFiles().some((f) => f.includes("rollout-"))).toBe(true);
   });
+
+  it("skips instruction preambles when choosing Codex session titles", () => {
+    const file = join(root, "codex", "sessions", "2026", "05", "02", "rollout-2026-05-02T10-00-00-preamble.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          timestamp: "2026-05-02T10:00:00Z",
+          type: "session_meta",
+          payload: { id: "codex-preamble", cwd: "/Users/dev/Workspace/project-alpha" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-02T10:00:01Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: "# AGENTS.md instructions for /Users/dev/Workspace/project-alpha\n\n<INSTRUCTIONS>\nUse the repo conventions.\n</INSTRUCTIONS>",
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-02T10:00:02Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "create the launch plan for the analytics dashboard" }],
+          },
+        }),
+      ].join("\n")
+    );
+
+    const [ps] = new CodexParser().parseFile(file);
+    expect(ps.session.title).toBe("create the launch plan for the analytics dashboard");
+  });
 });
 
 describe("GeminiParser", () => {
