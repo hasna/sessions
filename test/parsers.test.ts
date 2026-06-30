@@ -291,6 +291,41 @@ describe("CodexParser", () => {
     const [ps] = new CodexParser().parseFile(file);
     expect(ps.session.title).toBe("create the launch plan for the analytics dashboard");
   });
+
+  it("skips structured continuation preambles when choosing Codex session titles", () => {
+    const file = join(root, "codex", "sessions", "2026", "05", "02", "rollout-2026-05-02T11-00-00-goal-context.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          timestamp: "2026-05-02T11:00:00Z",
+          type: "session_meta",
+          payload: { id: "codex-goal-context", cwd: "/Users/dev/Workspace/project-alpha" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-02T11:00:01Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "<goal_context>Continue working toward the active thread goal.</goal_context>" }],
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-02T11:00:02Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "finish the launch checklist and publish the release notes" }],
+          },
+        }),
+      ].join("\n")
+    );
+
+    const [ps] = new CodexParser().parseFile(file);
+    expect(ps.session.title).toBe("finish the launch checklist and publish the release notes");
+  });
 });
 
 describe("GeminiParser", () => {

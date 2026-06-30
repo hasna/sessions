@@ -261,4 +261,41 @@ describe("search", () => {
     const hits = search("project-alpha full plan", { project_path: "project-alpha", limit: 1 });
     expect(hits[0].title).toBe("Project alpha full plan");
   });
+
+  it("deprioritizes structured continuation preambles when ranking project searches", () => {
+    saveParsedSession({
+      session: {
+        source: "codex",
+        source_id: "goal-context-preamble",
+        title: "<goal_context> Continue working toward the active thread goal for project-alpha full plan",
+        project_path: "/Users/dev/Workspace/project-alpha",
+        project_name: "project-alpha",
+        started_at: "2026-05-03T00:00:00.000Z",
+      },
+      messages: [
+        {
+          session_id: "",
+          role: "user",
+          content: "<goal_context> Continue working toward the active thread goal for project-alpha full plan",
+          sequence_num: 0,
+        },
+      ],
+      toolCalls: [],
+    });
+    saveParsedSession({
+      session: {
+        source: "codex",
+        source_id: "real-goal-plan",
+        title: "Project alpha full plan",
+        project_path: "/Users/dev/Workspace/project-alpha",
+        project_name: "project-alpha",
+        started_at: "2026-05-02T00:00:00.000Z",
+      },
+      messages: [{ session_id: "", role: "user", content: "project-alpha full plan implementation priorities", sequence_num: 0 }],
+      toolCalls: [],
+    });
+
+    const hits = search("project-alpha full plan", { project_path: "project-alpha", limit: 1 });
+    expect(hits[0].title).toBe("Project alpha full plan");
+  });
 });
