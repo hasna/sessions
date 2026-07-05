@@ -45,8 +45,13 @@ function errorMessage(error: unknown): string {
 
 function printResults(results: Awaited<ReturnType<typeof pushStorageChanges>>): void {
   for (const result of results) {
-    const line = `${result.table}: ${result.rowsWritten}/${result.rowsRead} row(s)`;
+    const line = result.skipped
+      ? `${result.table}: skipped`
+      : `${result.table}: ${result.rowsWritten}/${result.rowsRead} row(s)`;
     console.log(result.errors.length > 0 ? chalk.yellow(line) : chalk.green(line));
+    for (const warning of result.warnings ?? []) {
+      console.warn(chalk.yellow(`  ${warning}`));
+    }
     for (const error of result.errors) {
       console.error(chalk.red(`  ${error}`));
     }
@@ -72,6 +77,10 @@ export function registerStorageCommands(program: Command): void {
         console.log(`Mode: ${status.mode}`);
         console.log(`Enabled: ${status.enabled ? "yes" : "no"}`);
         console.log(`Database: ${status.db_path}`);
+        console.log(`Remote payloads: ${status.privacy.allowed_remote_payloads.join(", ") || "metadata only"}`);
+        for (const adapter of status.adapters) {
+          console.log(`  ${adapter.id}: ${adapter.enabled ? "enabled" : "disabled"} (${adapter.role})`);
+        }
         for (const table of status.tables) {
           console.log(`  ${table.table}: ${table.rows}`);
         }
