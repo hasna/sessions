@@ -8,3 +8,7 @@ dist/
 .hasna/
 .env
 .env.local
+
+# stray artifacts from @hasna/contracts bunx tooling
+pnpm-lock.yaml
+pnpm-workspace.yaml
