@@ -1,0 +1,55 @@
+# Self-host stack for @hasna/sessions: sessions-serve + Postgres.
+# Amendment A1 (PURE REMOTE): the service reads/writes Postgres directly.
+#
+# Usage:
+#   export HASNA_SESSIONS_API_SIGNING_KEY="$(openssl rand -hex 32)"
+#   docker compose up --build
+# Then issue a key against the same DB + signing key:
+#   docker compose run --rm sessions-serve bunx @hasna/contracts issue-key \
+#     --app sessions --scopes 'sessions:read,sessions:write'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sessions
+      POSTGRES_PASSWORD: sessions
+      POSTGRES_DB: sessions
+    ports:
+      - "5432:5432"
+    volumes:
+      - sessions_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sessions -d sessions"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    build: .
+    command: ["bun", "dist/server/index.js", "migrate"]
+    environment:
+      HASNA_SESSIONS_STORAGE_MODE: cloud
+      HASNA_SESSIONS_DATABASE_URL: postgres://sessions:sessions@postgres:5432/sessions?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  sessions-serve:
+    build: .
+    ports:
+      - "3456:3456"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3456"
+      HASNA_SESSIONS_STORAGE_MODE: cloud
+      HASNA_SESSIONS_DATABASE_URL: postgres://sessions:sessions@postgres:5432/sessions?sslmode=disable
+      HASNA_SESSIONS_API_SIGNING_KEY: ${HASNA_SESSIONS_API_SIGNING_KEY:-change-me-openssl-rand-hex-32}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  sessions_pg:

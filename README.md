@@ -145,6 +145,36 @@ JSONL, and Gemini. Cursor/cloud Codex/cloud Claude sources should be added
 through the existing `SessionParser`/`SessionAdapter` interfaces when they expose
 a durable local export or API; avoid scraping transient cloud/cache formats.
 
+## HTTP service (`sessions-serve`) + SDK
+
+`sessions-serve` exposes an HTTP API with the standard health surface and a
+versioned, API-key-authenticated `/v1` API:
+
+- `GET /health`, `GET /ready`, `GET /version` → `{ status, version, mode }`
+- `GET /openapi.json` → OpenAPI 3 document (the SDK is generated from it)
+- `/v1/sessions` (list/create), `/v1/sessions/:id` (get/delete),
+  `/v1/search`, `/v1/recent`, `/v1/machines`, `/v1/stats`
+
+Auth uses `@hasna/contracts` API keys (header `x-api-key` or
+`Authorization: Bearer`). Set the signing secret with
+`HASNA_SESSIONS_API_SIGNING_KEY` (or the shared `HASNA_API_SIGNING_KEY`) and
+issue keys with `bunx @hasna/contracts issue-key --app sessions --scopes
+'sessions:read,sessions:write'`.
+
+Amendment A1 (PURE REMOTE): in cloud mode (`HASNA_SESSIONS_STORAGE_MODE=cloud`
++ `HASNA_SESSIONS_DATABASE_URL`) the service reads/writes the shared cloud
+Postgres directly — no sync engine or cache in the service. Apply the schema
+with `sessions-serve migrate` (run with the owner DSN). See `docker-compose.yml`
+for a self-host stack (serve + Postgres) and `Dockerfile` for the ARM64 image.
+
+The generated, dependency-free SDK is published at `@hasna/sessions/sdk`:
+
+```ts
+import { SessionsApi } from "@hasna/sessions/sdk";
+const client = new SessionsApi({ baseUrl: process.env.SESSIONS_API_URL!, apiKey: process.env.SESSIONS_API_KEY });
+const { sessions } = await client.listSessions({ limit: 20 });
+```
+
 ## Data Directory
 
 Data is stored in `~/.hasna/sessions/` (`sessions.db`).

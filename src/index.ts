@@ -91,3 +91,20 @@ export {
   syncStorageChanges,
 } from "./db/storage-sync.js";
 export type { StorageStatus, SyncResult } from "./db/storage-sync.js";
+
+// --- Cloud (Postgres) data plane + serve surface (Amendment A1, PURE REMOTE) ---
+export { isCloudMode, getCloudClient, closeCloudClient, APP_NAME } from "./db/cloud/client.js";
+export { runCloudMigrations } from "./db/cloud/migrate.js";
+export { loadMigrations, resolveMigrationsDir } from "./db/cloud/migrations.js";
+export * as cloudStore from "./db/cloud/store.js";
+export { buildOpenApiDocument } from "./server/openapi.js";
+export { createSessionsServer, bootstrapServer } from "./server/app.js";
+
+// --- Generated SDK ---
+export {
+  SessionsApi,
+  SessionsClient,
+  ApiError,
+  createSessionsClientFromEnv,
+} from "./sdk/index.js";
+export type { SessionsApiOptions } from "./sdk/index.js";
