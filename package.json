@@ -1,6 +1,6 @@
 {
   "name": "@hasna/sessions",
-  "version": "0.11.39",
+  "version": "0.11.40",
   "description": "Search and sync AI coding sessions (Claude, Codex, Gemini) — unified SQLite index with full-text search",
   "type": "module",
   "main": "dist/index.js",
@@ -18,19 +18,31 @@
     "./storage": {
       "types": "./dist/storage.d.ts",
       "import": "./dist/storage.js"
-    }
+    },
+    "./sdk": {
+      "types": "./dist/sdk/index.d.ts",
+      "import": "./dist/sdk/index.js"
+    },
+    "./hasna.contract.json": "./hasna.contract.json"
   },
   "files": [
     "dist",
+    "migrations",
+    "hasna.contract.json",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
-    "build": "rm -rf dist && bun run build:cli && bun run build:mcp && bun run build:server && bun run build:lib && tsc --emitDeclarationOnly --outDir dist",
+    "build": "rm -rf dist && bun run build:cli && bun run build:mcp && bun run build:server && bun run build:lib && bun run build:sdk && tsc --emitDeclarationOnly --outDir dist",
     "build:cli": "bun build src/cli/index.tsx --outdir dist/cli --target bun --packages external",
     "build:mcp": "bun build src/mcp/index.ts --outdir dist/mcp --target bun --packages external",
     "build:server": "bun build src/server/index.ts --outdir dist/server --target bun --packages external",
     "build:lib": "bun build src/index.ts src/storage.ts --outdir dist --target bun --packages external",
+    "build:sdk": "bun build src/sdk/index.ts --outdir dist/sdk --target bun --packages external",
+    "sdk:generate": "bun run scripts/generate-sdk.ts",
+    "migrate": "bun run src/server/index.ts migrate",
+    "kit:check": "bun x @hasna/contracts vendor-kit --check .",
+    "contract:validate": "bun x @hasna/contracts validate hasna.contract.json",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "prepublishOnly": "bun run typecheck && bun test && bun run build",
@@ -55,6 +67,7 @@
     "url": "git+https://github.com/hasna/sessions.git"
   },
   "dependencies": {
+    "@hasna/contracts": "0.4.1",
     "@hasna/events": "^0.1.11",
     "@inkjs/ui": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.27.1",

@@ -18,10 +18,18 @@ describe("createSessionsServer", () => {
       const healthResponse = await fetch(`${baseUrl}/health`);
       expect(healthResponse.status).toBe(200);
       expect(await healthResponse.json()).toEqual({
-        ok: true,
-        service: pkg.name,
+        status: "ok",
         version: pkg.version,
+        mode: "local",
       });
+
+      const readyResponse = await fetch(`${baseUrl}/ready`);
+      expect(readyResponse.status).toBe(200);
+      expect((await readyResponse.json()).status).toBe("ready");
+
+      const versionResponse = await fetch(`${baseUrl}/version`);
+      expect(versionResponse.status).toBe(200);
+      expect((await versionResponse.json()).version).toBe(pkg.version);
 
       const infoResponse = await fetch(`${baseUrl}/info`);
       expect(infoResponse.status).toBe(200);
