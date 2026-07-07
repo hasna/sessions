@@ -1136,8 +1136,8 @@ program
   .option("-l, --limit <n>", "Maximum results", "20")
   .option("--json", "Output as JSON")
   .action(async (opts: { machine?: string; limit?: string; json?: boolean }) => {
-    const { listSessions } = await import("../db/sessions.js");
-    const sessions = listSessions({ machine: opts.machine, limit: parseInt(opts.limit ?? "20", 10) || 20 });
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const sessions = await resolveSessionStore().list({ machine: opts.machine, limit: parseInt(opts.limit ?? "20", 10) || 20 });
     if (opts.json) return void printJson(sessions);
     for (const s of sessions) {
       console.log(
@@ -1156,8 +1156,8 @@ program
   .option("-l, --limit <n>", "Maximum results", "50")
   .option("--json", "Output as JSON")
   .action(async (opts: { source?: string; project?: string; machine?: string; limit?: string; json?: boolean }) => {
-    const { listSessions } = await import("../db/sessions.js");
-    const sessions = listSessions({
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const sessions = await resolveSessionStore().list({
       source: opts.source,
       project_path: opts.project,
       machine: opts.machine,
@@ -1175,14 +1175,24 @@ program
   .option("-m, --messages <n>", "How many messages to preview", "12")
   .option("--json", "Output as JSON")
   .action(async (id: string, opts: { messages?: string; json?: boolean }) => {
-    const { getSessionByPrefix, getMessages, getToolCalls } = await import("../db/sessions.js");
-    const s = getSessionByPrefix(id);
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const store = resolveSessionStore();
+    const s = await store.get(id);
     if (!s) {
       console.error(`Session not found (or ambiguous prefix): ${id}`);
       process.exit(1);
     }
-    const messages = getMessages(s.id);
-    const tools = getToolCalls(s.id);
+    // Message/tool-call bodies are only available from the local index; the
+    // cloud /v1 surface returns session metadata (no blobs).
+    type Message = import("../types/index.js").Message;
+    type ToolCall = import("../types/index.js").ToolCall;
+    let messages: Message[] = [];
+    let tools: ToolCall[] = [];
+    if (store.mode === "local") {
+      const { getMessages, getToolCalls } = await import("../db/sessions.js");
+      messages = getMessages(s.id);
+      tools = getToolCalls(s.id);
+    }
     const n = parsePositiveIntOption(opts.messages, 12, "--messages");
     const previewMessages = messages.slice(0, n);
     if (opts.json) return void printJson({ session: s, messages: previewMessages, tools });
@@ -1205,18 +1215,67 @@ program
   .description("Show ingestion and project statistics")
   .option("--json", "Output as JSON")
   .action(async (opts: { json?: boolean }) => {
-    const { getIngestionStats } = await import("../db/ingestion.js");
-    const { getProjectStats } = await import("../db/sessions.js");
-    const ingestion = getIngestionStats();
-    const projects = getProjectStats();
-    if (opts.json) return void printJson({ ingestion, projects });
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const stats = await resolveSessionStore().stats();
+    if (opts.json) return void printJson(stats);
     console.log("By source:");
-    for (const s of ingestion) {
-      console.log(`  ${s.source.padEnd(8)} ${s.session_count} sessions, ${s.message_count} messages, ${s.tool_call_count} tool calls`);
+    for (const s of stats.by_source) {
+      console.log(`  ${s.source.padEnd(8)} ${s.sessions} sessions`);
     }
+    console.log(`\nTotals: ${stats.session_count} sessions, ${stats.message_count} messages, ${stats.tool_call_count} tool calls`);
     console.log("\nTop projects:");
-    for (const p of projects.slice(0, 15)) {
+    for (const p of stats.projects.slice(0, 15)) {
       console.log(`  ${String(p.session_count).padStart(4)}  ${p.project_name ?? p.project_path}`);
+    }
+  });
+
+program
+  .command("create")
+  .description("Create a session record in the active store (local index, or the self_hosted /v1 API when HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are set)")
+  .requiredOption("--source <source>", "Session source: claude, codex, or gemini")
+  .requiredOption("--source-id <id>", "Provider-native session id")
+  .option("--title <title>", "Session title")
+  .option("--project-path <path>", "Project path")
+  .option("--project-name <name>", "Project name")
+  .option("--model <model>", "Model")
+  .option("--machine <machine>", "Machine name")
+  .option("--json", "Output as JSON")
+  .action(async (opts: {
+    source: string;
+    sourceId: string;
+    title?: string;
+    projectPath?: string;
+    projectName?: string;
+    model?: string;
+    machine?: string;
+    json?: boolean;
+  }) => {
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const session = await resolveSessionStore().create({
+      source: opts.source,
+      source_id: opts.sourceId,
+      ...(opts.title !== undefined ? { title: opts.title } : {}),
+      ...(opts.projectPath !== undefined ? { project_path: opts.projectPath } : {}),
+      ...(opts.projectName !== undefined ? { project_name: opts.projectName } : {}),
+      ...(opts.model !== undefined ? { model: opts.model } : {}),
+      ...(opts.machine !== undefined ? { machine: opts.machine } : {}),
+    });
+    if (opts.json) return void printJson(session);
+    console.log(`Created session ${session.id} (${session.source}:${session.source_id})`);
+  });
+
+program
+  .command("delete <id>")
+  .description("Delete a session record from the active store (local index, or the self_hosted /v1 API when HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are set)")
+  .option("--json", "Output as JSON")
+  .action(async (id: string, opts: { json?: boolean }) => {
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const deleted = await resolveSessionStore().remove(id);
+    if (opts.json) return void printJson({ deleted, id });
+    if (deleted) console.log(`Deleted session ${id}`);
+    else {
+      console.error(`Session not found: ${id}`);
+      process.exit(1);
     }
   });
 
