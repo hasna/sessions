@@ -43,6 +43,47 @@ export {
 export type { SessionRecord, SessionSearchResult, SessionStatus } from "./lib/sessions.js";
 
 export {
+  buildLivePane,
+  classifyLivePane,
+  filterLivePanes,
+  formatLivePaneTable,
+  listLivePanes,
+  listLivePanesFromTmuxOutput,
+  normalizeProjectPath,
+  parseLiveStatusFilter,
+  parseTmuxPaneLine,
+} from "./lib/live.js";
+export type {
+  LivePane,
+  LivePaneStatus,
+  ListLivePanesOptions,
+  TmuxCommandResult,
+  TmuxPaneRecord,
+  TmuxRunner,
+} from "./lib/live.js";
+
+export {
+  BULK_SESSION_ACTIONS,
+  buildBulkGuardDecision,
+  buildBulkSessionPlan,
+  formatBulkSessionPlan,
+  isBulkSessionAction,
+  listBulkLivePanes,
+  parseConcurrency,
+  parseJitterMs,
+} from "./lib/bulk.js";
+export type {
+  BulkEntryDecision,
+  BulkGuardDecision,
+  BulkGuardHints,
+  BulkLiveDiscoveryOptions,
+  BulkPlanEntry,
+  BulkSessionAction,
+  BulkSessionOptions,
+  BulkSessionPlan,
+} from "./lib/bulk.js";
+
+export {
   recallSessions,
   buildQueryVariants,
   extractCodingEntities,
