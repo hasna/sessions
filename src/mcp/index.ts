@@ -42,6 +42,19 @@ import { listAdapters, getAdapter } from "../lib/adapters/index.js";
 import type { CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
 import { registerSessionsStorageTools } from "./storage-tools.js";
+import { resolveSessionStore } from "../db/session-store.js";
+
+// Session-record store seam (SAME resolver the CLI uses). When the client-flip
+// resolves to cloud-http — HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY set
+// (self_hosted) — the core session-record read tools (recent/list/get/machines/
+// stats/search) route to https://sessions.hasna.xyz/v1 with the bearer key so
+// every machine's MCP sees the ONE shared cloud session registry. Env unset =>
+// local SQLite index exactly as before (no regression). Analytical/local-only
+// tools (ingest, embed, semantic/graph/recall, tool-call search, adapters) have
+// no /v1 surface and always operate on the local transcript index.
+function sessionStore() {
+  return resolveSessionStore();
+}
 
 const packageInfo = getPackageInfo();
 
@@ -223,6 +236,10 @@ server.tool(
   },
   async (a: { query: string; source?: string; project_path?: string; machine?: string; limit?: number }) => {
     try {
+      const store = sessionStore();
+      if (store.mode === "cloud") {
+        return ok(await store.search(a.query, { source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
+      }
       return ok(search(a.query, { source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
     } catch (e) {
       return fail(e);
@@ -279,6 +296,8 @@ server.tool(
   { limit: z.number().optional().describe("Max results (default 20)") },
   async (a: { limit?: number }) => {
     try {
+      const store = sessionStore();
+      if (store.mode === "cloud") return ok(await store.recent(a.limit ?? 20));
       return ok(getRecentSessions(a.limit ?? 20));
     } catch (e) {
       return fail(e);
@@ -297,6 +316,10 @@ server.tool(
   },
   async (a: { source?: string; project_path?: string; machine?: string; limit?: number }) => {
     try {
+      const store = sessionStore();
+      if (store.mode === "cloud") {
+        return ok(await store.list({ source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
+      }
       return ok(listSessions({ source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
     } catch (e) {
       return fail(e);
@@ -310,6 +333,8 @@ server.tool(
   {},
   async () => {
     try {
+      const store = sessionStore();
+      if (store.mode === "cloud") return ok(await store.machines());
       return ok(listMachines());
     } catch (e) {
       return fail(e);
@@ -326,6 +351,14 @@ server.tool(
   },
   async (a: { id: string; message_limit?: number }) => {
     try {
+      const store = sessionStore();
+      if (store.mode === "cloud") {
+        const session = await store.get(a.id);
+        if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
+        // The cloud /v1 registry stores session metadata only; raw message/tool
+        // transcripts stay on the machine that produced them (local index).
+        return ok({ session, messages: [], tool_calls: [], note: "self_hosted registry: metadata only; message/tool transcripts live on the producing machine's local index" });
+      }
       const session = getSessionByPrefix(a.id);
       if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
       let messages = getMessages(session.id);
@@ -362,6 +395,11 @@ server.tool(
   {},
   async () => {
     try {
+      const store = sessionStore();
+      if (store.mode === "cloud") {
+        const s = await store.stats();
+        return ok({ ingestion: s.by_source, projects: s.projects.slice(0, 30), totals: { session_count: s.session_count, message_count: s.message_count, tool_call_count: s.tool_call_count } });
+      }
       return ok({ ingestion: getIngestionStats(), projects: getProjectStats().slice(0, 30) });
     } catch (e) {
       return fail(e);
