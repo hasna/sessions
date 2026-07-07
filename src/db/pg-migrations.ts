@@ -168,4 +168,25 @@ export const PG_MIGRATIONS: string[] = [
     machine_id TEXT,
     created_at TEXT NOT NULL DEFAULT NOW()::text
   )`,
+
+  // Migration 13: redacted remote session index documents
+  `CREATE TABLE IF NOT EXISTS session_index_documents (
+    session_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    title TEXT,
+    project_path TEXT,
+    project_name TEXT,
+    started_at TEXT,
+    ended_at TEXT,
+    machine TEXT,
+    updated_at TEXT,
+    searchable_text TEXT NOT NULL DEFAULT '',
+    content_redacted BOOLEAN NOT NULL DEFAULT TRUE,
+    privacy_policy TEXT NOT NULL DEFAULT 'metadata_only',
+    indexed_at TEXT NOT NULL DEFAULT NOW()::text
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_index_documents_source_source_id ON session_index_documents(source, source_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_session_index_documents_project_path ON session_index_documents(project_path)`,
+  `CREATE INDEX IF NOT EXISTS idx_session_index_documents_started_at ON session_index_documents(started_at DESC)`,
 ];

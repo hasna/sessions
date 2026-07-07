@@ -153,6 +153,22 @@ Set `HASNA_SESSIONS_DATABASE_URL` or configure
 PostgreSQL. `SESSIONS_DATABASE_URL` is accepted as a short non-deprecated
 fallback for local development.
 
+The runtime boundary is local-first:
+
+- Local capture and search use local provider files plus SQLite/FTS5 only.
+- Remote PostgreSQL stores session metadata tables and a redacted
+  `session_index_documents` metadata index by default.
+- Transcript-bearing tables (`messages`, `tool_calls`, `embeddings`) and
+  feedback are skipped for remote push/pull unless explicitly enabled with
+  `HASNA_SESSIONS_REMOTE_PAYLOADS=transcripts,tool_payloads,embeddings,feedback`
+  or `privacy.remote_payloads` in the storage config.
+- S3/AWS object storage is represented only as a future adapter descriptor in
+  config/status. This package does not upload private transcripts or objects to
+  S3/AWS; live object writes require a separate approval task and implementation.
+
+`sessions storage status --json` reports the active local SQLite, remote
+PostgreSQL, and S3/AWS adapter state plus the current privacy gate decisions.
+
 ## Adapter notes
 
 Indexed ingestion currently uses stable local files for Claude Code, local Codex

@@ -10,7 +10,9 @@ import {
   getStorageDatabaseEnvName,
   hasStorageDatabaseConfig,
 } from "../src/db/storage-config.js";
-import { SESSIONS_STORAGE_TABLES, STORAGE_TABLES, getStorageStatus, pullStorageChangesFromRemote } from "../src/db/storage-sync.js";
+import { REMOTE_SESSION_INDEX_TABLE } from "../src/db/index-adapters.js";
+import { getRemotePayloadTokens, getRemoteTableGate } from "../src/db/storage-policy.js";
+import { SESSIONS_STORAGE_TABLES, STORAGE_TABLES, getStorageStatus, pullStorageChangesFromRemote, pushStorageChangesToRemote } from "../src/db/storage-sync.js";
 import { saveParsedSession } from "../src/db/sessions.js";
 import { search } from "../src/lib/search.js";
 
@@ -20,6 +22,8 @@ const envKeys = [
   "HASNA_SESSIONS_STORAGE_MODE",
   "SESSIONS_STORAGE_MODE",
   "HASNA_SESSIONS_STORAGE_CONFIG_PATH",
+  "HASNA_SESSIONS_REMOTE_PAYLOADS",
+  "SESSIONS_REMOTE_PAYLOADS",
 ] as const;
 
 const savedEnv = new Map<string, string | undefined>();
@@ -29,16 +33,23 @@ let tempRoot: string | null = null;
 type Row = Record<string, unknown>;
 
 class MemoryRemote {
-  constructor(private readonly tables: Record<string, Row[]>) {}
+  readonly runs: Array<{ sql: string; params: unknown[] }> = [];
+
+  constructor(
+    private readonly tables: Record<string, Row[]>,
+    private readonly existingSessions: Record<string, string> = {}
+  ) {}
 
   async exec(): Promise<void> {}
 
-  async get(): Promise<unknown> {
-    return null;
+  async get(_sql = "", source?: unknown, sourceId?: unknown): Promise<unknown> {
+    const id = this.existingSessions[`${String(source)}:${String(sourceId)}`];
+    return id ? { id } : null;
   }
 
-  async run(): Promise<{ changes: number }> {
-    return { changes: 0 };
+  async run(sql = "", ...params: unknown[]): Promise<{ changes: number }> {
+    this.runs.push({ sql, params });
+    return { changes: 1 };
   }
 
   async all(sql: string, limit?: unknown, offset?: unknown): Promise<unknown[]> {
@@ -81,6 +92,10 @@ describe("sessions storage sync", () => {
     expect(status.db_path).toBe(":memory:");
     expect(status.tables.map((table) => table.table)).toContain("sessions");
     expect(status.tables.find((table) => table.table === "feedback")?.rows).toBe(0);
+    expect(status.privacy.default_remote_push).toBe("metadata_only");
+    expect(status.privacy.gated_tables.map((table) => table.table)).toContain("messages");
+    expect(status.adapters.map((adapter) => adapter.id)).toContain("local-sqlite-fts");
+    expect(status.adapters.map((adapter) => adapter.id)).toContain("remote-postgres-index");
   });
 
   it("canonical storage database env wins over the short fallback", () => {
@@ -130,7 +145,91 @@ describe("sessions storage sync", () => {
     expect(SESSIONS_STORAGE_FALLBACK_ENV.databaseUrl).toBe("SESSIONS_DATABASE_URL");
   });
 
+  it("keeps remote payload tables gated until explicit opt-in", () => {
+    expect(getRemotePayloadTokens()).toEqual([]);
+    expect(getRemoteTableGate("sessions").allowed).toBe(true);
+    expect(getRemoteTableGate("messages").allowed).toBe(false);
+    expect(getRemoteTableGate("tool_calls").allowed).toBe(false);
+    expect(getRemoteTableGate("embeddings").allowed).toBe(false);
+    expect(getRemoteTableGate("future_payload_table").allowed).toBe(false);
+    expect(getRemoteTableGate("future_payload_table").payloadClass).toBe("unknown");
+
+    process.env.HASNA_SESSIONS_REMOTE_PAYLOADS = "transcripts,tool_payloads";
+    expect(getRemotePayloadTokens()).toEqual(["tool_payloads", "transcripts"]);
+    expect(getRemoteTableGate("messages").allowed).toBe(true);
+    expect(getRemoteTableGate("tool_calls").allowed).toBe(true);
+    expect(getRemoteTableGate("embeddings").allowed).toBe(false);
+  });
+
+  it("pushes a redacted remote session index while skipping transcript payloads by default", async () => {
+    saveParsedSession({
+      session: {
+        id: "local-session",
+        source: "claude",
+        source_id: "same-source",
+        title: "remote metadata title",
+        project_path: "/workspace/app",
+        project_name: "app",
+      },
+      messages: [{ id: "local-message", session_id: "", role: "user", content: "private transcript token", sequence_num: 0 }],
+      toolCalls: [],
+    });
+
+    const remote = new MemoryRemote({});
+    const results = await pushStorageChangesToRemote(remote, ["sessions", "messages"], getDatabase());
+    const messages = results.find((result) => result.table === "messages");
+    const index = results.find((result) => result.table === REMOTE_SESSION_INDEX_TABLE);
+
+    expect(messages?.skipped).toBe(true);
+    expect(messages?.warnings?.join("\n")).toContain("full message transcript content");
+    expect(index?.rowsRead).toBe(1);
+    expect(index?.rowsWritten).toBe(1);
+    expect(remote.runs.some((run) => run.sql.includes(REMOTE_SESSION_INDEX_TABLE))).toBe(true);
+    expect(remote.runs.some((run) => run.params.includes("private transcript token"))).toBe(false);
+  });
+
+  it("uses the remote session id when writing redacted index rows for existing provider sessions", async () => {
+    saveParsedSession({
+      session: {
+        id: "local-session",
+        source: "claude",
+        source_id: "same-source",
+        title: "remote metadata title",
+      },
+      messages: [],
+      toolCalls: [],
+    });
+
+    const remote = new MemoryRemote({}, { "claude:same-source": "remote-existing-session" });
+    await pushStorageChangesToRemote(remote, ["sessions"], getDatabase());
+
+    const indexRun = remote.runs.find((run) => run.sql.includes(REMOTE_SESSION_INDEX_TABLE));
+    expect(indexRun?.params[0]).toBe("remote-existing-session");
+  });
+
+  it("reports remote storage as enabled when RDS config is writable without an explicit mode", () => {
+    tempRoot = mkdtempSync(join(tmpdir(), "sessions-storage-rds-config-"));
+    const configPath = join(tempRoot, "config.json");
+    mkdirSync(tempRoot, { recursive: true });
+    writeFileSync(configPath, JSON.stringify({
+      rds: {
+        host: "db.example.invalid",
+        username: "sessions_user",
+        password_env: "SESSIONS_DATABASE_PASSWORD",
+      },
+    }), "utf-8");
+    process.env.HASNA_SESSIONS_STORAGE_CONFIG_PATH = configPath;
+
+    const status = getStorageStatus();
+    const pg = status.adapters.find((adapter) => adapter.id === "remote-postgres-index");
+    expect(status.enabled).toBe(true);
+    expect(pg?.enabled).toBe(true);
+    expect(pg?.writable).toBe(true);
+  });
+
   it("pulls duplicate provider sessions into the existing local id and rebuilds search", async () => {
+    process.env.HASNA_SESSIONS_REMOTE_PAYLOADS = "transcripts";
+
     const local = saveParsedSession({
       session: { id: "local-session", source: "claude", source_id: "same-source", title: "old title" },
       messages: [{ id: "local-message", session_id: "", role: "user", content: "oldtoken", sequence_num: 0 }],

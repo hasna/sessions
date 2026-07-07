@@ -13,6 +13,15 @@ export interface StorageConfig {
     password_env: string;
     ssl: boolean;
   };
+  object_storage: {
+    provider: "none" | "s3";
+    bucket: string;
+    prefix: string;
+    region_env: string;
+  };
+  privacy: {
+    remote_payloads: string[];
+  };
 }
 
 export const STORAGE_CONFIG_PATH = join(homedir(), ".hasna", "sessions", "storage", "config.json");
@@ -102,6 +111,15 @@ export function getStorageConfig(): StorageConfig {
       password_env: "SESSIONS_DATABASE_PASSWORD",
       ssl: true,
     },
+    object_storage: {
+      provider: "none",
+      bucket: "",
+      prefix: "sessions/index/",
+      region_env: "AWS_REGION",
+    },
+    privacy: {
+      remote_payloads: [],
+    },
   };
 
   const configPath = getStorageConfigPath();
@@ -110,6 +128,10 @@ export function getStorageConfig(): StorageConfig {
       const raw = JSON.parse(readFileSync(configPath, "utf-8")) as Partial<StorageConfig>;
       config.mode = normalizeMode(raw.mode) ?? config.mode;
       config.rds = { ...config.rds, ...(raw.rds ?? {}) };
+      config.object_storage = { ...config.object_storage, ...(raw.object_storage ?? {}) };
+      config.privacy = { ...config.privacy, ...(raw.privacy ?? {}) };
+      if (config.object_storage.provider !== "s3") config.object_storage.provider = "none";
+      if (!Array.isArray(config.privacy.remote_payloads)) config.privacy.remote_payloads = [];
     } catch (error) {
       throw new Error(`Malformed sessions storage config at ${configPath}: ${(error as Error).message}`);
     }

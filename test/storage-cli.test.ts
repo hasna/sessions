@@ -42,10 +42,19 @@ describe("sessions storage CLI", () => {
       const output = Buffer.from(result.stdout).toString("utf-8");
 
       expect(result.exitCode).toBe(0);
-      const status = JSON.parse(output) as { mode: string; enabled: boolean; tables: Array<{ table: string; rows: number }> };
+      const status = JSON.parse(output) as {
+        mode: string;
+        enabled: boolean;
+        tables: Array<{ table: string; rows: number }>;
+        adapters: Array<{ id: string; kind: string; enabled: boolean }>;
+        privacy: { default_remote_push: string; gated_tables: Array<{ table: string }> };
+      };
       expect(status.mode).toBe("local");
       expect(status.enabled).toBe(false);
       expect(status.tables.some((table) => table.table === "sessions")).toBe(true);
+      expect(status.adapters.some((adapter) => adapter.id === "local-sqlite-fts")).toBe(true);
+      expect(status.privacy.default_remote_push).toBe("metadata_only");
+      expect(status.privacy.gated_tables.some((table) => table.table === "messages")).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

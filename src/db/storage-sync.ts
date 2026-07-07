@@ -1,9 +1,11 @@
 import type { SqliteAdapter } from "./sqlite-adapter.js";
 import { getDatabase, rebuildFtsTables } from "./database.js";
 import { getSessionsDbPath } from "../lib/paths.js";
-import { getStorageConfig, getStorageConnectionString } from "./storage-config.js";
+import { getStorageConfig, getStorageConnectionString, getStorageDatabaseUrl } from "./storage-config.js";
 import { PgAdapterAsync } from "./remote-storage.js";
 import { PG_MIGRATIONS } from "./pg-migrations.js";
+import { REMOTE_SESSION_INDEX_TABLE, getIndexAdapterStatus, pushRemoteSessionIndexFromSqlite } from "./index-adapters.js";
+import { getRemotePrivacyStatus, getRemoteTableGate } from "./storage-policy.js";
 
 type Row = Record<string, unknown>;
 type RemoteAdapter = Pick<PgAdapterAsync, "all" | "run" | "get" | "exec">;
@@ -14,6 +16,8 @@ export interface SyncResult {
   rowsRead: number;
   rowsWritten: number;
   errors: string[];
+  warnings?: string[];
+  skipped?: boolean;
 }
 
 export interface StorageStatus {
@@ -21,6 +25,8 @@ export interface StorageStatus {
   enabled: boolean;
   db_path: string;
   tables: Array<{ table: string; rows: number }>;
+  adapters: ReturnType<typeof getIndexAdapterStatus>;
+  privacy: ReturnType<typeof getRemotePrivacyStatus>;
 }
 
 export const STORAGE_TABLES = [
@@ -243,10 +249,13 @@ export async function runStorageMigrations(remote: RemoteAdapter): Promise<void>
 
 export function getStorageStatus(db: SqliteAdapter = getDatabase()): StorageStatus {
   const config = getStorageConfig();
+  const remoteConfigured = Boolean(getStorageDatabaseUrl() || (config.rds.host && config.rds.username));
   return {
     mode: config.mode,
-    enabled: config.mode === "hybrid" || config.mode === "remote",
+    enabled: config.mode === "hybrid" || config.mode === "remote" || remoteConfigured,
     db_path: getSessionsDbPath(),
+    adapters: getIndexAdapterStatus(config),
+    privacy: getRemotePrivacyStatus(config),
     tables: STORAGE_TABLES.map((table) => {
       try {
         const row = db.prepare(`SELECT COUNT(*) as count FROM ${quoteId(table)}`).get() as { count: number };
@@ -265,10 +274,18 @@ export async function pushStorageChangesToRemote(
 ): Promise<SyncResult[]> {
   const results: SyncResult[] = [];
   const sessionIdMap = new Map<string, string>();
+  const config = getStorageConfig();
 
   await runStorageMigrations(remote);
   for (const table of tables) {
     const result: SyncResult = { table, direction: "push", rowsRead: 0, rowsWritten: 0, errors: [] };
+    const gate = getRemoteTableGate(table, config);
+    if (!gate.allowed) {
+      result.skipped = true;
+      result.warnings = [gate.reason ?? `${table} is not enabled for remote sync`];
+      results.push(result);
+      continue;
+    }
     try {
       const stmt = db.prepare(`SELECT * FROM ${quoteId(table)} ${orderByClause(table)} LIMIT ? OFFSET ?`);
       for (let offset = 0; ; offset += SYNC_BATCH_SIZE) {
@@ -285,6 +302,28 @@ export async function pushStorageChangesToRemote(
       result.errors.push(error instanceof Error ? error.message : String(error));
     }
     results.push(result);
+  }
+
+  if (tables.includes("sessions")) {
+    try {
+      const remoteIndex = await pushRemoteSessionIndexFromSqlite(remote, db, sessionIdMap);
+      results.push({
+        table: REMOTE_SESSION_INDEX_TABLE,
+        direction: "push",
+        rowsRead: remoteIndex.rowsRead,
+        rowsWritten: remoteIndex.rowsWritten,
+        errors: [],
+        warnings: ["remote index stores searchable session metadata only; transcript payloads remain gated"],
+      });
+    } catch (error) {
+      results.push({
+        table: REMOTE_SESSION_INDEX_TABLE,
+        direction: "push",
+        rowsRead: 0,
+        rowsWritten: 0,
+        errors: [error instanceof Error ? error.message : String(error)],
+      });
+    }
   }
 
   return results;
@@ -307,10 +346,18 @@ export async function pullStorageChangesFromRemote(
   const results: SyncResult[] = [];
   const sessionIdMap = new Map<string, string>();
   let ftsDirty = false;
+  const config = getStorageConfig();
 
   await runStorageMigrations(remote);
   for (const table of tables) {
     const result: SyncResult = { table, direction: "pull", rowsRead: 0, rowsWritten: 0, errors: [] };
+    const gate = getRemoteTableGate(table, config);
+    if (!gate.allowed) {
+      result.skipped = true;
+      result.warnings = [gate.reason ?? `${table} is not enabled for remote sync`];
+      results.push(result);
+      continue;
+    }
     try {
       for (let offset = 0; ; offset += SYNC_BATCH_SIZE) {
         const rows = await remote.all(
