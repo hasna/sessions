@@ -8,20 +8,22 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { getPackageInfo, getPackageVersion } from "../lib/package.js";
-import {
-  buildClaudeResumeCommand,
-  findSession,
-  historySessions,
-  latestSession,
-  latestSessionForProject,
-  listSessions as listRegistrySessions,
-  renameSession,
-  searchSessions,
-} from "../lib/sessions.js";
 import { listAdapters, getAdapter } from "../lib/adapters/index.js";
 import type { CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
 import { resolveSessionStore, getLocalStore } from "../db/session-store.js";
+import type { Session } from "../types/index.js";
+
+/**
+ * Build the underlying resume command for a Store session using its provider
+ * and provider-native id. Only claude sessions are resumable this way today.
+ */
+function buildResumeCommand(session: Session): string[] {
+  if (session.source === "claude") {
+    return ["claude", "--resume", session.source_id];
+  }
+  throw new Error(`resume is not supported for source '${session.source}' (only claude)`);
+}
 
 // Session-record store seam (SAME resolver the CLI uses). When the client-flip
 // resolves to cloud-http — HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY set
@@ -444,133 +446,156 @@ server.tool(
   }
 );
 
-// ─── Friendly-name registry + resume tools ───────────────────────────────────
+// ─── Session listing / resume / rename tools (Store-backed) ───────────────────
+// Every tool below routes through the SAME resolveSessionStore() seam as the
+// core query tools: local SQLite index by default, or the shared self_hosted
+// /v1 cloud registry when HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are
+// set. There is no separate on-box friendly-name registry any more (that was the
+// split-brain: a second session view that ignored the shared cloud).
 
 server.tool(
   "sessions_list",
-  "List known sessions with friendly names and metadata.",
-  { project: z.string().optional() },
-  async (args: { project?: string }) => {
-    return textJson(listRegistrySessions({ project: args.project }));
+  "List sessions from the active store (local index, or the shared self_hosted /v1 registry).",
+  { project: z.string().optional(), limit: z.number().int().positive().optional() },
+  async (args: { project?: string; limit?: number }) => {
+    try {
+      return textJson(await sessionStore().list({ project_path: args.project, limit: args.limit }));
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
 server.tool(
   "sessions_history",
-  "List historical sessions with optional today/project/agent filters.",
+  "List sessions from the active store with optional today/project/agent filters.",
   {
     project: z.string().optional(),
     today: z.boolean().optional(),
     agent: z.string().optional(),
+    limit: z.number().int().positive().optional(),
   },
-  async (args: { project?: string; today?: boolean; agent?: string }) => {
-    return textJson(
-      historySessions({
-        project: args.project,
-        today: args.today,
-        agent: args.agent,
-      })
-    );
+  async (args: { project?: string; today?: boolean; agent?: string; limit?: number }) => {
+    try {
+      let sessions = await sessionStore().list({ project_path: args.project, limit: args.limit ?? 200 });
+      if (args.today) {
+        const today = new Date().toISOString().slice(0, 10);
+        sessions = sessions.filter((s) => (s.started_at ?? s.ingested_at ?? "").startsWith(today));
+      }
+      if (args.agent) {
+        const needle = args.agent.toLowerCase();
+        sessions = sessions.filter(
+          (s) =>
+            s.source.toLowerCase().includes(needle) ||
+            (s.title ?? "").toLowerCase().includes(needle) ||
+            (s.model ?? "").toLowerCase().includes(needle)
+        );
+      }
+      return textJson(sessions);
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
 server.tool(
   "sessions_search",
-  "Search session transcripts by text query (registry-backed).",
+  "Full-text search across indexed session transcripts via the active store.",
   {
     query: z.string(),
     project: z.string().optional(),
     limit: z.number().int().positive().optional(),
   },
   async (args: { query: string; project?: string; limit?: number }) => {
-    return textJson(
-      searchSessions(args.query, {
-        project: args.project,
-        limit: args.limit,
-      })
-    );
+    try {
+      return textJson(await sessionStore().searchContent(args.query, { project_path: args.project, limit: args.limit }));
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
 server.tool(
   "sessions_resume",
-  "Resolve a session by friendly name, session ID, or latest project session and return the underlying Claude resume command.",
+  "Resolve a session by id/prefix, latest project session, or the most recent session, and return the underlying Claude resume command.",
   {
     identifier: z.string().optional(),
     project: z.string().optional(),
     latest: z.boolean().optional(),
   },
   async (args: { identifier?: string; project?: string; latest?: boolean }) => {
-    let session = null;
-    if (args.project) {
-      session = latestSessionForProject(args.project);
-    } else if (args.latest || !args.identifier) {
-      session = latestSession();
-    } else {
-      session = findSession(args.identifier);
-    }
+    try {
+      const store = sessionStore();
+      let session: Session | null = null;
+      if (args.project) {
+        session = (await store.list({ project_path: args.project, limit: 1 }))[0] ?? null;
+      } else if (args.latest || !args.identifier) {
+        session = (await store.recent(1))[0] ?? null;
+      } else {
+        session = await store.get(args.identifier);
+      }
 
-    if (!session) {
-      return {
-        content: [{ type: "text" as const, text: "No matching session found" }],
-        isError: true,
-      };
-    }
+      if (!session) {
+        return { content: [{ type: "text" as const, text: "No matching session found" }], isError: true };
+      }
 
-    return textJson({
-      session,
-      command: buildClaudeResumeCommand(session),
-    });
+      return textJson({ session, command: buildResumeCommand(session) });
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
 server.tool(
   "sessions_rename",
-  "Assign a manual friendly name to a session.",
-  { identifier: z.string(), friendly_name: z.string() },
-  async (args: { identifier: string; friendly_name: string }) => {
+  "Set a session's title in the active store (local index, or the shared self_hosted /v1 registry).",
+  { identifier: z.string(), title: z.string() },
+  async (args: { identifier: string; title: string }) => {
     try {
-      return textJson(renameSession(args.identifier, args.friendly_name));
-    } catch (error) {
-      return {
-        content: [{ type: "text" as const, text: String(error) }],
-        isError: true,
-      };
+      const title = args.title.trim();
+      if (!title) return fail("title cannot be empty");
+      const session = await sessionStore().rename(args.identifier, title);
+      if (!session) return fail(`session not found (or ambiguous prefix): ${args.identifier}`);
+      return textJson(session);
+    } catch (e) {
+      return fail(e);
     }
   }
 );
 
 server.tool(
   "sessions_watch",
-  "Return the current watch snapshot for known sessions.",
+  "Return the current session snapshot from the active store.",
   { project: z.string().optional() },
   async (args: { project?: string }) => {
-    return textJson({
-      generated_at: new Date().toISOString(),
-      sessions: listRegistrySessions({ project: args.project }),
-    });
+    try {
+      return textJson({
+        generated_at: new Date().toISOString(),
+        sessions: await sessionStore().list({ project_path: args.project }),
+      });
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
 server.tool(
   "sessions_stats",
-  "Return session counts and high-level activity breakdown (registry-backed).",
-  { project: z.string().optional() },
-  async (args: { project?: string }) => {
-    const sessions = listRegistrySessions({ project: args.project });
-    const active = sessions.filter((session) => session.status === "active").length;
-    const idle = sessions.length - active;
-    const projectCounts = sessions.reduce<Record<string, number>>((acc, session) => {
-      acc[session.projectSlug] = (acc[session.projectSlug] ?? 0) + 1;
-      return acc;
-    }, {});
-
-    return textJson({
-      total_sessions: sessions.length,
-      active_sessions: active,
-      idle_sessions: idle,
-      project_counts: projectCounts,
-    });
+  "Return session counts and a per-source / per-project breakdown from the active store.",
+  {},
+  async () => {
+    try {
+      const s = await sessionStore().stats();
+      return textJson({
+        total_sessions: s.session_count,
+        total_messages: s.message_count,
+        total_tool_calls: s.tool_call_count,
+        by_source: s.by_source,
+        projects: s.projects.slice(0, 30),
+      });
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
@@ -712,7 +737,6 @@ server.tool(
       dryRun: args.dry_run,
       verbose: args.verbose,
       projectPath: args.project,
-      updateRegistry: true,
     });
 
     return textJson({

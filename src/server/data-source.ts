@@ -42,6 +42,7 @@ export interface DataSource {
   stats(): Promise<Stats>;
   create(input: cloud.UpsertSessionInput): Promise<Session>;
   remove(id: string): Promise<boolean>;
+  rename(idOrPrefix: string, title: string): Promise<Session | null>;
   relocatePaths(oldPath: string, newPath: string): Promise<{ rowsUpdated: number }>;
   searchContent(query: string, opts: ListOptions): Promise<SearchHit[]>;
   searchToolCalls(query: string, opts: ListOptions): Promise<ToolCallHit[]>;
@@ -61,6 +62,7 @@ const cloudSource: DataSource = {
   stats: () => cloud.getStats(),
   create: (input) => cloud.upsertSession(input),
   remove: (id) => cloud.deleteSession(id),
+  rename: (idOrPrefix, title) => cloud.updateSessionTitle(idOrPrefix, title),
   relocatePaths: (oldPath, newPath) => cloud.relocatePaths(oldPath, newPath),
   searchContent: (query, opts) => cloud.searchContent(query, opts),
   searchToolCalls: (query, opts) => cloud.searchToolCalls(query, opts),
@@ -144,6 +146,10 @@ function localSource(): DataSource {
       }
       deleteSession(id);
       return true;
+    },
+    async rename(idOrPrefix, title) {
+      const { updateSessionTitle } = await import("../db/sessions.js");
+      return updateSessionTitle(idOrPrefix, title);
     },
     async relocatePaths(oldPath, newPath) {
       const { relocatePathsInDb } = await import("../db/sessions.js");

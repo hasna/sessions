@@ -6,12 +6,11 @@
  * becomes natively readable by Claude Code, Takumi, and all other tools.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import type { CanonicalSession, ImportOptions, ImportResult } from "./types.js";
 import { encodePath, getClaudeProjectsDir } from "../paths.js";
-import { loadSessionRegistry, saveSessionRegistry } from "../sessions.js";
 
 /**
  * Convert a CanonicalSession into Claude Code .jsonl line format.
@@ -159,7 +158,7 @@ export function importCanonicalSessions(
   sessions: CanonicalSession[],
   options: ImportOptions = {}
 ): ImportResult {
-  const { overwrite = false, dryRun = false, verbose = false, projectPath, updateRegistry = true } = options;
+  const { overwrite = false, dryRun = false, verbose = false, projectPath } = options;
   const projectsDir = getClaudeProjectsDir();
 
   const result: ImportResult = {
@@ -204,41 +203,11 @@ export function importCanonicalSessions(
     result.imported++;
   }
 
-  // Update session registry if requested
-  if (updateRegistry && !dryRun && result.imported > 0) {
-    try {
-      const registry = loadSessionRegistry();
-      for (const session of targetSessions) {
-        const encodedDir = encodePath(session.cwd);
-        const transcriptPath = join(projectsDir, encodedDir, `${session.id}.jsonl`);
-
-        if (existsSync(transcriptPath)) {
-          registry.sessions[session.id] = {
-            sessionId: session.id,
-            friendlyName: `${session.source}-${session.id.slice(0, 8)}`,
-            friendlyNameSource: "auto",
-            projectPath: session.cwd,
-            projectSlug: session.cwd.split("/").pop() || "unknown",
-            encodedDir,
-            transcriptPath,
-            provider: "claude",
-            startedAt: session.startedAt,
-            lastActivityAt: session.lastActivityAt,
-            lastModel: session.model,
-            customTitle: session.title,
-            agentName: session.agentName,
-            status: "idle",
-          };
-        }
-      }
-      saveSessionRegistry(registry);
-    } catch (err: any) {
-      result.errors.push({
-        file: "registry",
-        error: `Failed to update registry: ${err.message}`,
-      });
-    }
-  }
+  // Imported transcripts are written as native Claude .jsonl files under
+  // ~/.claude/projects; `sessions ingest` picks them into the Store (local
+  // index or, after a push/sync, the shared cloud registry). There is no
+  // separate on-box friendly-name registry any more — that parallel index was
+  // the split-brain this refactor removed.
 
   return result;
 }

@@ -416,6 +416,26 @@ export async function deleteSession(
   return row !== null;
 }
 
+/**
+ * Set a session's title (the "rename" operation), resolving by full id or a
+ * unique id prefix. Title is searched via ILIKE directly on the sessions table,
+ * so there is no separate FTS index to keep in sync. Returns the updated
+ * Session, or null when no match exists.
+ */
+export async function updateSessionTitle(
+  idOrPrefix: string,
+  title: string,
+  client: PoolQueryClient = getCloudClient(),
+): Promise<Session | null> {
+  const target = await getSessionByPrefix(idOrPrefix, client);
+  if (!target) return null;
+  const row = await client.get<SessionRow>(
+    `UPDATE sessions SET title = $1, updated_at = $2 WHERE id = $3 RETURNING *`,
+    [title, new Date().toISOString(), target.id],
+  );
+  return row ? rowToSession(row) : null;
+}
+
 // ---------------------------------------------------------------------------
 // Content search / tool-call search / knowledge graph over the shared RDS.
 //

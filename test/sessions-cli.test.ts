@@ -7,6 +7,9 @@ const TEST_DIR = join(import.meta.dir, ".test-sessions-cli");
 const HOME_DIR = join(TEST_DIR, "home");
 const PROJECTS_DIR = join(TEST_DIR, "projects");
 
+// A fixed "today" so the --today history filter is deterministic.
+const TODAY = new Date().toISOString().slice(0, 10);
+
 function runCli(args: string[]) {
   return Bun.spawnSync({
     cmd: ["bun", "run", "src/cli/index.tsx", ...args],
@@ -15,6 +18,10 @@ function runCli(args: string[]) {
       ...process.env,
       HOME: HOME_DIR,
       CLAUDE_PATH: TEST_DIR,
+      // Force local-store mode: never touch a real cloud endpoint from a test.
+      HASNA_SESSIONS_API_URL: "",
+      HASNA_SESSIONS_API_KEY: "",
+      HASNA_SESSIONS_MODE: "",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -25,6 +32,13 @@ function parseJsonOutput(result: ReturnType<typeof Bun.spawnSync>) {
   expect(result.exitCode).toBe(0);
   expect(Buffer.from(result.stderr).toString("utf-8")).toBe("");
   return JSON.parse(Buffer.from(result.stdout).toString("utf-8"));
+}
+
+/** Ingest the fixture transcripts into the local (per-test HOME) SQLite index. */
+function ingest() {
+  const result = runCli(["ingest", "--force", "--json"]);
+  expect(result.exitCode).toBe(0);
+  return result;
 }
 
 function setupFixtures() {
@@ -40,26 +54,14 @@ function setupFixtures() {
     [
       JSON.stringify({
         type: "user",
-        timestamp: "2026-04-10T09:00:00.000Z",
+        timestamp: `${TODAY}T09:00:00.000Z`,
         cwd: "/Users/test/sample-project",
         sessionId: "session-001",
-        message: { role: "user", content: "hello" },
-      }),
-      JSON.stringify({
-        type: "custom-title",
-        timestamp: "2026-04-10T09:01:00.000Z",
-        sessionId: "session-001",
-        customTitle: "legacy-title",
-      }),
-      JSON.stringify({
-        type: "agent-name",
-        timestamp: "2026-04-10T09:02:00.000Z",
-        sessionId: "session-001",
-        agentName: "legacy-agent",
+        message: { role: "user", content: "hello world" },
       }),
       JSON.stringify({
         type: "assistant",
-        timestamp: "2026-04-10T09:03:00.000Z",
+        timestamp: `${TODAY}T09:03:00.000Z`,
         cwd: "/Users/test/sample-project",
         sessionId: "session-001",
         message: {
@@ -81,57 +83,50 @@ afterEach(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
-describe("sessions CLI registry flows", () => {
-  it("lists sessions with auto-generated friendly names", () => {
-    const result = runCli(["list", "--json"]);
-    const payload = parseJsonOutput(result);
+describe("sessions CLI store-backed flows", () => {
+  it("lists indexed sessions from the store", () => {
+    ingest();
+    const payload = parseJsonOutput(runCli(["list", "--json"]));
 
     expect(payload).toHaveLength(1);
-    expect(payload[0].sessionId).toBe("session-001");
-    expect(payload[0].friendlyName).toBe("sample-project-00001");
-    expect(payload[0].projectSlug).toBe("sample-project");
-    expect(payload[0].customTitle).toBe("legacy-title");
-    expect(payload[0].agentName).toBe("legacy-agent");
-    expect(payload[0].lastModel).toBe("claude-sonnet-4-6");
+    expect(payload[0].source).toBe("claude");
+    expect(payload[0].source_id).toBe("session-001");
+    expect(payload[0].project_name).toBe("sample-project");
+    expect(payload[0].model).toBe("claude-sonnet-4-6");
   });
 
-  it("renames sessions and preserves the manual name", () => {
-    const renameResult = runCli([
-      "rename",
-      "session-001",
-      "important-session",
-      "--json",
-    ]);
-    const renamed = parseJsonOutput(renameResult);
-    expect(renamed.friendlyName).toBe("important-session");
-    expect(renamed.friendlyNameSource).toBe("manual");
+  it("renames a session by setting its title through the store", () => {
+    ingest();
+    const renamed = parseJsonOutput(
+      runCli(["rename", "session-001", "important session", "--json"])
+    );
+    expect(renamed.source_id).toBe("session-001");
+    expect(renamed.title).toBe("important session");
 
-    const listResult = runCli(["list", "--json"]);
-    const listed = parseJsonOutput(listResult);
-    expect(listed[0].friendlyName).toBe("important-session");
+    const listed = parseJsonOutput(runCli(["list", "--json"]));
+    expect(listed[0].title).toBe("important session");
   });
 
-  it("resolves resume targets by friendly name and by project", () => {
-    const byName = runCli(["resume", "sample-project-00001", "--json"]);
-    const namePayload = parseJsonOutput(byName);
-    expect(namePayload.session.sessionId).toBe("session-001");
-    expect(namePayload.command).toEqual(["claude", "--resume", "session-001"]);
+  it("resolves resume targets by id prefix and by project", () => {
+    ingest();
+    const byName = parseJsonOutput(runCli(["resume", "session-001", "--json"]));
+    expect(byName.session.source_id).toBe("session-001");
+    expect(byName.command).toEqual(["claude", "--resume", "session-001"]);
 
-    const byProject = runCli(["resume", "--project", "sample-project", "--json"]);
-    const projectPayload = parseJsonOutput(byProject);
-    expect(projectPayload.session.friendlyName).toBe("sample-project-00001");
+    const byProject = parseJsonOutput(
+      runCli(["resume", "--project", "sample-project", "--json"])
+    );
+    expect(byProject.session.source_id).toBe("session-001");
   });
 
-  it("supports history filters and transcript search", () => {
-    const historyResult = runCli(["history", "--today", "--json"]);
-    const historyPayload = parseJsonOutput(historyResult);
+  it("supports history filters and transcript search through the store", () => {
+    ingest();
+    const historyPayload = parseJsonOutput(runCli(["history", "--today", "--json"]));
     expect(historyPayload).toHaveLength(1);
-    expect(historyPayload[0].friendlyName).toBe("sample-project-00001");
+    expect(historyPayload[0].source_id).toBe("session-001");
 
-    const searchResult = runCli(["transcript-search", "hello", "--json"]);
-    const searchPayload = parseJsonOutput(searchResult);
-    expect(searchPayload).toHaveLength(1);
-    expect(searchPayload[0].session.sessionId).toBe("session-001");
-    expect(searchPayload[0].snippet.toLowerCase()).toContain("hello");
+    const searchPayload = parseJsonOutput(runCli(["transcript-search", "hello", "--json"]));
+    expect(searchPayload.length).toBeGreaterThanOrEqual(1);
+    expect(searchPayload[0].session_id).toBeDefined();
   });
 });

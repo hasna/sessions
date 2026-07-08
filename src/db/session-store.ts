@@ -66,6 +66,13 @@ export interface SessionStore {
   create(input: UpsertSessionInput): Promise<Session>;
   remove(id: string): Promise<boolean>;
   /**
+   * Set a session's title (the "rename" operation), resolving by full id or a
+   * unique id/source_id prefix. Local mode updates the on-box SQLite index;
+   * self_hosted mode PATCHes `/v1/sessions/{id}` so the shared cloud registry is
+   * what actually changes. Returns the updated session, or null if not found.
+   */
+  rename(idOrPrefix: string, title: string): Promise<Session | null>;
+  /**
    * Rewrite session paths after a project directory move (old -> new): updates
    * project_path / source_path in the active index. Local mode touches the
    * on-box SQLite index; self_hosted mode hits `/v1/relocate` so the shared
@@ -164,6 +171,18 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
         return true;
       } catch (error) {
         if (isNotFound(error)) return false;
+        throw error;
+      }
+    },
+    async rename(idOrPrefix, title) {
+      try {
+        const res = await t.patch<{ session: Session }>(
+          `/sessions/${encodeURIComponent(idOrPrefix)}`,
+          { title },
+        );
+        return res.session ?? null;
+      } catch (error) {
+        if (isNotFound(error)) return null;
         throw error;
       }
     },
@@ -302,6 +321,10 @@ function localStore(): SessionStore {
       }
       deleteSession(id);
       return true;
+    },
+    async rename(idOrPrefix, title) {
+      const { updateSessionTitle } = await import("./sessions.js");
+      return updateSessionTitle(idOrPrefix, title);
     },
     async relocatePaths(oldPath, newPath) {
       const { relocatePathsInDb } = await import("./sessions.js");

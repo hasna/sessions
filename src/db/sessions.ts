@@ -225,6 +225,28 @@ export function getSessionByPrefix(idOrPrefix: string): Session | null {
   return null;
 }
 
+/**
+ * Set a session's title (the "rename" operation), resolving by full id or a
+ * unique id/source_id prefix. Updates both the `sessions` row and the FTS index.
+ * Returns the updated Session, or null when no unique match exists.
+ */
+export function updateSessionTitle(idOrPrefix: string, title: string): Session | null {
+  const db = getDatabase();
+  const target = getSessionByPrefix(idOrPrefix);
+  if (!target) return null;
+  db.prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?").run(
+    title,
+    nowIso(),
+    target.id,
+  );
+  db.prepare("DELETE FROM sessions_fts WHERE session_id = ?").run(target.id);
+  db.prepare(
+    `INSERT INTO sessions_fts(session_id, title, project_name, project_path)
+     VALUES (?, ?, ?, ?)`,
+  ).run(target.id, title, target.project_name, target.project_path);
+  return getSession(target.id);
+}
+
 export interface ListSessionsOptions {
   source?: string;
   project_path?: string;

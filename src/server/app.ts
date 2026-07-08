@@ -122,7 +122,23 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
       if (!deleted) return json({ ok: false, error: `session not found: ${id}`, deleted: false }, 404);
       return json({ ok: true, deleted: true, id });
     }
-    return json({ ok: false, error: "Method not allowed", allowedMethods: ["GET", "DELETE"] }, 405);
+    // PATCH /v1/sessions/:id — rename (set the session title).
+    if (method === "PATCH") {
+      let body: Record<string, unknown>;
+      try {
+        body = (await request.json()) as Record<string, unknown>;
+      } catch {
+        return json({ ok: false, error: "invalid JSON body" }, 400);
+      }
+      const title = typeof body?.title === "string" ? body.title.trim() : "";
+      if (!title) {
+        return json({ ok: false, error: "title is required and must be a non-empty string" }, 400);
+      }
+      const session = await source.rename(id, title);
+      if (!session) return json({ ok: false, error: `session not found: ${id}` }, 404);
+      return json({ ok: true, session });
+    }
+    return json({ ok: false, error: "Method not allowed", allowedMethods: ["GET", "PATCH", "DELETE"] }, 405);
   }
 
   if (method !== "GET") {

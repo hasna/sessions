@@ -38,17 +38,8 @@ import {
   resolveProjectPath,
 } from "../lib/paths.js";
 import { getPackageVersion } from "../lib/package.js";
-import {
-  buildClaudeResumeCommand,
-  findSession,
-  formatSessionTable,
-  historySessions,
-  latestSession,
-  latestSessionForProject,
-  listSessions,
-  renameSession,
-  searchSessions,
-} from "../lib/sessions.js";
+import type { Session } from "../types/index.js";
+import type { SessionStore } from "../db/session-store.js";
 import {
   formatLivePaneTable,
   listLivePanes,
@@ -130,8 +121,47 @@ function parseOptionalNonNegativeNumberOption(raw: string | undefined, name: str
   return value;
 }
 
-async function pickSessionFromList() {
-  const sessions = listSessions().slice(0, 20);
+/** Format a table of Store sessions (LocalStore | ApiStore), never the registry. */
+function formatSessionTable(sessions: Session[]): string {
+  if (sessions.length === 0) {
+    return "No sessions found.";
+  }
+
+  const headers = ["TITLE", "SOURCE", "PROJECT", "MODEL", "MACHINE", "SESSION"];
+  const rows = sessions.map((s) => [
+    s.title ?? "(untitled)",
+    s.source,
+    s.project_name ?? "",
+    s.model ?? "-",
+    s.machine ?? "?",
+    s.id.slice(0, 12),
+  ]);
+  const widths = headers.map((header, index) =>
+    Math.max(header.length, ...rows.map((row) => row[index].length))
+  );
+
+  const render = (cols: string[]) =>
+    cols
+      .map((value, index) => value.padEnd(widths[index]))
+      .join("  ")
+      .trimEnd();
+
+  return [render(headers), ...rows.map(render)].join("\n");
+}
+
+/**
+ * Build the underlying resume command for a Store session using its provider
+ * and provider-native id. Only claude sessions are resumable this way today.
+ */
+function buildResumeCommand(session: Session): string[] {
+  if (session.source === "claude") {
+    return ["claude", "--resume", session.source_id];
+  }
+  throw new Error(`resume is not supported for source '${session.source}' (only claude)`);
+}
+
+async function pickSessionFromList(store: SessionStore): Promise<Session> {
+  const sessions = await store.recent(20);
   if (sessions.length === 0) {
     throw new Error("No sessions available to pick from");
   }
@@ -139,7 +169,7 @@ async function pickSessionFromList() {
   console.log("Select a session to resume:\n");
   sessions.forEach((session, index) => {
     console.log(
-      `  ${index + 1}. ${session.friendlyName}  ${session.projectSlug}  ${session.status}  ${session.sessionId.slice(0, 12)}`
+      `  ${index + 1}. ${session.title ?? "(untitled)"}  ${session.project_name ?? ""}  ${session.source}  ${session.id.slice(0, 12)}`
     );
   });
 
@@ -599,11 +629,16 @@ program
 
 program
   .command("list")
-  .description("List known sessions with friendly names")
-  .option("-p, --project <value>", "Filter by project slug or path")
+  .description("List known sessions from the active store (local index, or the self_hosted /v1 API when HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are set)")
+  .option("-p, --project <value>", "Filter by project name or path")
+  .option("-l, --limit <n>", "Maximum results", "50")
   .option("--json", "Output as JSON")
-  .action((opts: any) => {
-    const sessions = listSessions({ project: opts.project });
+  .action(async (opts: any) => {
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const sessions = await resolveSessionStore().list({
+      project_path: opts.project,
+      limit: parsePositiveIntOption(opts.limit, 50, "--limit"),
+    });
     if (opts.json) {
       printJson(sessions);
       return;
@@ -613,29 +648,31 @@ program
   });
 
 program
-  .command("rename <id-or-name> <friendly-name>")
-  .description("Assign a manual friendly name to a session")
+  .command("rename <id-or-prefix> <title>")
+  .description("Set a session's title in the active store (local index, or the self_hosted /v1 API when HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are set)")
   .option("--json", "Output as JSON")
-  .action((identifier: string, friendlyName: string, opts: any) => {
-    try {
-      const session = renameSession(identifier, friendlyName);
-      if (opts.json) {
-        printJson(session);
-        return;
-      }
-
-      console.log(
-        `Renamed ${session.sessionId} -> ${session.friendlyName}`
-      );
-    } catch (error: any) {
-      console.error(`Error: ${error.message}`);
+  .action(async (identifier: string, title: string, opts: any) => {
+    const trimmed = title.trim();
+    if (!trimmed) {
+      console.error("Error: title cannot be empty");
       process.exit(1);
     }
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const session = await resolveSessionStore().rename(identifier, trimmed);
+    if (!session) {
+      console.error(`Error: session not found (or ambiguous prefix): ${identifier}`);
+      process.exit(1);
+    }
+    if (opts.json) {
+      printJson(session);
+      return;
+    }
+    console.log(`Renamed ${session.id} -> ${session.title}`);
   });
 
 program
-  .command("resume [id-or-name]")
-  .description("Resume a session by friendly name, session ID, or latest project session")
+  .command("resume [id-or-prefix]")
+  .description("Resume a session by id/prefix, latest project session, or the most recent session (resolved via the active store)")
   .option("-p, --project <value>", "Resume the most recent session for a project")
   .option("--last", "Resume the most recently active session")
   .option("--pick", "Interactively pick a session from the most recent results")
@@ -643,23 +680,25 @@ program
   .option("--json", "Output the selected session as JSON")
   .action(async (identifier: string | undefined, opts: any) => {
     try {
-      let session = null;
+      const { resolveSessionStore } = await import("../db/session-store.js");
+      const store = resolveSessionStore();
+      let session: Session | null = null;
 
       if (opts.pick) {
-        session = await pickSessionFromList();
+        session = await pickSessionFromList(store);
       } else if (opts.project) {
-        session = latestSessionForProject(opts.project);
+        session = (await store.list({ project_path: opts.project, limit: 1 }))[0] ?? null;
       } else if (opts.last || !identifier) {
-        session = latestSession();
+        session = (await store.recent(1))[0] ?? null;
       } else {
-        session = findSession(identifier);
+        session = await store.get(identifier);
       }
 
       if (!session) {
         throw new Error("No matching session found");
       }
 
-      const command = buildClaudeResumeCommand(session);
+      const command = buildResumeCommand(session);
       if (opts.json) {
         printJson({
           session,
@@ -689,17 +728,33 @@ program
 
 program
   .command("history")
-  .description("Show known sessions with history filters")
-  .option("-p, --project <value>", "Filter by project slug or path")
+  .description("Show sessions from the active store with history filters")
+  .option("-p, --project <value>", "Filter by project name or path")
   .option("--today", "Only include sessions active today")
-  .option("--agent <value>", "Filter by provider, agent name, or custom title")
+  .option("--agent <value>", "Filter by provider (source) or title substring")
+  .option("-l, --limit <n>", "Maximum results before filtering", "200")
   .option("--json", "Output as JSON")
-  .action((opts: any) => {
-    const sessions = historySessions({
-      project: opts.project,
-      today: Boolean(opts.today),
-      agent: opts.agent,
+  .action(async (opts: any) => {
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    let sessions = await resolveSessionStore().list({
+      project_path: opts.project,
+      limit: parsePositiveIntOption(opts.limit, 200, "--limit"),
     });
+
+    if (opts.today) {
+      const today = new Date().toISOString().slice(0, 10);
+      sessions = sessions.filter((s) => (s.started_at ?? s.ingested_at ?? "").startsWith(today));
+    }
+
+    if (opts.agent) {
+      const needle = String(opts.agent).toLowerCase();
+      sessions = sessions.filter(
+        (s) =>
+          s.source.toLowerCase().includes(needle) ||
+          (s.title ?? "").toLowerCase().includes(needle) ||
+          (s.model ?? "").toLowerCase().includes(needle)
+      );
+    }
 
     if (opts.json) {
       printJson(sessions);
@@ -712,15 +767,15 @@ program
 program
   .command("transcript-search <query>")
   .alias("registry-search")
-  .description("Search raw Claude transcript files by text")
-  .option("-p, --project <value>", "Filter by project slug or path")
+  .description("Full-text search across indexed session transcripts via the active store (local index, or the self_hosted /v1 API)")
+  .option("-p, --project <value>", "Filter by project name or path")
   .option("--limit <count>", "Maximum matches to return", "20")
   .option("--json", "Output as JSON")
-  .action((query: string, opts: any) => {
+  .action(async (query: string, opts: any) => {
     const limit = parsePositiveIntOption(opts.limit, 20, "--limit");
-
-    const matches = searchSessions(query, {
-      project: opts.project,
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const matches = await resolveSessionStore().searchContent(query, {
+      project_path: opts.project,
       limit,
     });
 
@@ -735,8 +790,9 @@ program
     }
 
     for (const match of matches) {
-      console.log(`${match.session.friendlyName}  ${match.session.projectSlug}`);
+      console.log(`${match.source}  ${match.title ?? "(untitled)"}${match.project_name ? `  [${match.project_name}]` : ""}`);
       console.log(`  ${match.snippet}`);
+      console.log(`  ${match.session_id}`);
     }
   });
 
@@ -877,15 +933,17 @@ program
   .option("--interval <seconds>", "Refresh interval in seconds", "5")
   .option("--json", "Output one JSON snapshot and exit")
   .option("--once", "Render a single snapshot and exit")
-  .action((opts: any) => {
+  .action(async (opts: any) => {
     const intervalSeconds = Number.parseInt(opts.interval, 10);
     if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
       console.error("Error: --interval must be a positive integer");
       process.exit(1);
     }
 
-    const render = () => {
-      const sessions = listSessions({ project: opts.project });
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const store = resolveSessionStore();
+    const render = async () => {
+      const sessions = await store.list({ project_path: opts.project });
       if (opts.json) {
         printJson(sessions);
         return;
@@ -898,12 +956,12 @@ program
       console.log(formatSessionTable(sessions));
     };
 
-    render();
+    await render();
     if (opts.json || opts.once) {
       return;
     }
 
-    const timer = setInterval(render, intervalSeconds * 1000);
+    const timer = setInterval(() => void render(), intervalSeconds * 1000);
     process.on("SIGINT", () => {
       clearInterval(timer);
       process.exit(0);
