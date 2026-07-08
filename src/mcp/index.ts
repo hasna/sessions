@@ -8,7 +8,6 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { getPackageInfo, getPackageVersion } from "../lib/package.js";
-import { ingestAll, ingestSource } from "../lib/ingest/index.js";
 import {
   buildClaudeResumeCommand,
   findSession,
@@ -22,7 +21,7 @@ import {
 import { listAdapters, getAdapter } from "../lib/adapters/index.js";
 import type { CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
-import { resolveSessionStore } from "../db/session-store.js";
+import { resolveSessionStore, getLocalStore } from "../db/session-store.js";
 
 // Session-record store seam (SAME resolver the CLI uses). When the client-flip
 // resolves to cloud-http — HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY set
@@ -358,9 +357,10 @@ server.tool(
   },
   async (a: { source?: string; force?: boolean }) => {
     try {
-      const results = a.source
-        ? [ingestSource(a.source, { force: a.force })]
-        : ingestAll({ force: a.force });
+      // Ingest is an on-box index operation (staging source for `sync`), so it
+      // always routes through the explicit LocalStore accessor — never a raw
+      // db/lib-ingest import in the tool layer.
+      const results = await getLocalStore().ingest({ source: a.source, force: a.force });
       return ok(results);
     } catch (e) {
       return fail(e);

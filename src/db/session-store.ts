@@ -22,6 +22,18 @@ import type { Entity, EntityType, RelatedSession, SessionGraph } from "../lib/gr
 import type { RecallOptions, RecallResponse } from "../lib/recall.js";
 import type { EmbedResult } from "../lib/embeddings.js";
 import type { MergeResult } from "./merge.js";
+import type { IngestResult } from "../lib/ingest/index.js";
+
+export interface IngestStoreOptions {
+  /** Ingest only this provider (claude | codex | gemini). */
+  source?: string;
+  /** Ingest only these providers. Ignored when `source` is set. */
+  sources?: string[];
+  /** Re-ingest even files unchanged since the last run. */
+  force?: boolean;
+  /** Progress callback (one line per event). */
+  onProgress?: (message: string) => void;
+}
 
 export type Env = Record<string, string | undefined>;
 
@@ -87,6 +99,16 @@ export interface SessionStore {
   embed(opts: { limit?: number }): Promise<EmbedResult>;
   /** Merge another machine's local sessions DB into this one (local-to-local sync). */
   mergeFromDb(path: string): Promise<MergeResult>;
+  /**
+   * Index local transcript files into the on-box session index. This is an
+   * inherently LOCAL maintenance operation: even on a flipped (self_hosted)
+   * machine, `sync` ingests into the on-box index first and then pushes the
+   * metadata to the shared cloud `/v1` registry. The cloud transport has no
+   * local index, so it throws rather than pretending to ingest.
+   */
+  ingest(opts?: IngestStoreOptions): Promise<IngestResult[]>;
+  /** Recompute per-machine session counts in the index (index maintenance). */
+  recomputeMachines(): Promise<void>;
 }
 
 const APP = "sessions";
@@ -229,6 +251,12 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
     mergeFromDb() {
       return notAvailableInCloud("import-db");
     },
+    ingest() {
+      return notAvailableInCloud("ingest");
+    },
+    recomputeMachines() {
+      return notAvailableInCloud("recompute-machines");
+    },
   };
 }
 
@@ -365,6 +393,17 @@ function localStore(): SessionStore {
       const { mergeFromDb } = await import("./merge.js");
       return mergeFromDb(path);
     },
+    async ingest(opts = {}) {
+      const { ingestAll, ingestSource } = await import("../lib/ingest/index.js");
+      if (opts.source) {
+        return [ingestSource(opts.source, { force: opts.force, onProgress: opts.onProgress })];
+      }
+      return ingestAll({ sources: opts.sources, force: opts.force, onProgress: opts.onProgress });
+    },
+    async recomputeMachines() {
+      const { recomputeMachineCounts } = await import("./machines.js");
+      recomputeMachineCounts();
+    },
   };
 }
 
@@ -379,5 +418,19 @@ export function resolveSessionStore(
 ): SessionStore {
   const resolved = resolveStorageClient(APP, env, overrides);
   if (resolved.transport === "cloud-http") return cloudStore(resolved.client);
+  return localStore();
+}
+
+/**
+ * The LocalStore transport, resolved unconditionally (independent of env).
+ *
+ * Used only by the inherently-local index path: `ingest`/`reindex`/`ingest-watch`
+ * populate the on-box index, and `sync` reads the on-box index to push it to the
+ * shared cloud `/v1` registry even when the resolved store is `cloud`. This is
+ * NOT a per-command local read fallback — the split-brain bug where reads
+ * silently drifted to the local SQLite island stays deleted; those paths go
+ * through `resolveSessionStore()`.
+ */
+export function getLocalStore(): SessionStore {
   return localStore();
 }

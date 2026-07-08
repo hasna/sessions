@@ -1,16 +1,4 @@
 import { getPackageInfo } from "../lib/package.js";
-import { search, searchToolCalls } from "../lib/search.js";
-import {
-  getRecentSessions,
-  listSessions,
-  getSessionByPrefix,
-  getMessages,
-  getToolCalls,
-  getProjectStats,
-} from "../db/sessions.js";
-import { getIngestionStats } from "../db/ingestion.js";
-import { listMachines } from "../db/machines.js";
-import { recallSessions } from "../lib/recall.js";
 import { isCloudMode, getCloudClient } from "../db/cloud/client.js";
 import { getDataSource, type ListOptions } from "./data-source.js";
 import { getVerifier } from "./auth.js";
@@ -26,7 +14,7 @@ function json(payload: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(payload, null, 2), { status, headers: jsonHeaders });
 }
 
-const LEGACY_ENDPOINTS = [
+const ENDPOINTS = [
   "/health",
   "/ready",
   "/version",
@@ -47,12 +35,6 @@ const LEGACY_ENDPOINTS = [
 function intParam(url: URL, name: string, fallback: number): number {
   const v = parseInt(url.searchParams.get(name) ?? "", 10);
   return Number.isFinite(v) ? v : fallback;
-}
-
-function booleanParam(url: URL, name: string, fallback: boolean): boolean {
-  const raw = url.searchParams.get(name);
-  if (raw == null) return fallback;
-  return !["0", "false", "no", "off"].includes(raw.toLowerCase());
 }
 
 function listOptionsFromUrl(url: URL, defaultLimit: number): ListOptions {
@@ -211,101 +193,7 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
     return json({ ok: true, ...(await source.stats()) });
   }
 
-  return json({ ok: false, error: "Not found", endpoints: LEGACY_ENDPOINTS }, 404);
-}
-
-/** Legacy (pre-/v1) SQLite endpoints, kept for local self-host back-compat. */
-function handleLegacy(url: URL, pkg: ReturnType<typeof getPackageInfo>): Response | null {
-  if (url.pathname === "/" || url.pathname === "/info") {
-    return json({
-      ok: true,
-      name: pkg.name,
-      version: pkg.version,
-      description: pkg.description,
-      mode: serveMode(),
-      endpoints: LEGACY_ENDPOINTS,
-    });
-  }
-
-  // In cloud mode the content-bearing legacy routes are not served — /v1 is the
-  // real surface (blobs are not loaded into pg). Fail loudly, never fake-empty.
-  if (isCloudMode()) {
-    if (
-      ["/search", "/recall", "/tool-calls", "/recent", "/list", "/machines", "/stats"].includes(
-        url.pathname,
-      ) ||
-      url.pathname.startsWith("/sessions/")
-    ) {
-      return json({ ok: false, error: "legacy endpoint disabled in cloud mode; use /v1/*" }, 410);
-    }
-    return null;
-  }
-
-  if (url.pathname === "/search") {
-    const q = url.searchParams.get("q");
-    if (!q) return json({ ok: false, error: "missing query param 'q'" }, 400);
-    const results = search(q, {
-      source: url.searchParams.get("source") ?? undefined,
-      project_path: url.searchParams.get("project") ?? undefined,
-      machine: url.searchParams.get("machine") ?? undefined,
-      limit: intParam(url, "limit", 20),
-    });
-    return json({ ok: true, query: q, count: results.length, results });
-  }
-
-  if (url.pathname === "/recall") {
-    return null; // handled async below
-  }
-
-  if (url.pathname === "/tool-calls") {
-    const q = url.searchParams.get("q");
-    if (!q) return json({ ok: false, error: "missing query param 'q'" }, 400);
-    const results = searchToolCalls(q, {
-      source: url.searchParams.get("source") ?? undefined,
-      project_path: url.searchParams.get("project") ?? undefined,
-      machine: url.searchParams.get("machine") ?? undefined,
-      limit: intParam(url, "limit", 20),
-    });
-    return json({ ok: true, query: q, count: results.length, results });
-  }
-
-  if (url.pathname === "/recent") {
-    return json({ ok: true, sessions: getRecentSessions(intParam(url, "limit", 20)) });
-  }
-
-  if (url.pathname === "/list") {
-    return json({
-      ok: true,
-      sessions: listSessions({
-        source: url.searchParams.get("source") ?? undefined,
-        project_path: url.searchParams.get("project") ?? undefined,
-        machine: url.searchParams.get("machine") ?? undefined,
-        limit: intParam(url, "limit", 50),
-      }),
-    });
-  }
-
-  if (url.pathname === "/machines") {
-    return json({ ok: true, machines: listMachines() });
-  }
-
-  if (url.pathname === "/stats") {
-    return json({ ok: true, ingestion: getIngestionStats(), projects: getProjectStats().slice(0, 30) });
-  }
-
-  if (url.pathname.startsWith("/sessions/")) {
-    const id = decodeURIComponent(url.pathname.slice("/sessions/".length));
-    const session = getSessionByPrefix(id);
-    if (!session) return json({ ok: false, error: `session not found: ${id}` }, 404);
-    return json({
-      ok: true,
-      session,
-      messages: getMessages(session.id),
-      tool_calls: getToolCalls(session.id),
-    });
-  }
-
-  return null;
+  return json({ ok: false, error: "Not found", endpoints: ENDPOINTS }, 404);
 }
 
 export function createSessionsServer(options: {
@@ -365,6 +253,18 @@ export function createSessionsServer(options: {
           return json(buildOpenApiDocument());
         }
 
+        // --- Package info (unauthenticated; no session content) ---
+        if (url.pathname === "/" || url.pathname === "/info") {
+          return json({
+            ok: true,
+            name: pkg.name,
+            version: pkg.version,
+            description: pkg.description,
+            mode: serveMode(),
+            endpoints: ENDPOINTS,
+          });
+        }
+
         // --- Authenticated versioned API ---
         if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) {
           const verifier = getVerifier();
@@ -391,28 +291,7 @@ export function createSessionsServer(options: {
           return await handleV1(url, request);
         }
 
-        // --- Legacy endpoints (local self-host back-compat) ---
-        if (url.pathname === "/recall" && !isCloudMode()) {
-          const q = url.searchParams.get("q");
-          if (!q) return json({ ok: false, error: "missing query param 'q'" }, 400);
-          const result = await recallSessions(q, {
-            source: url.searchParams.get("source") ?? undefined,
-            project_path: url.searchParams.get("project") ?? undefined,
-            machine: url.searchParams.get("machine") ?? undefined,
-            limit: intParam(url, "limit", 10),
-            semantic: booleanParam(url, "semantic", true),
-          });
-          return json({ ok: true, ...result });
-        }
-
-        if (request.method !== "GET" && !url.pathname.startsWith("/v1")) {
-          return json({ ok: false, error: "Method not allowed", allowedMethods: ["GET"] }, 405);
-        }
-
-        const legacy = handleLegacy(url, pkg);
-        if (legacy) return legacy;
-
-        return json({ ok: false, error: "Not found", endpoints: LEGACY_ENDPOINTS }, 404);
+        return json({ ok: false, error: "Not found", endpoints: ENDPOINTS }, 404);
       } catch (err) {
         return json({ ok: false, error: (err as Error).message }, 500);
       }

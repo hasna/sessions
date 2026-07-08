@@ -6,9 +6,11 @@
 // client — that was the split-brain bug and has been removed.
 export {
   resolveSessionStore,
+  getLocalStore,
   type SessionStore,
   type Env,
   type ListOptions,
   type SearchHitDto,
   type StoreStats,
+  type IngestStoreOptions,
 } from "./db/session-store.js";

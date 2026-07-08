@@ -1002,16 +1002,17 @@ program
   .option("--json", "Output as JSON")
   .action(async (opts: { ingest?: boolean; json?: boolean }) => {
     try {
-      const { ingestAll } = await import("../lib/ingest/index.js");
-      const { recomputeMachineCounts } = await import("../db/machines.js");
-      const { resolveSessionStore } = await import("../db/session-store.js");
+      const { resolveSessionStore, getLocalStore } = await import("../db/session-store.js");
+      // Ingest + the local read always target the on-box index (the sync source),
+      // so they go through the explicit LocalStore accessor — never a raw db import.
+      const local = getLocalStore();
 
       const result: Record<string, unknown> = {};
       if (opts.ingest !== false) {
-        result.ingest = ingestAll();
+        result.ingest = await local.ingest();
         if (!opts.json) for (const r of (result.ingest as { source: string; sessions: number }[])) console.log(`ingest ${r.source}: +${r.sessions} sessions`);
       }
-      recomputeMachineCounts();
+      await local.recomputeMachines();
 
       const store = resolveSessionStore();
       if (store.mode === "local") {
@@ -1024,11 +1025,10 @@ program
         // self_hosted/cloud: push every locally-indexed session's metadata to the
         // shared /v1 registry via the ApiStore (idempotent upsert on source:source_id).
         if (!opts.json) console.log("pushing local session metadata to the shared cloud registry...");
-        const { listSessions } = await import("../db/sessions.js");
-        const local = listSessions({ limit: 100000 });
+        const localSessions = await local.list({ limit: 100000 });
         let pushed = 0;
         const errors: string[] = [];
-        for (const s of local) {
+        for (const s of localSessions) {
           try {
             await store.create({
               id: s.id,
@@ -1056,8 +1056,8 @@ program
             errors.push(`${s.id}: ${(e as Error).message}`);
           }
         }
-        result.push = { pushed, total: local.length, errors };
-        if (!opts.json) console.log(`push: ${pushed}/${local.length} session(s)${errors.length ? ` — ${errors.length} error(s)` : ""}`);
+        result.push = { pushed, total: localSessions.length, errors };
+        if (!opts.json) console.log(`push: ${pushed}/${localSessions.length} session(s)${errors.length ? ` — ${errors.length} error(s)` : ""}`);
         if (errors.length > 0) {
           if (opts.json) { printJson(result); process.exit(1); }
           for (const e of errors.slice(0, 10)) console.error(e);
@@ -1102,7 +1102,7 @@ program
   .option("--status", "Print provider watch status and exit")
   .option("--json", "Output status as JSON with --status")
   .action(async (opts: { source?: string[]; initial?: boolean; debounce?: string; poll?: string; status?: boolean; json?: boolean }) => {
-    const { ingestAll } = await import("../lib/ingest/index.js");
+    const { getLocalStore } = await import("../db/session-store.js");
     const { getWatchStatus, startWatch } = await import("../lib/watch.js");
     const sources = opts.source?.length ? opts.source : undefined;
     const debounceMs = parsePositiveIntOption(opts.debounce, 2000, "--debounce");
@@ -1121,7 +1121,7 @@ program
     }
     if (opts.initial !== false) {
       console.log("Initial ingest…");
-      for (const r of ingestAll({ sources })) {
+      for (const r of await getLocalStore().ingest({ sources })) {
         console.log(`  ${r.source}: ${r.sessions} sessions (${r.ingested} files, ${r.skipped} unchanged)`);
       }
     } else {
@@ -1487,12 +1487,14 @@ program
   );
 
 async function runIngestCommand(opts: { source?: string; force?: boolean; verbose?: boolean; json?: boolean }) {
-  const { ingestAll, ingestSource } = await import("../lib/ingest/index.js");
+  const { getLocalStore } = await import("../db/session-store.js");
   const onProgress = opts.verbose ? (m: string) => console.log(m) : undefined;
   try {
-    const results = opts.source
-      ? [ingestSource(opts.source, { force: opts.force, onProgress })]
-      : ingestAll({ force: opts.force, onProgress });
+    const results = await getLocalStore().ingest({
+      source: opts.source,
+      force: opts.force,
+      onProgress,
+    });
     if (opts.json) {
       printJson(results);
       return;
