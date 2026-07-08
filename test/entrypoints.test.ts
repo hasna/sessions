@@ -63,16 +63,18 @@ describe("entrypoint help and version", () => {
     expect(stdout).toContain("list-indexed");
     expect(stdout).toContain("indexed-list");
     expect(stdout).toContain("events");
-    expect(stdout).toContain("channels");
+    // @hasna/events registers the subscription command as "channels" (>=0.1.13)
+    // or "webhooks" (0.1.11); accept whichever the resolved version exposes.
+    expect(/\b(channels|webhooks)\b/.test(stdout)).toBe(true);
   });
 
-  it("prints CLI help with shared events and channels commands", () => {
+  it("prints CLI help with shared events and subscription commands", () => {
     const result = runBun(["run", "src/cli/index.tsx", "--help"]);
     const output = Buffer.from(result.stdout).toString("utf-8");
 
     expect(result.exitCode).toBe(0);
     expect(output).toContain("events");
-    expect(output).toContain("channels");
+    expect(/\b(channels|webhooks)\b/.test(output)).toBe(true);
   });
 
   it("prints watch-ingest help with daemon controls", () => {
