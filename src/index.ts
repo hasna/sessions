@@ -103,35 +103,16 @@ export type {
 
 export { SqliteAdapter } from "./db/sqlite-adapter.js";
 export { getDatabase, closeDatabase, resetDatabase, initSchema } from "./db/database.js";
+
+// --- Client storage abstraction (the ONE seam: LocalStore | ApiStore) ---
 export {
-  getStorageConfig,
-  getStorageConnectionString,
-  getConnectionString,
-  getStorageDatabaseEnv,
-  getStorageDatabaseEnvName,
-  getStorageDatabaseUrl,
-  SESSIONS_STORAGE_ENV,
-  SESSIONS_STORAGE_FALLBACK_ENV,
-  STORAGE_DATABASE_ENV,
-  STORAGE_MODE_ENV,
-  type StorageConfig,
-  type StorageMode,
-  type StorageEnv,
-} from "./db/storage-config.js";
-export { PgAdapterAsync } from "./db/remote-storage.js";
-export { applyPgMigrations } from "./db/pg-migrate.js";
-export {
-  STORAGE_TABLES,
-  SESSIONS_STORAGE_TABLES,
-  getStoragePg,
-  getStorageStatus,
-  parseStorageTables,
-  pullStorageChanges,
-  pushStorageChanges,
-  runStorageMigrations,
-  syncStorageChanges,
-} from "./db/storage-sync.js";
-export type { StorageStatus, SyncResult } from "./db/storage-sync.js";
+  resolveSessionStore,
+  type SessionStore,
+  type Env,
+  type ListOptions,
+  type SearchHitDto,
+  type StoreStats,
+} from "./db/session-store.js";
 
 // --- Cloud (Postgres) data plane + serve surface (Amendment A1, PURE REMOTE) ---
 export { isCloudMode, getCloudClient, closeCloudClient, APP_NAME } from "./db/cloud/client.js";

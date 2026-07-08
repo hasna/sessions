@@ -5,7 +5,6 @@
     "": {
       "name": "@hasna/sessions",
       "dependencies": {
-        "@hasna/contracts": "0.4.1",
         "@hasna/events": "^0.1.11",
         "@inkjs/ui": "^2.0.0",
         "@modelcontextprotocol/sdk": "^1.27.1",
@@ -18,6 +17,7 @@
         "zod": "^4.3.6",
       },
       "devDependencies": {
+        "@hasna/contracts": "file:../open-contracts",
         "@types/bun": "latest",
         "@types/pg": "^8.11.11",
         "typescript": "^5.7.0",
@@ -27,7 +27,7 @@
   "packages": {
     "@alcalzone/ansi-tokenize": ["@alcalzone/ansi-tokenize@0.2.5", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^5.0.0" } }, "sha512-3NX/MpTdroi0aKz134A6RC2Gb2iXVECN4QaAXnvCIxxIm3C3AVB1mkUe8NaaiyvOpDfsrqWhYtj+Q6a62RrTsw=="],
 
-    "@hasna/contracts": ["@hasna/contracts@0.4.1", "", { "dependencies": { "commander": "^13.1.0", "zod": "^3.25.76" }, "bin": { "contracts": "dist/cli/index.js", "contracts-cli": "dist/cli/index.js" } }, "sha512-oubsu1FFyVvxbt5d+85iBXEK6M81ZsaeODycoQGZuFNqQ3ecfXFujlQz3cL+NHwHJPVmy4wBGLPcaXcRTjO/IQ=="],
+    "@hasna/contracts": ["@hasna/contracts@file:../open-contracts", { "dependencies": { "commander": "^13.1.0", "zod": "^3.25.76" }, "devDependencies": { "@types/bun": "^1.2.4", "@types/pg": "^8.11.10", "pg": "^8.13.1", "typescript": "^5.7.3" }, "bin": { "contracts": "dist/cli/index.js", "contracts-cli": "dist/cli/index.js" } }],
 
     "@hasna/events": ["@hasna/events@0.1.11", "", { "dependencies": { "commander": "^13.1.0" }, "bin": { "events": "dist/cli/index.js", "hasna-events": "dist/cli/index.js" } }, "sha512-X36W9TB8mKxtS5UeW1n2IlvW6nPUcoYCQWNMMV+/JM4YNzlnnk1FRm8Aay02tt1LjQOGICCHF3hz/l//EHEe+Q=="],
 

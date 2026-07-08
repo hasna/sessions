@@ -67,14 +67,14 @@ describe("sessions MCP server", () => {
     expect(tools).toContain("embed");
     expect(tools).toContain("knowledge_graph");
     expect(tools).toContain("machines");
-    // Preserved from the original stub
-    expect(tools).toContain("send_feedback");
     expect(tools).toContain("register_agent");
-    expect(tools).toContain("sessions_storage_status");
-    expect(tools).toContain("sessions_storage_push");
-    expect(tools).toContain("sessions_storage_pull");
-    expect(tools).toContain("sessions_storage_sync");
-    expect(tools).toContain("sessions_storage_feedback");
+    // The DSN-on-client storage sync tools (sessions_storage_push/pull/sync) and
+    // the direct-sqlite send_feedback tool were removed in the Store refactor:
+    // no client path may touch a Postgres DSN or open sqlite directly.
+    expect(tools).not.toContain("sessions_storage_push");
+    expect(tools).not.toContain("sessions_storage_pull");
+    expect(tools).not.toContain("sessions_storage_sync");
+    expect(tools).not.toContain("send_feedback");
     expect(tools.some((name) => name.toLowerCase().includes("cloud"))).toBe(false);
   }, 15000);
 

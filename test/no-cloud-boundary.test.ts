@@ -46,13 +46,10 @@ describe("no-cloud package boundary", () => {
       "package.json",
       "bun.lock",
       "src/cli/index.tsx",
-      "src/cli/storage.ts",
-      "src/db/storage-config.ts",
-      "src/db/storage-sync.ts",
+      "src/db/session-store.ts",
       "src/index.ts",
       "src/mcp/index.ts",
       "src/mcp/http.ts",
-      "src/mcp/storage-tools.ts",
     ];
 
     for (const path of entrypoints) {
@@ -62,6 +59,9 @@ describe("no-cloud package boundary", () => {
       }
     }
 
-    expect(readRepoFile("src/mcp/index.ts")).toContain("registerSessionsStorageTools");
+    // The client routes through the sessions-native Store abstraction
+    // (LocalStore | ApiStore over /v1) — never @hasna/cloud, never a DSN.
+    expect(readRepoFile("src/mcp/index.ts")).toContain("resolveSessionStore");
+    expect(readRepoFile("src/cli/index.tsx")).toContain("resolveSessionStore");
   });
 });

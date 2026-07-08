@@ -4,8 +4,8 @@ import { getSessionsDbPath } from "../lib/paths.js";
 export type Database = SqliteAdapter;
 
 /**
- * SQLite schema for the session index. Kept in lock-step with the PostgreSQL
- * mirror in pg-migrations.ts (column-for-column) so local/remote sync works.
+ * SQLite schema for the local session index (LocalStore). The self_hosted
+ * cloud plane keeps its own Postgres schema under src/db/cloud/migrations.ts.
  * FTS5 virtual tables + triggers provide full-text search.
  */
 const SCHEMA: string[] = [

@@ -7,23 +7,14 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { SqliteAdapter as Database } from "../db/sqlite-adapter.js";
-import { existsSync, mkdirSync } from "fs";
-import { join, dirname } from "path";
-import { homedir } from "os";
 import { getPackageInfo, getPackageVersion } from "../lib/package.js";
 import { search, searchToolCalls } from "../lib/search.js";
 import {
-  getRecentSessions,
-  listSessions,
   getSessionByPrefix,
   getMessages,
   getToolCalls,
-  getProjectStats,
 } from "../db/sessions.js";
 import { ingestAll, ingestSource } from "../lib/ingest/index.js";
-import { getIngestionStats } from "../db/ingestion.js";
-import { listMachines } from "../db/machines.js";
 import { embedSessions } from "../lib/embeddings.js";
 import { semanticSearch, hybridSearch } from "../lib/vector-search.js";
 import { listEntities, relatedSessions, sessionGraph } from "../lib/graph.js";
@@ -41,7 +32,6 @@ import {
 import { listAdapters, getAdapter } from "../lib/adapters/index.js";
 import type { CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
-import { registerSessionsStorageTools } from "./storage-tools.js";
 import { resolveSessionStore } from "../db/session-store.js";
 
 // Session-record store seam (SAME resolver the CLI uses). When the client-flip
@@ -117,7 +107,11 @@ server.registerResource(
     description: "Current ingestion, project, and machine statistics for the local sessions index.",
     mimeType: "application/json",
   },
-  async (uri) => jsonResource(uri, { ingestion: getIngestionStats(), projects: getProjectStats().slice(0, 30), machines: listMachines() })
+  async (uri) => {
+    const store = sessionStore();
+    const [s, machines] = await Promise.all([store.stats(), store.machines()]);
+    return jsonResource(uri, { ingestion: s.by_source, projects: s.projects.slice(0, 30), machines });
+  }
 );
 
 server.registerResource(
@@ -128,7 +122,7 @@ server.registerResource(
     description: "Most recently active indexed sessions.",
     mimeType: "application/json",
   },
-  async (uri) => jsonResource(uri, { sessions: getRecentSessions(20) })
+  async (uri) => jsonResource(uri, { sessions: await sessionStore().recent(20) })
 );
 
 server.registerResource(
@@ -296,9 +290,7 @@ server.tool(
   { limit: z.number().optional().describe("Max results (default 20)") },
   async (a: { limit?: number }) => {
     try {
-      const store = sessionStore();
-      if (store.mode === "cloud") return ok(await store.recent(a.limit ?? 20));
-      return ok(getRecentSessions(a.limit ?? 20));
+      return ok(await sessionStore().recent(a.limit ?? 20));
     } catch (e) {
       return fail(e);
     }
@@ -316,11 +308,7 @@ server.tool(
   },
   async (a: { source?: string; project_path?: string; machine?: string; limit?: number }) => {
     try {
-      const store = sessionStore();
-      if (store.mode === "cloud") {
-        return ok(await store.list({ source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
-      }
-      return ok(listSessions({ source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
+      return ok(await sessionStore().list({ source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
     } catch (e) {
       return fail(e);
     }
@@ -333,9 +321,7 @@ server.tool(
   {},
   async () => {
     try {
-      const store = sessionStore();
-      if (store.mode === "cloud") return ok(await store.machines());
-      return ok(listMachines());
+      return ok(await sessionStore().machines());
     } catch (e) {
       return fail(e);
     }
@@ -352,15 +338,14 @@ server.tool(
   async (a: { id: string; message_limit?: number }) => {
     try {
       const store = sessionStore();
-      if (store.mode === "cloud") {
-        const session = await store.get(a.id);
-        if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
+      // Session metadata always routes through the Store (LocalStore | ApiStore).
+      const session = await store.get(a.id);
+      if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
+      if (store.mode !== "local") {
         // The cloud /v1 registry stores session metadata only; raw message/tool
         // transcripts stay on the machine that produced them (local index).
         return ok({ session, messages: [], tool_calls: [], note: "self_hosted registry: metadata only; message/tool transcripts live on the producing machine's local index" });
       }
-      const session = getSessionByPrefix(a.id);
-      if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
       let messages = getMessages(session.id);
       if (a.message_limit) messages = messages.slice(0, a.message_limit);
       return ok({ session, messages, tool_calls: getToolCalls(session.id) });
@@ -395,12 +380,8 @@ server.tool(
   {},
   async () => {
     try {
-      const store = sessionStore();
-      if (store.mode === "cloud") {
-        const s = await store.stats();
-        return ok({ ingestion: s.by_source, projects: s.projects.slice(0, 30), totals: { session_count: s.session_count, message_count: s.message_count, tool_call_count: s.tool_call_count } });
-      }
-      return ok({ ingestion: getIngestionStats(), projects: getProjectStats().slice(0, 30) });
+      const s = await sessionStore().stats();
+      return ok({ ingestion: s.by_source, projects: s.projects.slice(0, 30), totals: { session_count: s.session_count, message_count: s.message_count, tool_call_count: s.tool_call_count } });
     } catch (e) {
       return fail(e);
     }
@@ -597,40 +578,6 @@ server.tool(
   }
 );
 
-// ─── Feedback ───────────────────────────────────────────────────────────────
-
-function getFeedbackDb(): Database {
-  const home = homedir();
-  const dbPath = join(home, ".hasna", "sessions", "sessions.db");
-  const dir = dirname(dbPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const db = new Database(dbPath);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("CREATE TABLE IF NOT EXISTS feedback (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), message TEXT NOT NULL, email TEXT, category TEXT DEFAULT 'general', version TEXT, machine_id TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-  return db;
-}
-
-server.tool(
-  "send_feedback",
-  "Send feedback about this service",
-  { message: z.string(), email: z.string().optional(), category: z.enum(["bug", "feature", "general"]).optional() },
-  async (params: { message: string; email?: string; category?: string }) => {
-    try {
-      const db = getFeedbackDb();
-      db.run("INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)", [
-        params.message,
-        params.email || null,
-        params.category || "general",
-        packageInfo.version,
-      ]);
-      db.close();
-      return { content: [{ type: "text" as const, text: "Feedback saved. Thank you!" }] };
-    } catch (e) {
-      return { content: [{ type: "text" as const, text: String(e) }], isError: true };
-    }
-  }
-);
-
 // ─── Cross-Adapter Tools ────────────────────────────────────────────────────
 
 server.tool(
@@ -779,8 +726,6 @@ server.tool(
     });
   }
 );
-
-registerSessionsStorageTools(server);
 
   return server;
 }

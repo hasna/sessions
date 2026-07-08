@@ -9,7 +9,6 @@
 
 import { Command } from "commander";
 import { registerEventsCommands } from "@hasna/events/commander";
-import { registerStorageCommands } from "./storage.js";
 import {
   existsSync,
   mkdirSync,
@@ -166,7 +165,6 @@ program
   .version(getPackageVersion())
   .description("Universal AI coding session search and management");
 
-registerStorageCommands(program);
 registerEventsCommands(program, { source: "sessions" });
 
 // ─── relocate ──────────────────────────────────────────────────────────────
@@ -969,8 +967,8 @@ program
   .description("List machines that have contributed sessions, with counts")
   .option("--json", "Output as JSON")
   .action(async (opts: { json?: boolean }) => {
-    const { listMachines } = await import("../db/machines.js");
-    const machines = listMachines();
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const machines = await resolveSessionStore().machines();
     if (opts.json) return void printJson(machines);
     if (machines.length === 0) {
       console.log("No machines recorded yet. Run 'sessions ingest' or 'sessions sync'.");
@@ -983,70 +981,75 @@ program
 
 program
   .command("sync")
-  .description("Ingest local sessions, then sync to/from storage so every machine shares one index")
-  .option("--no-ingest", "Skip the local ingest before syncing")
-  .option("--no-pull", "Push only — don't pull other machines' sessions")
+  .description("Ingest local sessions; in self_hosted (api) mode, push their metadata to the shared cloud registry so every machine sees one index")
+  .option("--no-ingest", "Skip the local ingest before pushing")
   .option("--json", "Output as JSON")
-  .action(async (opts: { ingest?: boolean; pull?: boolean; json?: boolean }) => {
+  .action(async (opts: { ingest?: boolean; json?: boolean }) => {
     try {
       const { ingestAll } = await import("../lib/ingest/index.js");
       const { recomputeMachineCounts } = await import("../db/machines.js");
-      const { getStorageConfig, hasStorageDatabaseConfig } = await import("../db/storage-config.js");
-
-      const runStorage = async (direction: "push" | "pull") => {
-        try {
-          const { pushStorageChanges, pullStorageChanges } = await import("../db/storage-sync.js");
-          const results = direction === "push"
-            ? await pushStorageChanges()
-            : await pullStorageChanges();
-          const errors = results.flatMap((result) => result.errors);
-          return { code: errors.length > 0 ? 1 : 0, output: errors.join("\n"), results };
-        } catch (e) {
-          return { code: 1, output: `failed to run storage ${direction}: ${(e as Error).message}` };
-        }
-      };
-      const skipStorage = (direction: "push" | "pull") => ({
-        code: 0,
-        output: `storage not configured; skipped remote ${direction}`,
-        skipped: true,
-      });
+      const { resolveSessionStore } = await import("../db/session-store.js");
 
       const result: Record<string, unknown> = {};
       if (opts.ingest !== false) {
         result.ingest = ingestAll();
         if (!opts.json) for (const r of (result.ingest as { source: string; sessions: number }[])) console.log(`ingest ${r.source}: +${r.sessions} sessions`);
       }
-      const storageConfig = getStorageConfig();
-      const shouldSkipStorage = storageConfig.mode === "local" && !hasStorageDatabaseConfig();
-      if (shouldSkipStorage) {
-        if (!opts.json) console.log("storage not configured; local index updated only");
-        result.push = skipStorage("push");
-        if (opts.pull !== false) result.pull = skipStorage("pull");
-      } else {
-        if (!opts.json) console.log("pushing to storage...");
-        result.push = await runStorage("push");
-        if (opts.pull !== false) {
-          if (!opts.json) console.log("pulling from storage...");
-          result.pull = await runStorage("pull");
-        }
-      }
       recomputeMachineCounts();
 
-      const push = result.push as { code: number };
-      const pull = result.pull as { code: number } | undefined;
-      const failed = push.code !== 0 || (pull?.code ?? 0) !== 0;
-
-      if (opts.json) {
-        printJson(result);
-        if (failed) process.exit(1);
-        return;
+      const store = resolveSessionStore();
+      if (store.mode === "local") {
+        // No DSN client sync exists any more. In local mode the on-box index IS
+        // the store; there is nothing to push. Set HASNA_SESSIONS_API_URL +
+        // HASNA_SESSIONS_API_KEY (self_hosted) to share one cloud index.
+        result.push = { pushed: 0, skipped: true, reason: "local mode; on-box index is authoritative (set HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY to share the cloud)" };
+        if (!opts.json) console.log("local mode; on-box index only (set HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY to share the cloud).");
+      } else {
+        // self_hosted/cloud: push every locally-indexed session's metadata to the
+        // shared /v1 registry via the ApiStore (idempotent upsert on source:source_id).
+        if (!opts.json) console.log("pushing local session metadata to the shared cloud registry...");
+        const { listSessions } = await import("../db/sessions.js");
+        const local = listSessions({ limit: 100000 });
+        let pushed = 0;
+        const errors: string[] = [];
+        for (const s of local) {
+          try {
+            await store.create({
+              id: s.id,
+              source: s.source,
+              source_id: s.source_id,
+              source_path: s.source_path,
+              title: s.title,
+              project_path: s.project_path,
+              project_name: s.project_name,
+              model: s.model,
+              model_provider: s.model_provider,
+              git_branch: s.git_branch,
+              git_sha: s.git_sha,
+              git_origin_url: s.git_origin_url,
+              cli_version: s.cli_version,
+              is_subagent: s.is_subagent,
+              parent_session_id: s.parent_session_id,
+              machine: s.machine,
+              started_at: s.started_at,
+              ended_at: s.ended_at,
+              metadata: s.metadata,
+            });
+            pushed++;
+          } catch (e) {
+            errors.push(`${s.id}: ${(e as Error).message}`);
+          }
+        }
+        result.push = { pushed, total: local.length, errors };
+        if (!opts.json) console.log(`push: ${pushed}/${local.length} session(s)${errors.length ? ` — ${errors.length} error(s)` : ""}`);
+        if (errors.length > 0) {
+          if (opts.json) { printJson(result); process.exit(1); }
+          for (const e of errors.slice(0, 10)) console.error(e);
+          process.exit(1);
+        }
       }
 
-      console.log(`push: ${push.code === 0 ? "ok" : `FAILED (exit ${push.code})`}`);
-      if (pull) {
-        console.log(`pull: ${pull.code === 0 ? "ok" : `FAILED (exit ${pull.code})`}`);
-      }
-      if (failed) process.exit(1);
+      if (opts.json) { printJson(result); return; }
       console.log("Done. Run 'sessions machines' to see contributors.");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
