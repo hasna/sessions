@@ -112,6 +112,71 @@ describe("/v1 authenticated API (local mode)", () => {
     }
   });
 
+  it("serves rename (PATCH), content/tool search, and graph on /v1 (regression for stale-server 404/405)", async () => {
+    const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const rw = keyFor(["sessions:read", "sessions:write"]);
+      const H = { "x-api-key": rw, "content-type": "application/json" };
+
+      const created = await fetch(`${base}/v1/sessions`, {
+        method: "POST",
+        headers: H,
+        body: JSON.stringify({
+          source: "claude",
+          source_id: "endpoints-1",
+          title: "Original title",
+          project_name: "graph-demo",
+          project_path: "/tmp/graph-demo",
+        }),
+      });
+      expect(created.status).toBe(201);
+      const id = (await created.json()).session.id as string;
+
+      // RENAME — PATCH /v1/sessions/:id must exist (was 405 on the stale 0.11.x server).
+      const renamed = await fetch(`${base}/v1/sessions/${id}`, {
+        method: "PATCH",
+        headers: H,
+        body: JSON.stringify({ title: "Renamed via /v1" }),
+      });
+      expect(renamed.status).toBe(200);
+      expect((await renamed.json()).session.title).toBe("Renamed via /v1");
+
+      // PATCH with an empty title is a 400, not a 405/404.
+      const badRename = await fetch(`${base}/v1/sessions/${id}`, {
+        method: "PATCH",
+        headers: H,
+        body: JSON.stringify({ title: "   " }),
+      });
+      expect(badRename.status).toBe(400);
+
+      // CONTENT SEARCH — GET /v1/search/content must exist (was 404 on the stale server).
+      const content = await fetch(`${base}/v1/search/content?q=Renamed`, { headers: { "x-api-key": rw } });
+      expect(content.status).toBe(200);
+      expect((await content.json()).ok).toBe(true);
+
+      // TOOL SEARCH — GET /v1/search/tools must exist (was 404 on the stale server).
+      const tools = await fetch(`${base}/v1/search/tools?q=anything`, { headers: { "x-api-key": rw } });
+      expect(tools.status).toBe(200);
+      expect((await tools.json()).ok).toBe(true);
+
+      // GRAPH — GET /v1/graph must exist (was 404 on the stale server) for all three shapes.
+      const gEntities = await fetch(`${base}/v1/graph?type=project`, { headers: { "x-api-key": rw } });
+      expect(gEntities.status).toBe(200);
+      expect((await gEntities.json()).ok).toBe(true);
+
+      const gSession = await fetch(`${base}/v1/graph?session=${id}`, { headers: { "x-api-key": rw } });
+      expect(gSession.status).toBe(200);
+      expect((await gSession.json()).ok).toBe(true);
+
+      const gRelated = await fetch(`${base}/v1/graph?related=project:graph-demo`, { headers: { "x-api-key": rw } });
+      expect(gRelated.status).toBe(200);
+      expect((await gRelated.json()).ok).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   it("accepts the key via Authorization: Bearer", async () => {
     const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
     try {
