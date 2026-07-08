@@ -19,6 +19,10 @@
       "types": "./dist/storage.d.ts",
       "import": "./dist/storage.js"
     },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
     "./sdk": {
       "types": "./dist/sdk/index.d.ts",
       "import": "./dist/sdk/index.js"
@@ -38,7 +42,7 @@
     "build:cli": "bun build src/cli/index.tsx --outdir dist/cli --target bun --external @hasna/events --external @inkjs/ui --external @modelcontextprotocol/sdk --external chalk --external commander --external ink --external openai --external pg --external react --external react/jsx-runtime --external react/jsx-dev-runtime --external zod",
     "build:mcp": "bun build src/mcp/index.ts --outdir dist/mcp --target bun --external @hasna/events --external @inkjs/ui --external @modelcontextprotocol/sdk --external chalk --external commander --external ink --external openai --external pg --external react --external react/jsx-runtime --external react/jsx-dev-runtime --external zod",
     "build:server": "bun build src/server/index.ts --outdir dist/server --target bun --external @hasna/events --external @inkjs/ui --external @modelcontextprotocol/sdk --external chalk --external commander --external ink --external openai --external pg --external react --external react/jsx-runtime --external react/jsx-dev-runtime --external zod",
-    "build:lib": "bun build src/index.ts src/storage.ts --outdir dist --target bun --external @hasna/events --external @inkjs/ui --external @modelcontextprotocol/sdk --external chalk --external commander --external ink --external openai --external pg --external react --external react/jsx-runtime --external react/jsx-dev-runtime --external zod",
+    "build:lib": "bun build src/index.ts src/storage.ts src/server.ts --outdir dist --target bun --external @hasna/events --external @inkjs/ui --external @modelcontextprotocol/sdk --external chalk --external commander --external ink --external openai --external pg --external react --external react/jsx-runtime --external react/jsx-dev-runtime --external zod",
     "build:sdk": "bun build src/sdk/index.ts --outdir dist/sdk --target bun --packages external",
     "sdk:generate": "bun run scripts/generate-sdk.ts",
     "migrate": "bun run src/server/index.ts migrate",

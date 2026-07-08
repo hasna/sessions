@@ -5,23 +5,24 @@
  * to /Users/alice/Workspace/new), Claude Code can no longer find the sessions
  * because they're stored under path-encoded directory names.
  *
- * This module handles:
+ * This module handles the on-box filesystem side of a relocation ONLY:
  * 1. Renaming the project directory in ~/.claude/projects/
  * 2. Updating sessions-index.json (projectPath, fullPath)
- * 3. Updating cwd fields in .jsonl session files
- * 4. Updating the sessions DB (project_path, source_path)
+ * 3. Updating cwd fields in .jsonl session files (Claude + Codex)
+ *
+ * The session INDEX side (project_path / source_path rows) is owned by the
+ * Store, not this module — the CLI routes that through
+ * `SessionStore.relocatePaths`, so in self_hosted mode the shared cloud
+ * registry is updated (never a raw on-box `new Database(...)` write).
  */
 
 import { existsSync, readdirSync, renameSync, readFileSync, writeFileSync, statSync } from "fs";
-import { join, basename } from "path";
-import { SqliteAdapter as Database } from "../db/sqlite-adapter.js";
+import { join } from "path";
 import {
-  encodePath,
   findMatchingProjectDirs,
   computeRelocatedDir,
   getClaudeProjectsDir,
   getCodexSessionsDir,
-  getSessionsDbPath,
 } from "./paths.js";
 
 /**
@@ -131,8 +132,6 @@ function relocateCodexSessions(
 export interface RelocateOptions {
   /** Only show what would change without modifying anything. */
   dryRun?: boolean;
-  /** Also update the sessions SQLite database. */
-  updateDb?: boolean;
   /** Print detailed progress. */
   verbose?: boolean;
 }
@@ -142,16 +141,21 @@ export interface RelocateResult {
   indexFilesUpdated: number;
   jsonlFilesUpdated: number;
   codexFilesUpdated: number;
-  dbRowsUpdated: number;
   errors: Array<{ file: string; error: string }>;
 }
 
+/**
+ * Relocate the on-box transcript FILES after a project directory move. Does NOT
+ * touch the session index — the caller updates that through
+ * `SessionStore.relocatePaths` so it lands in whichever store is active
+ * (local SQLite or the shared self_hosted cloud registry).
+ */
 export function relocate(
   oldPath: string,
   newPath: string,
   options: RelocateOptions = {}
 ): RelocateResult {
-  const { dryRun = false, updateDb = true, verbose = false } = options;
+  const { dryRun = false, verbose = false } = options;
   const projectsDir = getClaudeProjectsDir();
 
   const result: RelocateResult = {
@@ -159,7 +163,6 @@ export function relocate(
     indexFilesUpdated: 0,
     jsonlFilesUpdated: 0,
     codexFilesUpdated: 0,
-    dbRowsUpdated: 0,
     errors: [],
   };
 
@@ -193,8 +196,6 @@ export function relocate(
         error: `No session directories found for path: ${oldPath}`,
       });
     }
-    // Still update the DB below (covers Codex rows), then return.
-    if (updateDb && !dryRun) updateSessionsDb(oldPath, newPath, result, verbose);
     return result;
   }
 
@@ -347,49 +348,5 @@ export function relocate(
     }
   }
 
-  // Phase 3: Update sessions DB
-  if (updateDb && !dryRun) updateSessionsDb(oldPath, newPath, result, verbose);
-
   return result;
-}
-
-/** Update project_path / source_path / ingestion_state in the sessions DB. */
-function updateSessionsDb(
-  oldPath: string,
-  newPath: string,
-  result: RelocateResult,
-  verbose: boolean
-): void {
-  const dbPath = getSessionsDbPath();
-  if (!existsSync(dbPath)) return;
-  try {
-    const db = new Database(dbPath);
-    db.exec("PRAGMA journal_mode=WAL");
-    db.exec("PRAGMA busy_timeout=5000");
-
-    // Update project_path in sessions table
-    const sessionUpdate = db.prepare(
-      "UPDATE sessions SET project_path = ? || substr(project_path, ?) WHERE project_path LIKE ? || '%'"
-    );
-    const sessionResult = sessionUpdate.run(newPath, oldPath.length + 1, oldPath);
-
-    // Update source_path in sessions table
-    const sourceUpdate = db.prepare(
-      "UPDATE sessions SET source_path = replace(source_path, ?, ?) WHERE source_path LIKE ? || '%'"
-    );
-    sourceUpdate.run(oldPath, newPath, oldPath);
-
-    // Update ingestion_state file_path (Claude encodes the path into the file path)
-    const stateUpdate = db.prepare(
-      "UPDATE ingestion_state SET file_path = replace(file_path, ?, ?) WHERE file_path LIKE ? || '%'"
-    );
-    stateUpdate.run(encodePath(oldPath), encodePath(newPath), encodePath(oldPath));
-
-    result.dbRowsUpdated += (sessionResult as any).changes || 0;
-
-    db.close();
-    if (verbose) console.log(`  Updated ${result.dbRowsUpdated} DB rows`);
-  } catch (err: any) {
-    result.errors.push({ file: dbPath, error: err.message });
-  }
 }

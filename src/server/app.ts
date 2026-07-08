@@ -34,6 +34,7 @@ const LEGACY_ENDPOINTS = [
   "/info",
   "/v1/sessions",
   "/v1/sessions/:id",
+  "/v1/relocate",
   "/v1/search?q=…",
   "/v1/search/content?q=…",
   "/v1/search/tools?q=…",
@@ -99,6 +100,30 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
       }
     }
     return json({ ok: false, error: "Method not allowed", allowedMethods: ["GET", "POST"] }, 405);
+  }
+
+  // POST /v1/relocate — rewrite session paths after a project dir move.
+  if (path === "/v1/relocate") {
+    if (method !== "POST") {
+      return json({ ok: false, error: "Method not allowed", allowedMethods: ["POST"] }, 405);
+    }
+    let body: Record<string, unknown>;
+    try {
+      body = (await request.json()) as Record<string, unknown>;
+    } catch {
+      return json({ ok: false, error: "invalid JSON body" }, 400);
+    }
+    const oldPath = typeof body?.oldPath === "string" ? body.oldPath : "";
+    const newPath = typeof body?.newPath === "string" ? body.newPath : "";
+    if (!oldPath || !newPath) {
+      return json({ ok: false, error: "oldPath and newPath are required non-empty strings" }, 400);
+    }
+    try {
+      const result = await source.relocatePaths(oldPath, newPath);
+      return json({ ok: true, ...result });
+    } catch (err) {
+      return json({ ok: false, error: (err as Error).message }, 400);
+    }
   }
 
   // /v1/sessions/:id (GET | DELETE)

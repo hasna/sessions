@@ -23,7 +23,6 @@ import {
   encodePath,
   findMatchingProjectDirs,
   getClaudeProjectsDir,
-  getSessionsDbPath,
   resolveProjectPath,
 } from "./paths.js";
 

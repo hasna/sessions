@@ -8,6 +8,7 @@
 import type { PoolQueryClient } from "../../generated/storage-kit/index.js";
 import type { Machine, Session } from "../../types/index.js";
 import { getCloudClient } from "./client.js";
+import { encodePath } from "../../lib/paths.js";
 
 interface SessionRow {
   id: string;
@@ -362,6 +363,45 @@ export async function upsertSession(
   const stored = await getSession(id, client);
   if (!stored) throw new Error("failed to read back upserted session");
   return stored;
+}
+
+export interface RelocateResult {
+  /** Number of `sessions` rows whose project_path was rewritten. */
+  rowsUpdated: number;
+}
+
+/**
+ * Rewrite session paths in the shared RDS after a project directory move
+ * (old -> new). Mirrors the local relocate: updates `sessions.project_path`,
+ * `sessions.source_path`, and the path-encoded `ingestion_state.file_path`.
+ * This is the cloud (self_hosted) half of the Store's `relocatePaths`, so a
+ * relocate against a machine in self_hosted mode mutates the ONE shared
+ * registry instead of a non-authoritative on-box index.
+ */
+export async function relocatePaths(
+  oldPath: string,
+  newPath: string,
+  client: PoolQueryClient = getCloudClient(),
+): Promise<RelocateResult> {
+  return client.transaction(async (tx) => {
+    const sessions = await tx.query(
+      `UPDATE sessions
+          SET project_path = $1 || substr(project_path, $2), updated_at = $3
+        WHERE project_path LIKE $4 || '%'`,
+      [newPath, oldPath.length + 1, new Date().toISOString(), oldPath],
+    );
+    await tx.execute(
+      `UPDATE sessions SET source_path = replace(source_path, $1, $2)
+        WHERE source_path LIKE $1 || '%'`,
+      [oldPath, newPath],
+    );
+    await tx.execute(
+      `UPDATE ingestion_state SET file_path = replace(file_path, $1, $2)
+        WHERE file_path LIKE $1 || '%'`,
+      [encodePath(oldPath), encodePath(newPath)],
+    );
+    return { rowsUpdated: sessions.rowCount ?? 0 };
+  });
 }
 
 /** Delete a session by id. Returns true if a row was removed. */

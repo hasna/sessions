@@ -53,6 +53,13 @@ export interface SessionStore {
   get(idOrPrefix: string): Promise<Session | null>;
   create(input: UpsertSessionInput): Promise<Session>;
   remove(id: string): Promise<boolean>;
+  /**
+   * Rewrite session paths after a project directory move (old -> new): updates
+   * project_path / source_path in the active index. Local mode touches the
+   * on-box SQLite index; self_hosted mode hits `/v1/relocate` so the shared
+   * cloud registry is what actually changes (never a split-brain no-op).
+   */
+  relocatePaths(oldPath: string, newPath: string): Promise<{ rowsUpdated: number }>;
   search(query: string, opts: ListOptions): Promise<SearchHitDto[]>;
   machines(): Promise<Machine[]>;
   stats(): Promise<StoreStats>;
@@ -137,6 +144,13 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
         if (isNotFound(error)) return false;
         throw error;
       }
+    },
+    async relocatePaths(oldPath, newPath) {
+      const res = await t.post<{ ok?: boolean; rowsUpdated?: number }>("/relocate", {
+        oldPath,
+        newPath,
+      });
+      return { rowsUpdated: res.rowsUpdated ?? 0 };
     },
     async search(query, opts) {
       const res = await t.get<{ results: SearchHitDto[] }>("/search", {
@@ -260,6 +274,10 @@ function localStore(): SessionStore {
       }
       deleteSession(id);
       return true;
+    },
+    async relocatePaths(oldPath, newPath) {
+      const { relocatePathsInDb } = await import("./sessions.js");
+      return relocatePathsInDb(oldPath, newPath);
     },
     async search(query, opts) {
       const { searchSessions } = await import("../lib/search.js");

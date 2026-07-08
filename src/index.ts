@@ -114,13 +114,12 @@ export {
   type StoreStats,
 } from "./db/session-store.js";
 
-// --- Cloud (Postgres) data plane + serve surface (Amendment A1, PURE REMOTE) ---
-export { isCloudMode, getCloudClient, closeCloudClient, APP_NAME } from "./db/cloud/client.js";
-export { runCloudMigrations } from "./db/cloud/migrate.js";
-export { loadMigrations, resolveMigrationsDir } from "./db/cloud/migrations.js";
-export * as cloudStore from "./db/cloud/store.js";
-export { buildOpenApiDocument } from "./server/openapi.js";
-export { createSessionsServer, bootstrapServer } from "./server/app.js";
+// NOTE: the Postgres (RDS) data plane + HTTP serve surface (getCloudClient /
+// isCloudMode / cloudStore / createSessionsServer / migrations / OpenAPI) reads
+// DATABASE_URL and opens a `pg` pool. It is server-only and lives behind the
+// `@hasna/sessions/server` subpath — it is intentionally NOT re-exported here so
+// the client-importable package main never reaches a DSN data plane. Clients use
+// `@hasna/sessions/storage` (the Store).
 
 // --- Generated SDK ---
 export {

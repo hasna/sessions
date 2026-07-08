@@ -178,24 +178,40 @@ program
   .option("--no-db", "Skip updating the sessions SQLite database")
   .option("--json", "Output result as JSON")
   .option("-v, --verbose", "Print detailed progress")
-  .action((oldPath: string, newPath: string, opts: any) => {
+  .action(async (oldPath: string, newPath: string, opts: any) => {
     // Resolve ~ to home directory
     if (oldPath.startsWith("~")) oldPath = join(homedir(), oldPath.slice(1));
     if (newPath.startsWith("~")) newPath = join(homedir(), newPath.slice(1));
 
+    // Phase 1: on-box transcript files (always local — this machine's raw files).
     const result = relocate(oldPath, newPath, {
       dryRun: opts.dryRun,
-      updateDb: opts.db !== false,
       verbose: opts.json ? false : opts.verbose,
     });
+
+    // Phase 2: the session INDEX (project_path/source_path) — routed through the
+    // Store so self_hosted mode updates the shared cloud registry, not a raw
+    // on-box SQLite write. `--no-db` skips it; dry-run never mutates.
+    const updateDb = opts.db !== false;
+    let dbRowsUpdated = 0;
+    if (updateDb && !opts.dryRun) {
+      const { resolveSessionStore } = await import("../db/session-store.js");
+      try {
+        const r = await resolveSessionStore().relocatePaths(oldPath, newPath);
+        dbRowsUpdated = r.rowsUpdated;
+      } catch (err) {
+        result.errors.push({ file: "<store>", error: (err as Error).message });
+      }
+    }
 
     if (opts.json) {
       printJson({
         oldPath,
         newPath,
         dryRun: Boolean(opts.dryRun),
-        updateDb: opts.db !== false,
+        updateDb,
         ...result,
+        dbRowsUpdated,
       });
       if (result.errors.length > 0) {
         process.exit(1);
@@ -215,7 +231,7 @@ program
     console.log(`  Index files updated: ${result.indexFilesUpdated}`);
     console.log(`  Claude JSONL updated: ${result.jsonlFilesUpdated}`);
     console.log(`  Codex JSONL updated: ${result.codexFilesUpdated}`);
-    console.log(`  DB rows updated:     ${result.dbRowsUpdated}`);
+    console.log(`  DB rows updated:     ${dbRowsUpdated}`);
 
     if (result.errors.length > 0) {
       console.log(`\n  Errors (${result.errors.length}):`);

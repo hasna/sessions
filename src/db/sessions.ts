@@ -1,6 +1,7 @@
 import { getDatabase } from "./database.js";
 import { getMachineName } from "../lib/machine.js";
 import { appendProjectFilter } from "../lib/project-filter.js";
+import { encodePath } from "../lib/paths.js";
 import {
   SessionNotFoundError,
   type Session,
@@ -312,6 +313,38 @@ export function deleteSession(id: string): void {
   db.prepare("DELETE FROM tool_calls WHERE session_id = ?").run(id);
   db.prepare("DELETE FROM messages WHERE session_id = ?").run(id);
   db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+}
+
+export interface RelocateDbResult {
+  /** Number of `sessions` rows whose project_path was rewritten. */
+  rowsUpdated: number;
+}
+
+/**
+ * Rewrite session paths after a project directory move (old -> new).
+ * Updates `sessions.project_path`, `sessions.source_path`, and the
+ * path-encoded `ingestion_state.file_path`. This is the local (SQLite)
+ * implementation behind the Store's `relocatePaths` — the ONLY seam a
+ * relocate command uses to touch the index (no `new Database(...)`).
+ */
+export function relocatePathsInDb(oldPath: string, newPath: string): RelocateDbResult {
+  const db = getDatabase();
+
+  const sessionResult = db
+    .prepare(
+      "UPDATE sessions SET project_path = ? || substr(project_path, ?) WHERE project_path LIKE ? || '%'",
+    )
+    .run(newPath, oldPath.length + 1, oldPath);
+
+  db.prepare(
+    "UPDATE sessions SET source_path = replace(source_path, ?, ?) WHERE source_path LIKE ? || '%'",
+  ).run(oldPath, newPath, oldPath);
+
+  db.prepare(
+    "UPDATE ingestion_state SET file_path = replace(file_path, ?, ?) WHERE file_path LIKE ? || '%'",
+  ).run(encodePath(oldPath), encodePath(newPath), encodePath(oldPath));
+
+  return { rowsUpdated: Number((sessionResult as { changes?: number }).changes ?? 0) };
 }
 
 const INSERT_MESSAGE_SQL = `INSERT INTO messages (

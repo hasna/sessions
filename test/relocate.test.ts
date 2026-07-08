@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "fs";
 import { join } from "path";
-import { Database } from "bun:sqlite";
 import { relocate } from "../src/lib/relocate";
+import { resolveSessionStore } from "../src/db/session-store";
+import { getDatabase, resetDatabase } from "../src/db/database";
 
 const TEST_DIR = join(import.meta.dir, ".test-relocate");
 const PROJECTS_DIR = join(TEST_DIR, "projects");
@@ -52,6 +53,7 @@ function setup() {
 }
 
 function cleanup() {
+  resetDatabase();
   rmSync(TEST_DIR, { recursive: true, force: true });
   delete process.env.CODEX_PATH;
   delete process.env.HASNA_SESSIONS_DB_PATH;
@@ -87,7 +89,6 @@ describe("relocate", () => {
 
     const result = relocate("/Users/test/old", "/Users/test/new", {
       dryRun: false,
-      updateDb: false,
     });
 
     process.env.CLAUDE_PATH = origClaude;
@@ -107,7 +108,6 @@ describe("relocate", () => {
 
     const result = relocate("/Users/test/old", "/Users/test/new", {
       dryRun: true,
-      updateDb: false,
     });
 
     process.env.CLAUDE_PATH = origEnv;
@@ -122,54 +122,34 @@ describe("relocate", () => {
     ).toBe(false);
   });
 
-  it("dry-run does not modify the sessions database", () => {
+  it("relocate() (filesystem) never writes the session index DB directly", () => {
+    // The DB half of a relocate is owned by the Store, not relocate() — proving
+    // relocate no longer opens `new Database(...)` behind the Store's back.
     const origClaude = process.env.CLAUDE_PATH;
     const origDbPath = process.env.HASNA_SESSIONS_DB_PATH;
     process.env.CLAUDE_PATH = TEST_DIR;
     process.env.HASNA_SESSIONS_DB_PATH = join(TEST_DIR, "sessions.db");
+    resetDatabase();
 
-    const db = new Database(process.env.HASNA_SESSIONS_DB_PATH);
-    db.exec(`
-      CREATE TABLE sessions (
-        id TEXT PRIMARY KEY,
-        source TEXT,
-        source_id TEXT,
-        project_path TEXT,
-        source_path TEXT
-      );
-      CREATE TABLE ingestion_state (
-        source TEXT,
-        file_path TEXT,
-        PRIMARY KEY (source, file_path)
-      );
-    `);
-    db.prepare("INSERT INTO sessions (id, source, source_id, project_path, source_path) VALUES (?, ?, ?, ?, ?)").run(
+    const db = getDatabase();
+    db.prepare(
+      "INSERT INTO sessions (id, source, source_id, project_path, source_path) VALUES (?, ?, ?, ?, ?)",
+    ).run(
       "session-1",
       "claude",
       "abc-123",
       "/Users/test/old/project",
-      "/Users/test/old/project/session.jsonl"
+      "/Users/test/old/project/session.jsonl",
     );
-    db.prepare("INSERT INTO ingestion_state (source, file_path) VALUES (?, ?)").run(
-      "claude",
-      "-Users-test-old-project/abc-123.jsonl"
-    );
-    db.close();
 
-    const result = relocate("/Users/test/old", "/Users/test/new", {
-      dryRun: true,
-      updateDb: true,
-    });
+    // Full (non-dry-run) relocate. It must NOT change any DB row.
+    relocate("/Users/test/old", "/Users/test/new", { dryRun: false });
 
-    const after = new Database(process.env.HASNA_SESSIONS_DB_PATH);
-    const session = after
-      .query("SELECT project_path, source_path FROM sessions WHERE id = ?")
+    const session = getDatabase()
+      .prepare("SELECT project_path, source_path FROM sessions WHERE id = ?")
       .get("session-1") as { project_path: string; source_path: string };
-    const state = after
-      .query("SELECT file_path FROM ingestion_state WHERE source = ?")
-      .get("claude") as { file_path: string };
-    after.close();
 
+    resetDatabase();
     process.env.CLAUDE_PATH = origClaude;
     if (origDbPath === undefined) {
       delete process.env.HASNA_SESSIONS_DB_PATH;
@@ -177,10 +157,56 @@ describe("relocate", () => {
       process.env.HASNA_SESSIONS_DB_PATH = origDbPath;
     }
 
-    expect(result.dbRowsUpdated).toBe(0);
     expect(session.project_path).toBe("/Users/test/old/project");
     expect(session.source_path).toBe("/Users/test/old/project/session.jsonl");
-    expect(state.file_path).toBe("-Users-test-old-project/abc-123.jsonl");
+  });
+
+  it("Store.relocatePaths rewrites project_path/source_path/ingestion_state (local mode)", async () => {
+    const origDbPath = process.env.HASNA_SESSIONS_DB_PATH;
+    const origApiUrl = process.env.HASNA_SESSIONS_API_URL;
+    const origApiKey = process.env.HASNA_SESSIONS_API_KEY;
+    // Force local mode: unset the cloud flip envs.
+    delete process.env.HASNA_SESSIONS_API_URL;
+    delete process.env.HASNA_SESSIONS_API_KEY;
+    process.env.HASNA_SESSIONS_DB_PATH = join(TEST_DIR, "sessions.db");
+    resetDatabase();
+
+    const db = getDatabase();
+    db.prepare(
+      "INSERT INTO sessions (id, source, source_id, project_path, source_path) VALUES (?, ?, ?, ?, ?)",
+    ).run(
+      "session-1",
+      "claude",
+      "abc-123",
+      "/Users/test/old/project",
+      "/Users/test/old/project/session.jsonl",
+    );
+    db.prepare("INSERT INTO ingestion_state (source, file_path) VALUES (?, ?)").run(
+      "claude",
+      "-Users-test-old-project/abc-123.jsonl",
+    );
+
+    const store = resolveSessionStore();
+    expect(store.mode).toBe("local");
+    const res = await store.relocatePaths("/Users/test/old", "/Users/test/new");
+
+    const session = getDatabase()
+      .prepare("SELECT project_path, source_path FROM sessions WHERE id = ?")
+      .get("session-1") as { project_path: string; source_path: string };
+    const state = getDatabase()
+      .prepare("SELECT file_path FROM ingestion_state WHERE source = ?")
+      .get("claude") as { file_path: string };
+
+    resetDatabase();
+    if (origDbPath === undefined) delete process.env.HASNA_SESSIONS_DB_PATH;
+    else process.env.HASNA_SESSIONS_DB_PATH = origDbPath;
+    if (origApiUrl !== undefined) process.env.HASNA_SESSIONS_API_URL = origApiUrl;
+    if (origApiKey !== undefined) process.env.HASNA_SESSIONS_API_KEY = origApiKey;
+
+    expect(res.rowsUpdated).toBe(1);
+    expect(session.project_path).toBe("/Users/test/new/project");
+    expect(session.source_path).toBe("/Users/test/new/project/session.jsonl");
+    expect(state.file_path).toBe("-Users-test-new-project/abc-123.jsonl");
   });
 
   it("renames directory and updates files", () => {
@@ -189,7 +215,6 @@ describe("relocate", () => {
 
     const result = relocate("/Users/test/old", "/Users/test/new", {
       dryRun: false,
-      updateDb: false,
     });
 
     process.env.CLAUDE_PATH = origEnv;
@@ -230,9 +255,7 @@ describe("relocate", () => {
     const origEnv = process.env.CLAUDE_PATH;
     process.env.CLAUDE_PATH = TEST_DIR;
 
-    const result = relocate("/Users/nonexistent", "/Users/other", {
-      updateDb: false,
-    });
+    const result = relocate("/Users/nonexistent", "/Users/other", {});
 
     process.env.CLAUDE_PATH = origEnv;
 
