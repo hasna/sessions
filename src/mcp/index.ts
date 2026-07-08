@@ -8,17 +8,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { getPackageInfo, getPackageVersion } from "../lib/package.js";
-import { search, searchToolCalls } from "../lib/search.js";
-import {
-  getSessionByPrefix,
-  getMessages,
-  getToolCalls,
-} from "../db/sessions.js";
 import { ingestAll, ingestSource } from "../lib/ingest/index.js";
-import { embedSessions } from "../lib/embeddings.js";
-import { semanticSearch, hybridSearch } from "../lib/vector-search.js";
-import { listEntities, relatedSessions, sessionGraph } from "../lib/graph.js";
-import { recallSessions } from "../lib/recall.js";
 import {
   buildClaudeResumeCommand,
   findSession,
@@ -135,9 +125,15 @@ server.registerResource(
   },
   async (uri, variables) => {
     const id = String(variables.id ?? "");
-    const session = getSessionByPrefix(id);
+    const store = sessionStore();
+    const session = await store.get(id);
     if (!session) return jsonResource(uri, { ok: false, error: `session not found: ${id}` });
-    return jsonResource(uri, { ok: true, session, messages: getMessages(session.id), tool_calls: getToolCalls(session.id) });
+    return jsonResource(uri, {
+      ok: true,
+      session,
+      messages: await store.messages(session.id),
+      tool_calls: await store.toolCalls(session.id),
+    });
   }
 );
 
@@ -230,11 +226,7 @@ server.tool(
   },
   async (a: { query: string; source?: string; project_path?: string; machine?: string; limit?: number }) => {
     try {
-      const store = sessionStore();
-      if (store.mode === "cloud") {
-        return ok(await store.search(a.query, { source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
-      }
-      return ok(search(a.query, { source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
+      return ok(await sessionStore().searchContent(a.query, { source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
     } catch (e) {
       return fail(e);
     }
@@ -251,7 +243,7 @@ server.tool(
   },
   async (a: { query: string; source?: string; limit?: number }) => {
     try {
-      return ok(searchToolCalls(a.query, { source: a.source, limit: a.limit }));
+      return ok(await sessionStore().searchToolCalls(a.query, { source: a.source, limit: a.limit }));
     } catch (e) {
       return fail(e);
     }
@@ -271,7 +263,7 @@ server.tool(
   },
   async (a: { query: string; source?: string; project_path?: string; machine?: string; limit?: number; semantic?: boolean }) => {
     try {
-      return ok(await recallSessions(a.query, {
+      return ok(await sessionStore().recall(a.query, {
         source: a.source,
         project_path: a.project_path,
         machine: a.machine,
@@ -338,17 +330,19 @@ server.tool(
   async (a: { id: string; message_limit?: number }) => {
     try {
       const store = sessionStore();
-      // Session metadata always routes through the Store (LocalStore | ApiStore).
+      // Everything routes through the Store (LocalStore | ApiStore). The cloud
+      // /v1 registry stores session metadata only, so message/tool transcripts
+      // come back empty in self_hosted mode (they live on the producing machine).
       const session = await store.get(a.id);
       if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
-      if (store.mode !== "local") {
-        // The cloud /v1 registry stores session metadata only; raw message/tool
-        // transcripts stay on the machine that produced them (local index).
-        return ok({ session, messages: [], tool_calls: [], note: "self_hosted registry: metadata only; message/tool transcripts live on the producing machine's local index" });
-      }
-      let messages = getMessages(session.id);
+      let messages = await store.messages(session.id);
       if (a.message_limit) messages = messages.slice(0, a.message_limit);
-      return ok({ session, messages, tool_calls: getToolCalls(session.id) });
+      const tool_calls = await store.toolCalls(session.id);
+      const note =
+        store.mode === "local"
+          ? undefined
+          : "self_hosted registry: metadata only; message/tool transcripts live on the producing machine's local index";
+      return ok(note ? { session, messages, tool_calls, note } : { session, messages, tool_calls });
     } catch (e) {
       return fail(e);
     }
@@ -401,7 +395,8 @@ server.tool(
   async (a: { query: string; hybrid?: boolean; source?: string; project_path?: string; limit?: number }) => {
     try {
       const o = { source: a.source, project_path: a.project_path, limit: a.limit };
-      return ok(a.hybrid ? await hybridSearch(a.query, o) : await semanticSearch(a.query, o));
+      const store = sessionStore();
+      return ok(a.hybrid ? await store.hybridSearch(a.query, o) : await store.semanticSearch(a.query, o));
     } catch (e) {
       return fail(e);
     }
@@ -414,7 +409,7 @@ server.tool(
   { limit: z.number().optional().describe("Max messages to embed this run (default 200)") },
   async (a: { limit?: number }) => {
     try {
-      return ok(await embedSessions({ limit: a.limit }));
+      return ok(await sessionStore().embed({ limit: a.limit }));
     } catch (e) {
       return fail(e);
     }
@@ -439,9 +434,10 @@ server.tool(
     limit?: number;
   }) => {
     try {
-      if (a.session_id) return ok(sessionGraph(a.session_id));
-      if (a.related_type && a.related_name) return ok(relatedSessions(a.related_type, a.related_name, a.limit ?? 50));
-      return ok(listEntities(a.type));
+      const store = sessionStore();
+      if (a.session_id) return ok(await store.graphSession(a.session_id));
+      if (a.related_type && a.related_name) return ok(await store.graphRelated(a.related_type, a.related_name, a.limit ?? 50));
+      return ok(await store.graphEntities(a.type));
     } catch (e) {
       return fail(e);
     }

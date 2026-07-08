@@ -1064,9 +1064,9 @@ program
   .description("Merge another machine's sessions database into this one (preserves machine tags) — RDS-free sync")
   .option("--json", "Output as JSON")
   .action(async (path: string, opts: { json?: boolean }) => {
-    const { mergeFromDb } = await import("../db/merge.js");
+    const { resolveSessionStore } = await import("../db/session-store.js");
     try {
-      const r = mergeFromDb(path);
+      const r = await resolveSessionStore().mergeFromDb(path);
       if (opts.json) return void printJson(r);
       console.log(`Merged from ${path}: +${r.sessions} sessions, +${r.messages} messages, +${r.tool_calls} tool calls, +${r.embeddings} embeddings`);
     } catch (e) {
@@ -1185,17 +1185,10 @@ program
       console.error(`Session not found (or ambiguous prefix): ${id}`);
       process.exit(1);
     }
-    // Message/tool-call bodies are only available from the local index; the
-    // cloud /v1 surface returns session metadata (no blobs).
-    type Message = import("../types/index.js").Message;
-    type ToolCall = import("../types/index.js").ToolCall;
-    let messages: Message[] = [];
-    let tools: ToolCall[] = [];
-    if (store.mode === "local") {
-      const { getMessages, getToolCalls } = await import("../db/sessions.js");
-      messages = getMessages(s.id);
-      tools = getToolCalls(s.id);
-    }
+    // Message/tool-call bodies come through the Store. The cloud /v1 surface
+    // returns session metadata only (no blobs), so these are empty in cloud mode.
+    const messages = await store.messages(s.id);
+    const tools = await store.toolCalls(s.id);
     const n = parsePositiveIntOption(opts.messages, 12, "--messages");
     const previewMessages = messages.slice(0, n);
     if (opts.json) return void printJson({ session: s, messages: previewMessages, tools });
@@ -1291,19 +1284,18 @@ program
   .option("-l, --limit <n>", "Max results", "50")
   .option("--json", "Output as JSON")
   .action(async (opts: { type?: string; related?: string; session?: string; limit?: string; json?: boolean }) => {
-    const { listEntities, relatedSessions, sessionGraph } = await import("../lib/graph.js");
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const store = resolveSessionStore();
     type EntityType = "project" | "tool" | "model" | "provider" | "repo";
     const TYPES = ["project", "tool", "model", "provider", "repo"];
     const limit = parseInt(opts.limit ?? "50", 10) || 50;
 
     if (opts.session) {
-      const { getSessionByPrefix } = await import("../db/sessions.js");
-      const s = getSessionByPrefix(opts.session);
-      if (!s) {
+      const g = await store.graphSession(opts.session);
+      if (!g) {
         console.error(`Session not found: ${opts.session}`);
         process.exit(1);
       }
-      const g = sessionGraph(s.id);
       if (opts.json) return void printJson(g);
       console.log(`project: ${g?.project ?? "?"}`);
       console.log(`model:   ${g?.model ?? "?"} (${g?.provider ?? "?"})`);
@@ -1320,7 +1312,7 @@ program
         console.error("--related must be <type>:<name>, e.g. tool:Bash (type: project|tool|model|provider|repo)");
         process.exit(1);
       }
-      const sessions = relatedSessions(type as EntityType, name, limit);
+      const sessions = await store.graphRelated(type as EntityType, name, limit);
       if (opts.json) return void printJson(sessions);
       for (const s of sessions) {
         console.log(`${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(20)} ${s.title ?? "(untitled)"}  ${s.session_id.slice(0, 8)}`);
@@ -1332,7 +1324,7 @@ program
       console.error(`Unknown type '${opts.type}'. Use: ${TYPES.join(", ")}`);
       process.exit(1);
     }
-    const entities = listEntities(opts.type as EntityType | undefined);
+    const entities = await store.graphEntities(opts.type as EntityType | undefined);
     if (opts.json) return void printJson(entities);
     let lastType = "";
     for (const e of entities.slice(0, opts.type ? entities.length : 100)) {
@@ -1350,9 +1342,9 @@ program
   .option("-l, --limit <n>", "Max messages to embed this run", "200")
   .option("--json", "Output as JSON")
   .action(async (opts: { limit?: string; json?: boolean }) => {
-    const { embedSessions } = await import("../lib/embeddings.js");
+    const { resolveSessionStore } = await import("../db/session-store.js");
     try {
-      const result = await embedSessions({ limit: parseInt(opts.limit ?? "200", 10) || 200 });
+      const result = await resolveSessionStore().embed({ limit: parseInt(opts.limit ?? "200", 10) || 200 });
       if (opts.json) return void printJson(result);
       console.log(`Embedded ${result.chunksEmbedded} chunks across ${result.messagesProcessed} messages.`);
     } catch (err) {
@@ -1378,12 +1370,13 @@ program
       query: string,
       opts: { source?: string; project?: string; machine?: string; limit?: string; tools?: boolean; semantic?: boolean; hybrid?: boolean; json?: boolean }
     ) => {
-      const { search, searchToolCalls } = await import("../lib/search.js");
+      const { resolveSessionStore } = await import("../db/session-store.js");
+      const store = resolveSessionStore();
       const limit = parsePositiveIntOption(opts.limit, 20, "--limit");
       const o = { limit, source: opts.source, project_path: opts.project, machine: opts.machine };
 
       if (opts.tools) {
-        const hits = searchToolCalls(query, o);
+        const hits = await store.searchToolCalls(query, o);
         if (opts.json) return void printJson(hits);
         if (hits.length === 0) return void console.log("No matching tool calls.");
         for (const h of hits) {
@@ -1395,15 +1388,14 @@ program
 
       let hits;
       if (opts.semantic || opts.hybrid) {
-        const { semanticSearch, hybridSearch } = await import("../lib/vector-search.js");
         try {
-          hits = opts.hybrid ? await hybridSearch(query, o) : await semanticSearch(query, o);
+          hits = opts.hybrid ? await store.hybridSearch(query, o) : await store.semanticSearch(query, o);
         } catch (err) {
           console.error(`Semantic search failed (is OPENAI_API_KEY set and have you run 'sessions embed'?): ${(err as Error).message}`);
           process.exit(1);
         }
       } else {
-        hits = search(query, o);
+        hits = await store.searchContent(query, o);
       }
       if (opts.json) return void printJson(hits);
       if (hits.length === 0) return void console.log("No matching sessions.");
@@ -1432,8 +1424,8 @@ program
       opts: { source?: string; project?: string; machine?: string; limit?: string; semantic?: boolean; json?: boolean }
     ) => {
       const limit = parsePositiveIntOption(opts.limit, 10, "--limit");
-      const { recallSessions } = await import("../lib/recall.js");
-      const response = await recallSessions(query, {
+      const { resolveSessionStore } = await import("../db/session-store.js");
+      const response = await resolveSessionStore().recall(query, {
         source: opts.source,
         project_path: opts.project,
         machine: opts.machine,

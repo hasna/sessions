@@ -35,6 +35,9 @@ const LEGACY_ENDPOINTS = [
   "/v1/sessions",
   "/v1/sessions/:id",
   "/v1/search?q=…",
+  "/v1/search/content?q=…",
+  "/v1/search/tools?q=…",
+  "/v1/graph?type=…|related=type:name|session=id",
   "/v1/recent",
   "/v1/machines",
   "/v1/stats",
@@ -124,6 +127,50 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
     if (!q) return json({ ok: false, error: "missing query param 'q'" }, 400);
     const results = await source.search(q, listOptionsFromUrl(url, 20));
     return json({ ok: true, query: q, count: results.length, results });
+  }
+
+  // Full content search (message bodies + metadata), deduped per session.
+  if (path === "/v1/search/content") {
+    const q = url.searchParams.get("q");
+    if (!q) return json({ ok: false, error: "missing query param 'q'" }, 400);
+    const results = await source.searchContent(q, listOptionsFromUrl(url, 20));
+    return json({ ok: true, query: q, count: results.length, results });
+  }
+
+  // Tool-call search (name / input / output).
+  if (path === "/v1/search/tools") {
+    const q = url.searchParams.get("q");
+    if (!q) return json({ ok: false, error: "missing query param 'q'" }, 400);
+    const results = await source.searchToolCalls(q, listOptionsFromUrl(url, 20));
+    return json({ ok: true, query: q, count: results.length, results });
+  }
+
+  // Knowledge graph: ?session=<id> | ?related=<type:name>[&limit] | [?type=<type>]
+  if (path === "/v1/graph") {
+    const TYPES = ["project", "tool", "model", "provider", "repo"];
+    const sessionId = url.searchParams.get("session");
+    if (sessionId) {
+      const graph = await source.graphSession(sessionId);
+      if (!graph) return json({ ok: false, error: `session not found: ${sessionId}` }, 404);
+      return json({ ok: true, graph });
+    }
+    const related = url.searchParams.get("related");
+    if (related) {
+      const idx = related.indexOf(":");
+      const type = idx >= 0 ? related.slice(0, idx) : "";
+      const name = idx >= 0 ? related.slice(idx + 1) : "";
+      if (!TYPES.includes(type) || !name) {
+        return json({ ok: false, error: "related must be <type>:<name> (type: project|tool|model|provider|repo)" }, 400);
+      }
+      const sessions = await source.graphRelated(type as never, name, intParam(url, "limit", 50));
+      return json({ ok: true, count: sessions.length, sessions });
+    }
+    const type = url.searchParams.get("type");
+    if (type && !TYPES.includes(type)) {
+      return json({ ok: false, error: `unknown type '${type}' (use: ${TYPES.join(", ")})` }, 400);
+    }
+    const entities = await source.graphEntities((type as never) ?? undefined);
+    return json({ ok: true, count: entities.length, entities });
   }
 
   if (path === "/v1/recent") {

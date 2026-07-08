@@ -6,6 +6,8 @@
 // shapes so the generated SDK/OpenAPI is one contract.
 
 import type { Machine, Session } from "../types/index.js";
+import type { SearchHit, ToolCallHit } from "../lib/search.js";
+import type { Entity, EntityType, RelatedSession, SessionGraph } from "../lib/graph.js";
 import { isCloudMode } from "../db/cloud/client.js";
 import * as cloud from "../db/cloud/store.js";
 
@@ -40,6 +42,11 @@ export interface DataSource {
   stats(): Promise<Stats>;
   create(input: cloud.UpsertSessionInput): Promise<Session>;
   remove(id: string): Promise<boolean>;
+  searchContent(query: string, opts: ListOptions): Promise<SearchHit[]>;
+  searchToolCalls(query: string, opts: ListOptions): Promise<ToolCallHit[]>;
+  graphEntities(type?: EntityType): Promise<Entity[]>;
+  graphRelated(type: EntityType, name: string, limit: number): Promise<RelatedSession[]>;
+  graphSession(idOrPrefix: string): Promise<SessionGraph | null>;
 }
 
 const cloudSource: DataSource = {
@@ -53,6 +60,12 @@ const cloudSource: DataSource = {
   stats: () => cloud.getStats(),
   create: (input) => cloud.upsertSession(input),
   remove: (id) => cloud.deleteSession(id),
+  searchContent: (query, opts) => cloud.searchContent(query, opts),
+  searchToolCalls: (query, opts) => cloud.searchToolCalls(query, opts),
+  graphEntities: (type) => cloud.graphEntities(type as cloud.CloudEntityType | undefined),
+  graphRelated: (type, name, limit) =>
+    cloud.graphRelated(type as cloud.CloudEntityType, name, limit),
+  graphSession: (idOrPrefix) => cloud.graphSession(idOrPrefix),
 };
 
 function localSource(): DataSource {
@@ -129,6 +142,29 @@ function localSource(): DataSource {
       }
       deleteSession(id);
       return true;
+    },
+    async searchContent(query, opts) {
+      const { search } = await import("../lib/search.js");
+      return search(query, opts);
+    },
+    async searchToolCalls(query, opts) {
+      const { searchToolCalls } = await import("../lib/search.js");
+      return searchToolCalls(query, opts);
+    },
+    async graphEntities(type) {
+      const { listEntities } = await import("../lib/graph.js");
+      return listEntities(type);
+    },
+    async graphRelated(type, name, limit) {
+      const { relatedSessions } = await import("../lib/graph.js");
+      return relatedSessions(type, name, limit);
+    },
+    async graphSession(idOrPrefix) {
+      const { sessionGraph } = await import("../lib/graph.js");
+      const { getSessionByPrefix } = await import("../db/sessions.js");
+      const session = getSessionByPrefix(idOrPrefix);
+      if (!session) return null;
+      return sessionGraph(session.id);
     },
   };
 }
