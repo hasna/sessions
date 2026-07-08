@@ -63,16 +63,16 @@ describe("entrypoint help and version", () => {
     expect(stdout).toContain("list-indexed");
     expect(stdout).toContain("indexed-list");
     expect(stdout).toContain("events");
-    expect(stdout).toContain("webhooks");
+    expect(stdout).toContain("channels");
   });
 
-  it("prints CLI help with shared events and webhooks commands", () => {
+  it("prints CLI help with shared events and channels commands", () => {
     const result = runBun(["run", "src/cli/index.tsx", "--help"]);
     const output = Buffer.from(result.stdout).toString("utf-8");
 
     expect(result.exitCode).toBe(0);
     expect(output).toContain("events");
-    expect(output).toContain("webhooks");
+    expect(output).toContain("channels");
   });
 
   it("prints watch-ingest help with daemon controls", () => {

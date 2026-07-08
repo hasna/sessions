@@ -35,7 +35,6 @@ import {
   decodePath,
   encodePath,
   findMatchingProjectDirs,
-  resolveProjectPath,
 } from "../lib/paths.js";
 import { getPackageVersion } from "../lib/package.js";
 import type { Session } from "../types/index.js";
@@ -972,68 +971,51 @@ program
   .command("paths")
   .description("List all project paths with session counts")
   .option("--json", "Output as JSON")
-  .action((opts: any) => {
-    const projectsDir = getClaudeProjectsDir();
+  .action(async (opts: { json?: boolean }) => {
+    // Route through the Store so this is mode-aware: local mode reads the on-box
+    // index; self_hosted mode hits /v1/stats and reports the SHARED cloud
+    // registry's project paths. Never scan the local filesystem in cloud mode —
+    // that was the split-brain bug (byte-identical local output regardless of
+    // mode). The orphaned-path (`!`) marker is a local-filesystem concern and is
+    // only meaningful for on-box projects, so it is shown in local mode only.
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const store = resolveSessionStore();
+    const stats = await store.stats();
 
-    if (!existsSync(projectsDir)) {
-      console.error("Claude projects directory not found:", projectsDir);
-      process.exit(1);
-    }
-
-    const dirs = readdirSync(projectsDir);
-    const projects: Array<{
-      path: string;
-      encodedDir: string;
-      sessions: number;
-      exists: boolean;
-    }> = [];
-
-    for (const dir of dirs) {
-      const dirPath = join(projectsDir, dir);
-      try {
-        if (!statSync(dirPath).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-
-      const resolvedPath = resolveProjectPath(projectsDir, dir);
-      const files = readdirSync(dirPath);
-      const sessionCount = files.filter((f) => f.endsWith(".jsonl")).length;
-      const pathExists = existsSync(resolvedPath);
-
-      projects.push({
-        path: resolvedPath,
-        encodedDir: dir,
-        sessions: sessionCount,
-        exists: pathExists,
-      });
-    }
-
-    // Sort by session count descending
-    projects.sort((a, b) => b.sessions - a.sessions);
+    const projects = stats.projects
+      .map((p) => {
+        const path = p.project_path ?? p.project_name ?? "(unknown)";
+        const exists =
+          store.mode === "local" && p.project_path ? existsSync(p.project_path) : true;
+        return { path, sessions: p.session_count, exists };
+      })
+      .sort((a, b) => b.sessions - a.sessions);
 
     if (opts.json) {
       printJson(projects);
-    } else {
-      console.log("Claude Code Session Paths\n");
-      const maxPath = Math.max(60, ...projects.map((p) => p.path.length));
+      return;
+    }
 
-      for (const p of projects) {
-        const marker = p.exists ? " " : "!";
-        const countStr = String(p.sessions).padStart(4);
-        console.log(
-          `${marker} ${p.path.padEnd(maxPath)} ${countStr} sessions`
-        );
-      }
+    console.log(`Session Paths (${store.mode})\n`);
+    const maxPath = Math.max(60, ...projects.map((p) => p.path.length));
 
+    for (const p of projects) {
+      const marker = p.exists ? " " : "!";
+      const countStr = String(p.sessions).padStart(4);
+      console.log(`${marker} ${p.path.padEnd(maxPath)} ${countStr} sessions`);
+    }
+
+    if (store.mode === "local") {
       const orphaned = projects.filter((p) => !p.exists);
       if (orphaned.length > 0) {
         console.log(
           `\n! = path no longer exists (${orphaned.length} orphaned, use 'sessions relocate' to fix)`
         );
       }
-      console.log(`\nTotal: ${projects.length} projects, ${projects.reduce((s, p) => s + p.sessions, 0)} sessions`);
     }
+    console.log(
+      `\nTotal: ${projects.length} projects, ${projects.reduce((s, p) => s + p.sessions, 0)} sessions`
+    );
   });
 
 program
@@ -1582,4 +1564,12 @@ function addIngestCommand(name: string, description: string) {
 addIngestCommand("ingest", "Index AI coding sessions (claude, codex, gemini) into the searchable database");
 addIngestCommand("reindex", "Alias for ingest; refresh the searchable session index");
 
-program.parse();
+// Use parseAsync + a single top-level catch so async command actions that throw
+// (e.g. a cloud /v1 HTTP error, or an operation not served by the cloud API like
+// `recall` in self_hosted mode) surface a clean one-line message and a non-zero
+// exit — never an unhandled-rejection stack trace.
+program.parseAsync().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`Error: ${message}`);
+  process.exit(1);
+});

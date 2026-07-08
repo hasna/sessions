@@ -261,7 +261,7 @@ describe("CLI JSON output", () => {
     expect(payload.projectsImported).toBe(1);
   });
 
-  it("resolves paths from transcript cwd for hyphenated Claude project directories", () => {
+  it("lists indexed project paths with session counts (Store-routed, mode-aware)", () => {
     const projectDir = join(PROJECTS_DIR, "-Users-test-client-dashboard");
     mkdirSync(projectDir, { recursive: true });
     writeFileSync(
@@ -280,9 +280,15 @@ describe("CLI JSON output", () => {
       "utf-8"
     );
 
+    // `paths` now routes through the Store (the on-box index in local mode),
+    // so it reflects indexed sessions rather than a raw filesystem scan.
+    expect(runCli(["ingest", "--source", "claude", "--json"]).exitCode).toBe(0);
+
     const result = runCli(["paths", "--json"]);
     const payload = parseJsonOutput(result);
-    const project = payload.find((entry: { encodedDir: string }) => entry.encodedDir === "-Users-test-client-dashboard");
+    const project = payload.find(
+      (entry: { path: string }) => entry.path === "/Users/test/client-dashboard"
+    );
     expect(project).toMatchObject({
       path: "/Users/test/client-dashboard",
       sessions: 1,
