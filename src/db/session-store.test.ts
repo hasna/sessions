@@ -72,6 +72,34 @@ describe("cloud store routes to /v1 with bearer key", () => {
     expect(calls[0].body).toMatchObject({ source: "claude", source_id: "abc", title: "T" });
   });
 
+  test("importContent -> POST /v1/sessions/import with content idempotency key", async () => {
+    const { store, calls } = cloudStore((c) => ({
+      status: 201,
+      json: {
+        ok: true,
+        session: { id: "s1", source: "claude", source_id: "abc" },
+        imported: {
+          messages: ((c.body as { messages: unknown[] }).messages ?? []).length,
+          toolCalls: ((c.body as { toolCalls: unknown[] }).toolCalls ?? []).length,
+        },
+        backup: (c.body as { backup?: unknown }).backup ?? null,
+      },
+    }));
+    const result = await store.importContent({
+      session: { id: "s1", source: "claude", source_id: "abc", title: "T" },
+      messages: [{ id: "m1", session_id: "s1", role: "user", content: "hello" }],
+      toolCalls: [{ id: "t1", session_id: "s1", tool_name: "Bash", tool_input: "pwd" }],
+      backup: { artifact: "/tmp/pre-cloud-sync.db", created_at: "2026-07-09T10:00:00.000Z" },
+    });
+    expect(result.imported).toEqual({ messages: 1, toolCalls: 1 });
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toContain("/v1/sessions/import");
+    expect(calls[0].body).toMatchObject({
+      session: { source: "claude", source_id: "abc" },
+      backup: { artifact: "/tmp/pre-cloud-sync.db" },
+    });
+  });
+
   test("get -> 404 resolves to null", async () => {
     const { store } = cloudStore(() => ({ status: 404, json: { ok: false, error: "not found" } }));
     expect(await store.get("missing")).toBeNull();
@@ -115,5 +143,16 @@ describe("cloud store routes to /v1 with bearer key", () => {
     const m = await store.machines();
     expect(m).toHaveLength(1);
     expect(calls[0].url).toContain("/v1/machines");
+  });
+
+  test("messages/toolCalls -> /v1/sessions/:id content endpoints", async () => {
+    const { store, calls } = cloudStore((c) => {
+      if (c.url.includes("/messages")) return { json: { ok: true, messages: [{ id: "m1" }] } };
+      return { json: { ok: true, toolCalls: [{ id: "t1" }] } };
+    });
+    expect(await store.messages("s1")).toEqual([{ id: "m1" }] as never);
+    expect(await store.toolCalls("s1")).toEqual([{ id: "t1" }] as never);
+    expect(calls[0].url).toContain("/v1/sessions/s1/messages");
+    expect(calls[1].url).toContain("/v1/sessions/s1/tool-calls");
   });
 });

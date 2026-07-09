@@ -54,6 +54,88 @@ const machineSchema = {
   required: ["name"],
 } as const;
 
+const messageSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    session_id: { type: "string" },
+    source_id: { type: "string", nullable: true },
+    parent_message_id: { type: "string", nullable: true },
+    role: { type: "string", enum: ["user", "assistant", "system", "tool", "info", "thinking"] },
+    content: { type: "string", nullable: true },
+    content_preview: { type: "string", nullable: true },
+    model: { type: "string", nullable: true },
+    is_sidechain: { type: "boolean" },
+    sequence_num: { type: "integer", nullable: true },
+    input_tokens: { type: "integer" },
+    output_tokens: { type: "integer" },
+    cache_read_tokens: { type: "integer" },
+    cache_write_tokens: { type: "integer" },
+    thinking_tokens: { type: "integer" },
+    timestamp: { type: "string", nullable: true },
+    metadata: { type: "object", additionalProperties: true },
+  },
+  required: ["id", "session_id", "role"],
+} as const;
+
+const messageCreateSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    session_id: { type: "string" },
+    source_id: { type: "string", nullable: true },
+    parent_message_id: { type: "string", nullable: true },
+    role: { type: "string", enum: ["user", "assistant", "system", "tool", "info", "thinking"] },
+    content: { type: "string", nullable: true },
+    content_preview: { type: "string", nullable: true },
+    model: { type: "string", nullable: true },
+    is_sidechain: { type: "boolean" },
+    sequence_num: { type: "integer", nullable: true },
+    input_tokens: { type: "integer" },
+    output_tokens: { type: "integer" },
+    cache_read_tokens: { type: "integer" },
+    cache_write_tokens: { type: "integer" },
+    thinking_tokens: { type: "integer" },
+    timestamp: { type: "string", nullable: true },
+    metadata: { type: "object", additionalProperties: true },
+  },
+  required: ["role"],
+} as const;
+
+const toolCallSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    message_id: { type: "string", nullable: true },
+    session_id: { type: "string" },
+    tool_name: { type: "string" },
+    tool_input: { type: "string", nullable: true },
+    tool_output: { type: "string", nullable: true },
+    duration_ms: { type: "integer", nullable: true },
+    status: { type: "string", enum: ["success", "error", "timeout"], nullable: true },
+    timestamp: { type: "string", nullable: true },
+    metadata: { type: "object", additionalProperties: true },
+  },
+  required: ["id", "session_id", "tool_name"],
+} as const;
+
+const toolCallCreateSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    message_id: { type: "string", nullable: true },
+    session_id: { type: "string" },
+    tool_name: { type: "string" },
+    tool_input: { type: "string", nullable: true },
+    tool_output: { type: "string", nullable: true },
+    duration_ms: { type: "integer", nullable: true },
+    status: { type: "string", enum: ["success", "error", "timeout"], nullable: true },
+    timestamp: { type: "string", nullable: true },
+    metadata: { type: "object", additionalProperties: true },
+  },
+  required: ["tool_name"],
+} as const;
+
 export function buildOpenApiDocument(): Record<string, unknown> {
   const pkg = getPackageInfo();
   return {
@@ -89,12 +171,42 @@ export function buildOpenApiDocument(): Record<string, unknown> {
             cli_version: { type: "string", nullable: true },
             is_subagent: { type: "boolean" },
             parent_session_id: { type: "string", nullable: true },
+            total_input_tokens: { type: "integer" },
+            total_output_tokens: { type: "integer" },
+            total_cache_read_tokens: { type: "integer" },
+            total_cache_write_tokens: { type: "integer" },
+            total_thinking_tokens: { type: "integer" },
+            message_count: { type: "integer" },
+            tool_call_count: { type: "integer" },
             machine: { type: "string", nullable: true },
             started_at: { type: "string", nullable: true },
             ended_at: { type: "string", nullable: true },
+            duration_seconds: { type: "number", nullable: true },
+            source_modified_at: { type: "string", nullable: true },
             metadata: { type: "object", additionalProperties: true },
           },
           required: ["source", "source_id"],
+        },
+        Message: messageSchema,
+        MessageCreate: messageCreateSchema,
+        ToolCall: toolCallSchema,
+        ToolCallCreate: toolCallCreateSchema,
+        SessionContentImport: {
+          type: "object",
+          properties: {
+            session: { $ref: "#/components/schemas/SessionCreate" },
+            messages: { type: "array", items: { $ref: "#/components/schemas/MessageCreate" } },
+            toolCalls: { type: "array", items: { $ref: "#/components/schemas/ToolCallCreate" } },
+            backup: {
+              type: "object",
+              properties: {
+                artifact: { type: "string", nullable: true },
+                created_at: { type: "string", nullable: true },
+                note: { type: "string", nullable: true },
+              },
+            },
+          },
+          required: ["session", "messages", "toolCalls"],
         },
         HealthResponse: {
           type: "object",
@@ -109,6 +221,41 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           type: "object",
           properties: { ok: { type: "boolean" }, session: { $ref: "#/components/schemas/Session" } },
           required: ["ok", "session"],
+        },
+        SessionContentImportResponse: {
+          type: "object",
+          properties: {
+            ok: { type: "boolean" },
+            session: { $ref: "#/components/schemas/Session" },
+            imported: {
+              type: "object",
+              properties: {
+                messages: { type: "integer" },
+                toolCalls: { type: "integer" },
+              },
+              required: ["messages", "toolCalls"],
+            },
+            backup: { type: "object", nullable: true, additionalProperties: true },
+          },
+          required: ["ok", "session", "imported"],
+        },
+        MessageListResponse: {
+          type: "object",
+          properties: {
+            ok: { type: "boolean" },
+            count: { type: "integer" },
+            messages: { type: "array", items: { $ref: "#/components/schemas/Message" } },
+          },
+          required: ["ok", "messages"],
+        },
+        ToolCallListResponse: {
+          type: "object",
+          properties: {
+            ok: { type: "boolean" },
+            count: { type: "integer" },
+            toolCalls: { type: "array", items: { $ref: "#/components/schemas/ToolCall" } },
+          },
+          required: ["ok", "toolCalls"],
         },
         SessionListResponse: {
           type: "object",
@@ -245,6 +392,20 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           },
         },
       },
+      "/v1/sessions/import": {
+        post: {
+          operationId: "importSessionContent",
+          summary: "Idempotently import/upsert a session with messages and tool calls",
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/SessionContentImport" } } },
+          },
+          responses: {
+            "201": jsonRef("SessionContentImportResponse", "Imported"),
+            "400": jsonRef("ErrorResponse", "Invalid input"),
+          },
+        },
+      },
       "/v1/sessions/{id}": {
         get: {
           operationId: "getSession",
@@ -261,6 +422,50 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           parameters: [pathParam("id")],
           responses: {
             ...json200("DeleteResponse", "Deleted"),
+            "404": jsonRef("ErrorResponse", "Not found"),
+          },
+        },
+        patch: {
+          operationId: "renameSession",
+          summary: "Set a session title",
+          parameters: [pathParam("id")],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { title: { type: "string" } },
+                  required: ["title"],
+                },
+              },
+            },
+          },
+          responses: {
+            ...json200("SessionResponse", "Renamed"),
+            "400": jsonRef("ErrorResponse", "Invalid input"),
+            "404": jsonRef("ErrorResponse", "Not found"),
+          },
+        },
+      },
+      "/v1/sessions/{id}/messages": {
+        get: {
+          operationId: "listSessionMessages",
+          summary: "List messages for a session",
+          parameters: [pathParam("id")],
+          responses: {
+            ...json200("MessageListResponse", "Messages"),
+            "404": jsonRef("ErrorResponse", "Not found"),
+          },
+        },
+      },
+      "/v1/sessions/{id}/tool-calls": {
+        get: {
+          operationId: "listSessionToolCalls",
+          summary: "List tool calls for a session",
+          parameters: [pathParam("id")],
+          responses: {
+            ...json200("ToolCallListResponse", "Tool calls"),
             "404": jsonRef("ErrorResponse", "Not found"),
           },
         },

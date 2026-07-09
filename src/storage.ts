@@ -14,3 +14,7 @@ export {
   type StoreStats,
   type IngestStoreOptions,
 } from "./db/session-store.js";
+export type {
+  SessionContentBackup,
+  SessionContentImport,
+} from "./types/index.js";

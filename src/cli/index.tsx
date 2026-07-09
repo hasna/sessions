@@ -11,6 +11,7 @@ import { Command } from "commander";
 import { registerEventsCommands } from "@hasna/events/commander";
 import {
   existsSync,
+  copyFileSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -32,6 +33,8 @@ import {
 } from "../lib/transfer.js";
 import {
   getClaudeProjectsDir,
+  getSessionsDir,
+  getSessionsDbPath,
   decodePath,
   encodePath,
   findMatchingProjectDirs,
@@ -118,6 +121,26 @@ function parseOptionalNonNegativeNumberOption(raw: string | undefined, name: str
     process.exit(1);
   }
   return value;
+}
+
+function createPreCloudSyncBackup(): { artifact: string; created_at: string; note: string } | null {
+  const dbPath = getSessionsDbPath();
+  if (dbPath === ":memory:" || !existsSync(dbPath)) return null;
+  const createdAt = new Date().toISOString();
+  const stamp = createdAt.replace(/[:.]/g, "-");
+  const backupDir = join(getSessionsDir(), "backups");
+  mkdirSync(backupDir, { recursive: true });
+  const backupPath = join(backupDir, `pre-cloud-sync-${stamp}.db`);
+  copyFileSync(dbPath, backupPath);
+  for (const suffix of ["-wal", "-shm"]) {
+    const sidecar = `${dbPath}${suffix}`;
+    if (existsSync(sidecar)) copyFileSync(sidecar, `${backupPath}${suffix}`);
+  }
+  return {
+    artifact: backupPath,
+    created_at: createdAt,
+    note: "local sessions SQLite backup created before self_hosted content import push",
+  };
 }
 
 /** Format a table of Store sessions (LocalStore | ApiStore), never the registry. */
@@ -1037,7 +1060,7 @@ program
 
 program
   .command("sync")
-  .description("Ingest local sessions; in self_hosted (api) mode, push their metadata to the shared cloud registry so every machine sees one index")
+  .description("Ingest local sessions; in self_hosted (api) mode, push sessions/messages/tool calls to the shared cloud registry")
   .option("--no-ingest", "Skip the local ingest before pushing")
   .option("--json", "Output as JSON")
   .action(async (opts: { ingest?: boolean; json?: boolean }) => {
@@ -1059,45 +1082,74 @@ program
         // No DSN client sync exists any more. In local mode the on-box index IS
         // the store; there is nothing to push. Set HASNA_SESSIONS_API_URL +
         // HASNA_SESSIONS_API_KEY (self_hosted) to share one cloud index.
-        result.push = { pushed: 0, skipped: true, reason: "local mode; on-box index is authoritative (set HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY to share the cloud)" };
-        if (!opts.json) console.log("local mode; on-box index only (set HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY to share the cloud).");
+        result.push = { pushed: 0, skipped: true, reason: "local mode; on-box index is authoritative (configure the self_hosted Sessions API URL/key env vars to share the cloud)" };
+        if (!opts.json) console.log("local mode; on-box index only (configure the self_hosted Sessions API URL/key env vars to share the cloud).");
       } else {
-        // self_hosted/cloud: push every locally-indexed session's metadata to the
+        // self_hosted/cloud: push every locally-indexed session's content to the
         // shared /v1 registry via the ApiStore (idempotent upsert on source:source_id).
-        if (!opts.json) console.log("pushing local session metadata to the shared cloud registry...");
+        const backup = createPreCloudSyncBackup();
+        if (!opts.json && backup) console.log(`backup: ${backup.artifact}`);
+        if (!opts.json) console.log("pushing local session content to the shared cloud registry...");
         const localSessions = await local.list({ limit: 100000 });
         let pushed = 0;
+        let messages = 0;
+        let toolCalls = 0;
         const errors: string[] = [];
         for (const s of localSessions) {
           try {
-            await store.create({
-              id: s.id,
-              source: s.source,
-              source_id: s.source_id,
-              source_path: s.source_path,
-              title: s.title,
-              project_path: s.project_path,
-              project_name: s.project_name,
-              model: s.model,
-              model_provider: s.model_provider,
-              git_branch: s.git_branch,
-              git_sha: s.git_sha,
-              git_origin_url: s.git_origin_url,
-              cli_version: s.cli_version,
-              is_subagent: s.is_subagent,
-              parent_session_id: s.parent_session_id,
-              machine: s.machine,
-              started_at: s.started_at,
-              ended_at: s.ended_at,
-              metadata: s.metadata,
+            const sessionMessages = await local.messages(s.id);
+            const sessionToolCalls = await local.toolCalls(s.id);
+            if (s.message_count > 0 && sessionMessages.length === 0) {
+              throw new Error(`local index reports ${s.message_count} message(s), but none were loaded; refusing to replace cloud content`);
+            }
+            if (s.tool_call_count > 0 && sessionToolCalls.length === 0) {
+              throw new Error(`local index reports ${s.tool_call_count} tool call(s), but none were loaded; refusing to replace cloud content`);
+            }
+            const imported = await store.importContent({
+              session: {
+                id: s.id,
+                source: s.source,
+                source_id: s.source_id,
+                source_path: s.source_path,
+                title: s.title,
+                project_path: s.project_path,
+                project_name: s.project_name,
+                model: s.model,
+                model_provider: s.model_provider,
+                git_branch: s.git_branch,
+                git_sha: s.git_sha,
+                git_origin_url: s.git_origin_url,
+                cli_version: s.cli_version,
+                is_subagent: s.is_subagent,
+                parent_session_id: s.parent_session_id,
+                total_input_tokens: s.total_input_tokens,
+                total_output_tokens: s.total_output_tokens,
+                total_cache_read_tokens: s.total_cache_read_tokens,
+                total_cache_write_tokens: s.total_cache_write_tokens,
+                total_thinking_tokens: s.total_thinking_tokens,
+                message_count: s.message_count,
+                tool_call_count: s.tool_call_count,
+                machine: s.machine,
+                started_at: s.started_at,
+                ended_at: s.ended_at,
+                duration_seconds: s.duration_seconds,
+                source_modified_at: s.source_modified_at,
+                metadata: s.metadata,
+              },
+              messages: sessionMessages,
+              toolCalls: sessionToolCalls,
+              backup: backup ?? undefined,
             });
+            messages += imported.imported.messages;
+            toolCalls += imported.imported.toolCalls;
             pushed++;
           } catch (e) {
             errors.push(`${s.id}: ${(e as Error).message}`);
           }
         }
-        result.push = { pushed, total: localSessions.length, errors };
-        if (!opts.json) console.log(`push: ${pushed}/${localSessions.length} session(s)${errors.length ? ` — ${errors.length} error(s)` : ""}`);
+        result.backup = backup;
+        result.push = { pushed, total: localSessions.length, messages, toolCalls, errors };
+        if (!opts.json) console.log(`push: ${pushed}/${localSessions.length} session(s), ${messages} message(s), ${toolCalls} tool call(s)${errors.length ? ` — ${errors.length} error(s)` : ""}`);
         if (errors.length > 0) {
           if (opts.json) { printJson(result); process.exit(1); }
           for (const e of errors.slice(0, 10)) console.error(e);
@@ -1241,8 +1293,8 @@ program
       console.error(`Session not found (or ambiguous prefix): ${id}`);
       process.exit(1);
     }
-    // Message/tool-call bodies come through the Store. The cloud /v1 surface
-    // returns session metadata only (no blobs), so these are empty in cloud mode.
+    // Message/tool-call bodies come through the Store: local SQLite in local mode
+    // or the authenticated /v1 content endpoints in self_hosted mode.
     const messages = await store.messages(s.id);
     const tools = await store.toolCalls(s.id);
     const n = parsePositiveIntOption(opts.messages, 12, "--messages");

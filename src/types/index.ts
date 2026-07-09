@@ -169,6 +169,24 @@ export interface ParsedSession {
   toolCalls: ToolCallInsert[];
 }
 
+export interface SessionContentBackup {
+  /** Caller-created backup artifact path or URI, if available. */
+  artifact?: string | null;
+  /** ISO timestamp when the caller created or verified the backup. */
+  created_at?: string | null;
+  /** Human-readable backup note; do not include secrets. */
+  note?: string | null;
+}
+
+export interface SessionContentImport extends ParsedSession {
+  /**
+   * Explicit backup hook for callers that replace previously imported content.
+   * The server records only the hook metadata in the response; callers own the
+   * actual backup artifact lifecycle.
+   */
+  backup?: SessionContentBackup;
+}
+
 // ── Errors ─────────────────────────────────────────────────────────────
 
 export class SessionNotFoundError extends Error {

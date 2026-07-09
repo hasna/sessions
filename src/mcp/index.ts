@@ -331,9 +331,9 @@ server.tool(
   async (a: { id: string; message_limit?: number }) => {
     try {
       const store = sessionStore();
-      // Everything routes through the Store (LocalStore | ApiStore). The cloud
-      // /v1 registry stores session metadata only, so message/tool transcripts
-      // come back empty in self_hosted mode (they live on the producing machine).
+      // Everything routes through the Store (LocalStore | ApiStore). In
+      // self_hosted mode, message/tool transcripts come from authenticated /v1
+      // content endpoints populated by `sessions sync`.
       const session = await store.get(a.id);
       if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
       let messages = await store.messages(session.id);
@@ -342,7 +342,7 @@ server.tool(
       const note =
         store.mode === "local"
           ? undefined
-          : "self_hosted registry: metadata only; message/tool transcripts live on the producing machine's local index";
+          : "self_hosted registry: message/tool transcripts are available after a producing machine runs sessions sync";
       return ok(note ? { session, messages, tool_calls, note } : { session, messages, tool_calls });
     } catch (e) {
       return fail(e);

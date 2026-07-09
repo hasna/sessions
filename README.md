@@ -26,7 +26,7 @@ projects, and time.
 sessions ingest                # all providers
 sessions ingest --source codex # one provider
 sessions ingest --force        # re-index everything
-sessions sync --json           # ingest locally; remote sync is skipped unless storage is configured
+sessions sync --json           # ingest locally; pushes content when self_hosted API env is set
 
 # Full-text search across every session
 sessions search "kubernetes deploy"
@@ -138,20 +138,19 @@ Endpoints: `/search?q=`, `/recall?q=`, `/tool-calls?q=`, `/recent`, `/list`, `/s
 
 Storage sync is optional. By default sessions use local SQLite at `~/.hasna/sessions/`.
 The top-level `sessions sync` command refreshes the local index first and skips
-remote push/pull when no storage database is configured. Use the explicit
-`sessions storage ...` commands when you want remote PostgreSQL sync.
+remote push when the self_hosted API is not configured. With
+`HASNA_SESSIONS_MODE=self_hosted`, the Sessions API URL, and a Sessions API key,
+it creates a local SQLite backup under
+`~/.hasna/sessions/backups/` and idempotently imports sessions, messages, and
+tool calls into the shared `/v1` API.
 
 ```bash
-sessions storage status
-sessions storage push
-sessions storage pull
-sessions storage sync
+HASNA_SESSIONS_MODE=self_hosted \
+SESSIONS_API_URL=https://sessions.hasna.xyz \
+sessions sync --json
 ```
 
-Set `HASNA_SESSIONS_DATABASE_URL` or configure
-`~/.hasna/sessions/storage/config.json` to run in hybrid/remote mode with
-PostgreSQL. `SESSIONS_DATABASE_URL` is accepted as a short non-deprecated
-fallback for local development.
+The server owns the Postgres data plane. Clients do not connect to RDS directly.
 
 ## Adapter notes
 
@@ -167,7 +166,9 @@ versioned, API-key-authenticated `/v1` API:
 
 - `GET /health`, `GET /ready`, `GET /version` → `{ status, version, mode }`
 - `GET /openapi.json` → OpenAPI 3 document (the SDK is generated from it)
-- `/v1/sessions` (list/create), `/v1/sessions/:id` (get/delete),
+- `/v1/sessions` (list/create), `/v1/sessions/import` (content upsert),
+  `/v1/sessions/:id` (get/delete), `/v1/sessions/:id/messages`,
+  `/v1/sessions/:id/tool-calls`,
   `/v1/search`, `/v1/recent`, `/v1/machines`, `/v1/stats`
 
 Auth uses `@hasna/contracts` API keys (header `x-api-key` or

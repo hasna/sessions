@@ -21,7 +21,10 @@ const ENDPOINTS = [
   "/openapi.json",
   "/info",
   "/v1/sessions",
+  "/v1/sessions/import",
   "/v1/sessions/:id",
+  "/v1/sessions/:id/messages",
+  "/v1/sessions/:id/tool-calls",
   "/v1/relocate",
   "/v1/search?q=…",
   "/v1/search/content?q=…",
@@ -84,6 +87,34 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
     return json({ ok: false, error: "Method not allowed", allowedMethods: ["GET", "POST"] }, 405);
   }
 
+  // POST /v1/sessions/import — idempotently upsert a session with messages/tool calls.
+  if (path === "/v1/sessions/import") {
+    if (method !== "POST") {
+      return json({ ok: false, error: "Method not allowed", allowedMethods: ["POST"] }, 405);
+    }
+    let body: Record<string, unknown>;
+    try {
+      body = (await request.json()) as Record<string, unknown>;
+    } catch {
+      return json({ ok: false, error: "invalid JSON body" }, 400);
+    }
+    if (!body || typeof body !== "object") {
+      return json({ ok: false, error: "expected a JSON object body" }, 400);
+    }
+    if (!Array.isArray(body.messages)) {
+      return json({ ok: false, error: "messages must be an array" }, 400);
+    }
+    if (!Array.isArray(body.toolCalls)) {
+      return json({ ok: false, error: "toolCalls must be an array" }, 400);
+    }
+    try {
+      const result = await source.importContent(body as never);
+      return json({ ok: true, ...result }, 201);
+    } catch (err) {
+      return json({ ok: false, error: (err as Error).message }, 400);
+    }
+  }
+
   // POST /v1/relocate — rewrite session paths after a project dir move.
   if (path === "/v1/relocate") {
     if (method !== "POST") {
@@ -110,8 +141,31 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
 
   // /v1/sessions/:id (GET | DELETE)
   if (path.startsWith("/v1/sessions/")) {
-    const id = decodeURIComponent(path.slice("/v1/sessions/".length));
+    const rest = path.slice("/v1/sessions/".length);
+    const parts = rest.split("/");
+    const id = decodeURIComponent(parts[0] ?? "");
     if (!id) return json({ ok: false, error: "missing session id" }, 400);
+    if (parts.length === 2 && parts[1] === "messages") {
+      if (method !== "GET") {
+        return json({ ok: false, error: "Method not allowed", allowedMethods: ["GET"] }, 405);
+      }
+      const session = await source.get(id);
+      if (!session) return json({ ok: false, error: `session not found: ${id}` }, 404);
+      const messages = await source.messages(session.id);
+      return json({ ok: true, count: messages.length, messages });
+    }
+    if (parts.length === 2 && parts[1] === "tool-calls") {
+      if (method !== "GET") {
+        return json({ ok: false, error: "Method not allowed", allowedMethods: ["GET"] }, 405);
+      }
+      const session = await source.get(id);
+      if (!session) return json({ ok: false, error: `session not found: ${id}` }, 404);
+      const toolCalls = await source.toolCalls(session.id);
+      return json({ ok: true, count: toolCalls.length, toolCalls });
+    }
+    if (parts.length !== 1) {
+      return json({ ok: false, error: "Not found", endpoints: ENDPOINTS }, 404);
+    }
     if (method === "GET") {
       const session = await source.get(id);
       if (!session) return json({ ok: false, error: `session not found: ${id}` }, 404);

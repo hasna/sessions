@@ -1,15 +1,31 @@
 // @generated from OpenAPI by @hasna/contracts SDK generator — DO NOT EDIT.
-// Source: SessionsApi 0.11.39
+// Source: SessionsApi 0.12.5
 
 export interface Session { "id": string; "source": "claude" | "codex" | "gemini"; "source_id": string; "source_path"?: string | null; "title"?: string | null; "project_path"?: string | null; "project_name"?: string | null; "model"?: string | null; "model_provider"?: string | null; "git_branch"?: string | null; "git_sha"?: string | null; "git_origin_url"?: string | null; "cli_version"?: string | null; "is_subagent": boolean; "parent_session_id"?: string | null; "total_input_tokens"?: number; "total_output_tokens"?: number; "total_cache_read_tokens"?: number; "total_cache_write_tokens"?: number; "total_thinking_tokens"?: number; "message_count"?: number; "tool_call_count"?: number; "started_at"?: string | null; "ended_at"?: string | null; "duration_seconds"?: number | null; "ingested_at"?: string; "updated_at"?: string; "source_modified_at"?: string | null; "machine"?: string | null; "metadata"?: Record<string, unknown> }
 
 export interface Machine { "name": string; "hostname"?: string | null; "platform"?: string | null; "first_seen_at"?: string; "last_seen_at"?: string; "session_count"?: number }
 
-export interface SessionCreate { "id"?: string; "source": "claude" | "codex" | "gemini"; "source_id": string; "source_path"?: string | null; "title"?: string | null; "project_path"?: string | null; "project_name"?: string | null; "model"?: string | null; "model_provider"?: string | null; "git_branch"?: string | null; "git_sha"?: string | null; "git_origin_url"?: string | null; "cli_version"?: string | null; "is_subagent"?: boolean; "parent_session_id"?: string | null; "machine"?: string | null; "started_at"?: string | null; "ended_at"?: string | null; "metadata"?: Record<string, unknown> }
+export interface SessionCreate { "id"?: string; "source": "claude" | "codex" | "gemini"; "source_id": string; "source_path"?: string | null; "title"?: string | null; "project_path"?: string | null; "project_name"?: string | null; "model"?: string | null; "model_provider"?: string | null; "git_branch"?: string | null; "git_sha"?: string | null; "git_origin_url"?: string | null; "cli_version"?: string | null; "is_subagent"?: boolean; "parent_session_id"?: string | null; "total_input_tokens"?: number; "total_output_tokens"?: number; "total_cache_read_tokens"?: number; "total_cache_write_tokens"?: number; "total_thinking_tokens"?: number; "message_count"?: number; "tool_call_count"?: number; "machine"?: string | null; "started_at"?: string | null; "ended_at"?: string | null; "duration_seconds"?: number | null; "source_modified_at"?: string | null; "metadata"?: Record<string, unknown> }
+
+export interface Message { "id": string; "session_id": string; "source_id"?: string | null; "parent_message_id"?: string | null; "role": "user" | "assistant" | "system" | "tool" | "info" | "thinking"; "content"?: string | null; "content_preview"?: string | null; "model"?: string | null; "is_sidechain"?: boolean; "sequence_num"?: number | null; "input_tokens"?: number; "output_tokens"?: number; "cache_read_tokens"?: number; "cache_write_tokens"?: number; "thinking_tokens"?: number; "timestamp"?: string | null; "metadata"?: Record<string, unknown> }
+
+export interface MessageCreate { "id"?: string; "session_id"?: string; "source_id"?: string | null; "parent_message_id"?: string | null; "role": "user" | "assistant" | "system" | "tool" | "info" | "thinking"; "content"?: string | null; "content_preview"?: string | null; "model"?: string | null; "is_sidechain"?: boolean; "sequence_num"?: number | null; "input_tokens"?: number; "output_tokens"?: number; "cache_read_tokens"?: number; "cache_write_tokens"?: number; "thinking_tokens"?: number; "timestamp"?: string | null; "metadata"?: Record<string, unknown> }
+
+export interface ToolCall { "id": string; "message_id"?: string | null; "session_id": string; "tool_name": string; "tool_input"?: string | null; "tool_output"?: string | null; "duration_ms"?: number | null; "status"?: "success" | "error" | "timeout"; "timestamp"?: string | null; "metadata"?: Record<string, unknown> }
+
+export interface ToolCallCreate { "id"?: string; "message_id"?: string | null; "session_id"?: string; "tool_name": string; "tool_input"?: string | null; "tool_output"?: string | null; "duration_ms"?: number | null; "status"?: "success" | "error" | "timeout"; "timestamp"?: string | null; "metadata"?: Record<string, unknown> }
+
+export interface SessionContentImport { "session": SessionCreate; "messages": Array<MessageCreate>; "toolCalls": Array<ToolCallCreate>; "backup"?: { "artifact"?: string | null; "created_at"?: string | null; "note"?: string | null } }
 
 export interface HealthResponse { "status": string; "version": string; "mode": string }
 
 export interface SessionResponse { "ok": boolean; "session": Session }
+
+export interface SessionContentImportResponse { "ok": boolean; "session": Session; "imported": { "messages": number; "toolCalls": number }; "backup"?: Record<string, unknown> | null }
+
+export interface MessageListResponse { "ok": boolean; "count"?: number; "messages": Array<Message> }
+
+export interface ToolCallListResponse { "ok": boolean; "count"?: number; "toolCalls": Array<ToolCall> }
 
 export interface SessionListResponse { "ok": boolean; "count"?: number; "sessions": Array<Session> }
 
@@ -141,6 +157,15 @@ export class SessionsApi {
       });
     }
 
+    /** Idempotently import/upsert a session with messages and tool calls */
+    async importSessionContent(body: SessionContentImport, init?: RequestInit): Promise<SessionContentImportResponse> {
+      return this.request("POST", `/v1/sessions/import`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Get a session by id or id prefix */
     async getSession(id: string, init?: RequestInit): Promise<SessionResponse> {
       return this.request("GET", `/v1/sessions/${encodeURIComponent(String(id))}`, {
@@ -153,6 +178,33 @@ export class SessionsApi {
     /** Delete a session */
     async deleteSession(id: string, init?: RequestInit): Promise<DeleteResponse> {
       return this.request("DELETE", `/v1/sessions/${encodeURIComponent(String(id))}`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Set a session title */
+    async renameSession(id: string, body: { "title": string }, init?: RequestInit): Promise<SessionResponse> {
+      return this.request("PATCH", `/v1/sessions/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** List messages for a session */
+    async listSessionMessages(id: string, init?: RequestInit): Promise<MessageListResponse> {
+      return this.request("GET", `/v1/sessions/${encodeURIComponent(String(id))}/messages`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** List tool calls for a session */
+    async listSessionToolCalls(id: string, init?: RequestInit): Promise<ToolCallListResponse> {
+      return this.request("GET", `/v1/sessions/${encodeURIComponent(String(id))}/tool-calls`, {
         body: undefined,
         query: undefined,
         init,
