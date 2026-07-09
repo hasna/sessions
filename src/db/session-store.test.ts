@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { closeDatabase, resetDatabase } from "./database.js";
 import { resolveSessionStore } from "./session-store.js";
 
 const CLOUD_ENV = {
@@ -50,6 +51,49 @@ describe("resolveSessionStore flip", () => {
   });
 });
 
+describe("local Store importContent safety", () => {
+  beforeEach(() => {
+    process.env.SESSIONS_DB_PATH = ":memory:";
+    resetDatabase();
+  });
+
+  afterEach(() => {
+    closeDatabase();
+    delete process.env.SESSIONS_DB_PATH;
+  });
+
+  test("blocks shrinking existing child content unless explicit destructive intent is present", async () => {
+    const store = resolveSessionStore({});
+    await store.importContent({
+      session: { id: "safe-import-1", source: "claude", source_id: "safe-import-1" },
+      messages: [
+        { id: "m1", session_id: "safe-import-1", role: "user", content: "one" },
+        { id: "m2", session_id: "safe-import-1", role: "assistant", content: "two" },
+      ],
+      toolCalls: [{ id: "t1", session_id: "safe-import-1", tool_name: "Bash" }],
+    });
+
+    await expect(
+      store.importContent({
+        session: { id: "safe-import-1", source: "claude", source_id: "safe-import-1" },
+        messages: [],
+        toolCalls: [],
+      }),
+    ).rejects.toThrow("content import would shrink existing session content");
+
+    const replacement = await store.importContent({
+      session: { id: "safe-import-1", source: "claude", source_id: "safe-import-1" },
+      messages: [{ id: "m3", session_id: "safe-import-1", role: "user", content: "intentional replacement" }],
+      toolCalls: [],
+      destructive: {
+        allowContentShrink: true,
+        reason: "intentional test replacement",
+      },
+    });
+    expect(replacement.imported).toEqual({ messages: 1, toolCalls: 0 });
+  });
+});
+
 describe("cloud store routes to /v1 with bearer key", () => {
   test("list -> GET /v1/sessions with query + bearer, unwraps {sessions}", async () => {
     const { store, calls } = cloudStore(() => ({ json: { ok: true, sessions: [{ id: "s1" }] } }));
@@ -90,6 +134,7 @@ describe("cloud store routes to /v1 with bearer key", () => {
       messages: [{ id: "m1", session_id: "s1", role: "user", content: "hello" }],
       toolCalls: [{ id: "t1", session_id: "s1", tool_name: "Bash", tool_input: "pwd" }],
       backup: { artifact: "/tmp/pre-cloud-sync.db", created_at: "2026-07-09T10:00:00.000Z" },
+      destructive: { allowContentShrink: true, reason: "test route shape" },
     });
     expect(result.imported).toEqual({ messages: 1, toolCalls: 1 });
     expect(calls[0].method).toBe("POST");
@@ -97,6 +142,7 @@ describe("cloud store routes to /v1 with bearer key", () => {
     expect(calls[0].body).toMatchObject({
       session: { source: "claude", source_id: "abc" },
       backup: { artifact: "/tmp/pre-cloud-sync.db" },
+      destructive: { allowContentShrink: true, reason: "test route shape" },
     });
   });
 

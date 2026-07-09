@@ -205,6 +205,15 @@ export function buildOpenApiDocument(): Record<string, unknown> {
                 note: { type: "string", nullable: true },
               },
             },
+            destructive: {
+              type: "object",
+              description: "Required only when intentionally replacing existing content with fewer child rows.",
+              properties: {
+                allowContentShrink: { type: "boolean" },
+                reason: { type: "string" },
+              },
+              required: ["allowContentShrink", "reason"],
+            },
           },
           required: ["session", "messages", "toolCalls"],
         },

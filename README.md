@@ -177,9 +177,12 @@ sessions sync --dry-run --source claude --limit 100
 ```
 
 Live sync creates a local SQLite backup under `~/.hasna/sessions/backups/`
-before pushing content to `/v1/sessions/import`. Pass a hook if you want the
-command to abort unless your own backup step succeeds. Hook output and the raw
-hook command are suppressed so secrets are not echoed.
+before pushing content to `/v1/sessions/import`. The import API refuses, by
+default, to replace existing session content with fewer messages or tool calls;
+intentional pruning must include `destructive.allowContentShrink: true` and a
+non-empty reason in the request body. Pass a backup hook if you want the command
+to abort unless your own backup step succeeds. Hook output and the raw hook
+command are suppressed so secrets are not echoed.
 
 ```bash
 sessions sync --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups'

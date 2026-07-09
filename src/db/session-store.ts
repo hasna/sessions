@@ -23,6 +23,7 @@ import type { RecallOptions, RecallResponse } from "../lib/recall.js";
 import type { EmbedResult } from "../lib/embeddings.js";
 import type { MergeResult } from "./merge.js";
 import type { IngestResult } from "../lib/ingest/index.js";
+import { contentShrinkError } from "../lib/content-import-safety.js";
 
 export interface IngestStoreOptions {
   /** Ingest only this provider (claude | codex | gemini). */
@@ -328,7 +329,17 @@ function localStore(): SessionStore {
       return upsertSession(input as never);
     },
     async importContent(input) {
-      const { saveParsedSession } = await import("./sessions.js");
+      const { getMessages, getSessionByPrefix, getSessionBySource, getToolCalls, saveParsedSession } = await import("./sessions.js");
+      const existing =
+        getSessionBySource(input.session.source, input.session.source_id) ??
+        (input.session.id ? getSessionByPrefix(input.session.id) : null);
+      if (existing) {
+        const error = contentShrinkError(input, {
+          messages: getMessages(existing.id).length,
+          toolCalls: getToolCalls(existing.id).length,
+        });
+        if (error) throw new Error(error);
+      }
       const session = saveParsedSession(input);
       return {
         session,

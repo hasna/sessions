@@ -267,6 +267,18 @@ describe("/v1 authenticated API (local mode)", () => {
       expect(toolSearch.status).toBe(200);
       expect((await toolSearch.json()).count).toBe(1);
 
+      const unsafeEmptyReplacement = await fetch(`${base}/v1/sessions/import`, {
+        method: "POST",
+        headers: H,
+        body: JSON.stringify({
+          ...body,
+          messages: [],
+          toolCalls: [],
+        }),
+      });
+      expect(unsafeEmptyReplacement.status).toBe(400);
+      expect((await unsafeEmptyReplacement.json()).error).toContain("content import would shrink existing session content");
+
       const replacement = await fetch(`${base}/v1/sessions/import`, {
         method: "POST",
         headers: H,
@@ -274,6 +286,10 @@ describe("/v1 authenticated API (local mode)", () => {
           ...body,
           messages: [{ id: "msg-3", session_id: "content-sync-1", role: "user", content: "replacement", sequence_num: 0 }],
           toolCalls: [],
+          destructive: {
+            allowContentShrink: true,
+            reason: "test intentionally replaces imported child rows",
+          },
         }),
       });
       expect(replacement.status).toBe(201);

@@ -178,6 +178,16 @@ export interface SessionContentBackup {
   note?: string | null;
 }
 
+export interface SessionContentDestructiveIntent {
+  /**
+   * Allows an import payload to replace an existing session with fewer messages
+   * or tool calls. Requires a non-empty reason.
+   */
+  allowContentShrink: boolean;
+  /** Human-readable reason for intentionally shrinking synced content. */
+  reason: string;
+}
+
 export interface SessionContentImport extends ParsedSession {
   /**
    * Explicit backup hook for callers that replace previously imported content.
@@ -185,6 +195,11 @@ export interface SessionContentImport extends ParsedSession {
    * actual backup artifact lifecycle.
    */
   backup?: SessionContentBackup;
+  /**
+   * Explicit destructive intent for intentional content pruning. By default,
+   * import refuses to replace existing cloud content with fewer child rows.
+   */
+  destructive?: SessionContentDestructiveIntent;
 }
 
 // ── Errors ─────────────────────────────────────────────────────────────

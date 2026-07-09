@@ -18,6 +18,7 @@ import type {
 } from "../../types/index.js";
 import { getCloudClient } from "./client.js";
 import { encodePath } from "../../lib/paths.js";
+import { contentShrinkError } from "../../lib/content-import-safety.js";
 
 interface SessionRow {
   id: string;
@@ -544,6 +545,24 @@ export async function importSessionContent(
   }
 
   return client.transaction(async (tx) => {
+    const existing = await tx.get<{ id: string }>(
+      `SELECT id FROM sessions WHERE source = $1 AND source_id = $2`,
+      [input.session.source, input.session.source_id],
+    );
+    if (existing) {
+      const counts = await tx.get<{ messages: number; tool_calls: number }>(
+        `SELECT
+            (SELECT COUNT(*) FROM messages WHERE session_id = $1) AS messages,
+            (SELECT COUNT(*) FROM tool_calls WHERE session_id = $1) AS tool_calls`,
+        [existing.id],
+      );
+      const error = contentShrinkError(input, {
+        messages: num(counts?.messages),
+        toolCalls: num(counts?.tool_calls),
+      });
+      if (error) throw new Error(error);
+    }
+
     const session = await upsertSession(
       {
         ...input.session,

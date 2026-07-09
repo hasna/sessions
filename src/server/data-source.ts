@@ -10,6 +10,7 @@ import type { SearchHit, ToolCallHit } from "../lib/search.js";
 import type { Entity, EntityType, RelatedSession, SessionGraph } from "../lib/graph.js";
 import { isCloudMode } from "../db/cloud/client.js";
 import * as cloud from "../db/cloud/store.js";
+import { contentShrinkError } from "../lib/content-import-safety.js";
 
 export interface ListOptions {
   source?: string;
@@ -144,7 +145,17 @@ function localSource(): DataSource {
       return upsertSession(input as never);
     },
     async importContent(input) {
-      const { saveParsedSession } = await import("../db/sessions.js");
+      const { getMessages, getSessionByPrefix, getSessionBySource, getToolCalls, saveParsedSession } = await import("../db/sessions.js");
+      const existing =
+        getSessionBySource(input.session.source, input.session.source_id) ??
+        (input.session.id ? getSessionByPrefix(input.session.id) : null);
+      if (existing) {
+        const error = contentShrinkError(input, {
+          messages: getMessages(existing.id).length,
+          toolCalls: getToolCalls(existing.id).length,
+        });
+        if (error) throw new Error(error);
+      }
       const session = saveParsedSession(input);
       return {
         session,

@@ -15,7 +15,7 @@ export interface ToolCall { "id": string; "message_id"?: string | null; "session
 
 export interface ToolCallCreate { "id"?: string; "message_id"?: string | null; "session_id"?: string; "tool_name": string; "tool_input"?: string | null; "tool_output"?: string | null; "duration_ms"?: number | null; "status"?: "success" | "error" | "timeout"; "timestamp"?: string | null; "metadata"?: Record<string, unknown> }
 
-export interface SessionContentImport { "session": SessionCreate; "messages": Array<MessageCreate>; "toolCalls": Array<ToolCallCreate>; "backup"?: { "artifact"?: string | null; "created_at"?: string | null; "note"?: string | null } }
+export interface SessionContentImport { "session": SessionCreate; "messages": Array<MessageCreate>; "toolCalls": Array<ToolCallCreate>; "backup"?: { "artifact"?: string | null; "created_at"?: string | null; "note"?: string | null }; "destructive"?: { "allowContentShrink": boolean; "reason": string } }
 
 export interface HealthResponse { "status": string; "version": string; "mode": string }
 
