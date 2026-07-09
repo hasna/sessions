@@ -331,20 +331,23 @@ export function createExternalHandoffBundleV1(
 
 export function renderHandoffSkillWrapper(agent: string): string {
   const normalized = normalizeAgentName(agent);
-  if (normalized !== "claude" && normalized !== "codewith") {
-    throw new Error("handoff skill wrapper is currently available for claude and codewith");
+  const sessionHints: Record<string, string> = {
+    claude: "--source-session \"$CLAUDE_SESSION_ID\" --source-transcript \"$CLAUDE_TRANSCRIPT_PATH\"",
+    codewith: "--source-session \"$CODEWITH_SESSION_ID\"",
+    codex: "--source-session \"$CODEX_SESSION_ID\"",
+    opencode: "--source-session \"$OPENCODE_SESSION_ID\"",
+    cursor: "--source-session \"$CURSOR_SESSION_ID\"",
+  };
+  const sessionHint = sessionHints[normalized];
+  if (!sessionHint) {
+    throw new Error("handoff skill wrapper is currently available for claude, codewith, codex, opencode, and cursor");
   }
-
-  const sourceFlag = normalized === "claude" ? "claude" : "codewith";
-  const sessionHint =
-    normalized === "claude"
-      ? "--source-session \"$CLAUDE_SESSION_ID\" --source-transcript \"$CLAUDE_TRANSCRIPT_PATH\""
-      : "--source-session \"$CODEWITH_SESSION_ID\"";
+  const claudeUserInvocable = normalized === "claude" ? "user_invocable: true\n" : "";
 
   return `---
 name: handoff
-description: Invoke deterministic sessions handoff bundles for cross-agent transfers.
----
+description: "Invoke deterministic sessions handoff bundles for cross-agent transfers."
+${claudeUserInvocable}---
 
 # Handoff
 
@@ -353,7 +356,7 @@ When the user asks \`/handoff <agent-name>\`, call the deterministic Sessions CL
 Use this shape:
 
 \`\`\`bash
-sessions handoff <agent-name> --source-agent ${sourceFlag} ${sessionHint} --cwd "$PWD" --json
+sessions handoff <agent-name> --source-agent ${normalized} ${sessionHint} --cwd "$PWD" --json
 \`\`\`
 
 Rules:

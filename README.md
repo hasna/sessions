@@ -118,6 +118,9 @@ sessions handoff codewith --dry-run --json
 # Emit installable wrapper skill text named "handoff"; does not write global files
 sessions handoff --emit-skill claude
 sessions handoff --emit-skill codewith
+sessions handoff --emit-skill codex
+sessions handoff --emit-skill opencode
+sessions handoff --emit-skill cursor
 ```
 
 The v1 protocol is deliberately not a live tmux paste. It writes redacted

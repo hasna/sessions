@@ -471,7 +471,7 @@ program
   .option("--dry-run", "Build the bundle preview without writing or launching")
   .option("--print-command", "Print only the rendered target command")
   .option("--launch", "Launch the rendered target command; never exits/kills the source")
-  .option("--emit-skill <agent>", "Print installable wrapper skill text named 'handoff' for claude or codewith")
+  .option("--emit-skill <agent>", "Print installable wrapper skill text named 'handoff' for claude, codewith, codex, opencode, or cursor")
   .option("--json", "Output JSON")
   .action(async (target: string | undefined, opts: any) => {
     if (opts.emitSkill) {

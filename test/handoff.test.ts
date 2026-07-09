@@ -294,17 +294,32 @@ describe("ExternalHandoffBundleV1", () => {
     expect(result.launch?.prompt).toContain("source exit is not automatic");
   });
 
-  it("emits handoff wrapper skill text for Claude and Codewith", () => {
+  it("emits handoff wrapper skill text for supported agents", () => {
     const claude = renderHandoffSkillWrapper("claude");
     const codewith = renderHandoffSkillWrapper("codewith");
+    const codex = renderHandoffSkillWrapper("codex");
+    const opencode = renderHandoffSkillWrapper("opencode");
+    const cursor = renderHandoffSkillWrapper("cursor");
 
     expect(claude).toContain("name: handoff");
+    expect(claude).toContain('description: "Invoke deterministic sessions handoff bundles for cross-agent transfers."');
+    expect(claude).toContain("user_invocable: true");
     expect(claude).toContain("sessions handoff <agent-name>");
     expect(claude).toContain("--source-agent claude");
     expect(claude).toContain("--json");
     expect(claude).not.toContain("--print-command");
     expect(claude).toContain("launch.shell_command");
     expect(codewith).toContain("--source-agent codewith");
+    expect(codewith).not.toContain("user_invocable");
+    expect(codex).toContain("--source-agent codex");
+    expect(codex).toContain("$CODEX_SESSION_ID");
+    expect(codex).not.toContain("user_invocable");
+    expect(opencode).toContain("--source-agent opencode");
+    expect(opencode).toContain("$OPENCODE_SESSION_ID");
+    expect(opencode).not.toContain("user_invocable");
+    expect(cursor).toContain("--source-agent cursor");
+    expect(cursor).toContain("$CURSOR_SESSION_ID");
+    expect(cursor).not.toContain("user_invocable");
     expect(codewith).toContain("Source exit is not automatic");
   });
 });
