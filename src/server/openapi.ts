@@ -193,12 +193,14 @@ export function buildOpenApiDocument(): Record<string, unknown> {
         ToolCallCreate: toolCallCreateSchema,
         SessionContentImport: {
           type: "object",
+          description: "Imports a full session content snapshot into Postgres. Existing nonempty content cannot be replaced with fewer child rows unless destructive.allowContentShrink is true and reason is non-empty.",
           properties: {
             session: { $ref: "#/components/schemas/SessionCreate" },
             messages: { type: "array", items: { $ref: "#/components/schemas/MessageCreate" } },
             toolCalls: { type: "array", items: { $ref: "#/components/schemas/ToolCallCreate" } },
             backup: {
               type: "object",
+              description: "Caller-provided SQLite-safe backup/export metadata; raw secrets must not be included.",
               properties: {
                 artifact: { type: "string", nullable: true },
                 created_at: { type: "string", nullable: true },

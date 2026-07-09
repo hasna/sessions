@@ -145,14 +145,14 @@ Storage sync is optional. By default sessions use local SQLite at `~/.hasna/sess
 The top-level `sessions sync` command refreshes the local index first and skips
 remote push when the self_hosted API is not configured. With
 `HASNA_SESSIONS_MODE=self_hosted`, the Sessions API URL, and a Sessions API key,
-it creates a local SQLite backup under
-`~/.hasna/sessions/backups/` and idempotently imports sessions, messages, and
-tool calls into the shared `/v1` API.
+it idempotently imports sessions, messages, and tool calls into the shared `/v1`
+API. Live pushes require a successful `--backup-command`; raw SQLite file copies
+are not treated as a safe backup while the local DB may be active.
 
 ```bash
 HASNA_SESSIONS_MODE=self_hosted \
 HASNA_SESSIONS_API_URL=https://sessions.hasna.xyz \
-sessions sync --json
+sessions sync --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups' --json
 ```
 
 The server owns the Postgres data plane. Clients do not connect to RDS directly.
@@ -176,24 +176,27 @@ sessions sync --dry-run --json
 sessions sync --dry-run --source claude --limit 100
 ```
 
-Live sync creates a local SQLite backup under `~/.hasna/sessions/backups/`
-before pushing content to `/v1/sessions/import`. The import API refuses, by
-default, to replace existing session content with fewer messages or tool calls;
-intentional pruning must include `destructive.allowContentShrink: true` and a
-non-empty reason in the request body. Pass a backup hook if you want the command
-to abort unless your own backup step succeeds. Hook output and the raw hook
-command are suppressed so secrets are not echoed.
+Live sync requires a successful `--backup-command` before it pushes content to
+`/v1/sessions/import`. Use a SQLite-safe export such as `VACUUM INTO`, the
+SQLite backup API, or `sessions transfer export`; a raw file copy of an active
+SQLite DB is only a best-effort snapshot and is not accepted as the built-in
+safety gate. The import API refuses, by default, to replace existing session
+content with fewer messages or tool calls; intentional pruning must include
+`destructive.allowContentShrink: true` and a non-empty reason in the request
+body. Hook output and the raw hook command are suppressed so secrets are not
+echoed.
 
 ```bash
 sessions sync --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups'
 ```
 
 For daemon/watch mode, use bounded polling. Unchanged cycles are suppressed so a
-long-running worker does not spam logs, and `--max-iterations` is available for
-smoke tests or supervised runs.
+long-running worker does not spam logs. `sessions daemon` and
+`sessions sync --watch` default to `--max-iterations 60`; pass an explicit
+larger value for a longer supervised run.
 
 ```bash
-sessions daemon --interval 60
+sessions daemon --interval 60 --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups'
 sessions sync --watch --interval 60 --max-iterations 10
 ```
 

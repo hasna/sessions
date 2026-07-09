@@ -1,9 +1,8 @@
 // Cloud (Postgres) data access for open-sessions serve. PURE REMOTE (A1):
 // every function reads/writes the shared RDS directly through the vendored kit.
 //
-// Cloud holds session/message/tool metadata (large blobs stay local / go to S3
-// later), so search here is a metadata search (title/project) rather than the
-// SQLite FTS5 full-text index used in local mode.
+// Cloud holds sessions, messages, and tool calls in Postgres. Local SQLite is
+// only the on-box ingest/source index before a client pushes through /v1/import.
 
 import type { PoolQueryClient, TypedQueryClient } from "../../generated/storage-kit/index.js";
 import type {

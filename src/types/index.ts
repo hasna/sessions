@@ -190,9 +190,9 @@ export interface SessionContentDestructiveIntent {
 
 export interface SessionContentImport extends ParsedSession {
   /**
-   * Explicit backup hook for callers that replace previously imported content.
-   * The server records only the hook metadata in the response; callers own the
-   * actual backup artifact lifecycle.
+   * Caller-provided backup/export metadata. The server records only this
+   * metadata in the response; callers own the actual SQLite-safe backup
+   * artifact lifecycle.
    */
   backup?: SessionContentBackup;
   /**
