@@ -21,6 +21,14 @@ function runCli(args: string[]) {
       HASNA_SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       HASNA_SESSIONS_DIR: join(TEST_DIR, "sessions-home"),
+      HASNA_SESSIONS_API_URL: "",
+      HASNA_SESSIONS_API_KEY: "",
+      HASNA_SESSIONS_MODE: "local",
+      HASNA_SESSIONS_STORAGE_MODE: "local",
+      SESSIONS_API_URL: "",
+      SESSIONS_API_KEY: "",
+      SESSIONS_MODE: "local",
+      SESSIONS_STORAGE_MODE: "local",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -38,6 +46,14 @@ function runCliPipe(command: string) {
       HASNA_SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       HASNA_SESSIONS_DIR: join(TEST_DIR, "sessions-home"),
+      HASNA_SESSIONS_API_URL: "",
+      HASNA_SESSIONS_API_KEY: "",
+      HASNA_SESSIONS_MODE: "local",
+      HASNA_SESSIONS_STORAGE_MODE: "local",
+      SESSIONS_API_URL: "",
+      SESSIONS_API_KEY: "",
+      SESSIONS_MODE: "local",
+      SESSIONS_STORAGE_MODE: "local",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -336,7 +352,11 @@ describe("CLI JSON output", () => {
       const result = runCliPipe(command);
       expect(Buffer.from(result.stderr).toString("utf-8")).toBe("");
       expect(result.exitCode).toBe(0);
-      expect(Number(Buffer.from(result.stdout).toString("utf-8").trim())).toBeGreaterThan(0);
+      const count = Number(Buffer.from(result.stdout).toString("utf-8").trim());
+      if (!(count > 0)) {
+        throw new Error(`expected positive JSON count for ${command}, got ${count}`);
+      }
+      expect(count).toBeGreaterThan(0);
     }
   });
 

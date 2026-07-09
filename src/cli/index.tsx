@@ -32,6 +32,11 @@ import {
   formatBytes,
 } from "../lib/transfer.js";
 import {
+  createExternalHandoffBundleV1,
+  renderHandoffSkillWrapper,
+  type CodewithLaunchMode,
+} from "../lib/handoff.js";
+import {
   getClaudeProjectsDir,
   getSessionsDir,
   decodePath,
@@ -128,6 +133,11 @@ function preCloudSyncBackupRecord(): { artifact: null; created_at: string; note:
     created_at: new Date().toISOString(),
     note: "user-supplied backup command completed before self_hosted content import push",
   };
+}
+
+function collectRepeatableOption(value: string, previous: string[] = []): string[] {
+  previous.push(value);
+  return previous;
 }
 
 /** Format a table of Store sessions (LocalStore | ApiStore), never the registry. */
@@ -447,6 +457,140 @@ transfer
           "Run 'sessions ingest --force' to index imported sessions in the search DB."
         );
       }
+    }
+  });
+
+// ─── handoff ───────────────────────────────────────────────────────────────
+
+program
+  .command("handoff [target]")
+  .description("Create an ExternalHandoffBundleV1 for safe cross-agent handoff")
+  .option("--source-agent <agent>", "Source agent name, e.g. claude or codewith")
+  .option("--source-session <id>", "Source provider-native session id")
+  .option("--source-transcript <path>", "Source transcript JSONL path")
+  .option("--cwd <path>", "Source working directory (default: current cwd)")
+  .option("--idempotency-key <key>", "Stable key for repeatable bundle id/path")
+  .option("--context-summary <text>", "Redacted human summary to include in the bundle")
+  .option("--auth-ref <ref>", "Auth/profile reference by name only, e.g. codewith:live-codewith", collectRepeatableOption, [])
+  .option("--codewith-auth-profile <name>", "Add --auth-profile <name> to rendered Codewith commands")
+  .option("--codewith-mode <mode>", "Rendered Codewith launch mode: interactive or exec", "interactive")
+  .option("--verification <text>", "Verification note to include in the bundle", collectRepeatableOption, [])
+  .option("--blocker <text>", "Blocker note to include in the bundle", collectRepeatableOption, [])
+  .option("--max-turns <n>", "Maximum recent transcript turns to include", "8")
+  .option("--max-turn-chars <n>", "Maximum characters per recent turn", "1200")
+  .option("--dry-run", "Build the bundle preview without writing or launching")
+  .option("--print-command", "Print only the rendered target command")
+  .option("--launch", "Launch the rendered target command; never exits/kills the source")
+  .option("--emit-skill <agent>", "Print installable wrapper skill text named 'handoff' for claude, codewith, codex, opencode, or cursor")
+  .option("--json", "Output JSON")
+  .action(async (target: string | undefined, opts: any) => {
+    if (opts.emitSkill) {
+      try {
+        const content = renderHandoffSkillWrapper(opts.emitSkill);
+        if (opts.json) {
+          printJson({ name: "handoff", agent: opts.emitSkill, content });
+          return;
+        }
+        await writeStdout(content);
+        return;
+      } catch (error: any) {
+        console.error(`Error: ${error.message}`);
+        process.exit(1);
+      }
+    }
+
+    if (!target) {
+      console.error("Error: target is required (for example: sessions handoff codewith)");
+      process.exit(1);
+    }
+
+    const mode = String(opts.codewithMode ?? "interactive");
+    if (mode !== "interactive" && mode !== "exec") {
+      console.error("Error: --codewith-mode must be interactive or exec");
+      process.exit(1);
+    }
+    if (opts.printCommand && opts.json) {
+      console.error("Error: --print-command cannot be combined with --json");
+      process.exit(1);
+    }
+    if (opts.launch && opts.printCommand) {
+      console.error("Error: --launch cannot be combined with --print-command");
+      process.exit(1);
+    }
+    if (opts.launch && (opts.dryRun || opts.json)) {
+      console.error("Error: --launch cannot be combined with --dry-run or --json");
+      process.exit(1);
+    }
+    if (opts.launch && target.trim().toLowerCase() !== "codewith") {
+      console.error(`Error: target '${target}' does not have a v1 launch command`);
+      process.exit(1);
+    }
+
+    try {
+      const result = createExternalHandoffBundleV1({
+        target,
+        sourceAgent: opts.sourceAgent,
+        sourceSession: opts.sourceSession,
+        sourceTranscript: opts.sourceTranscript,
+        cwd: opts.cwd,
+        idempotencyKey: opts.idempotencyKey,
+        contextSummary: opts.contextSummary,
+        authRefs: opts.authRef,
+        verification: opts.verification,
+        blockers: opts.blocker,
+        dryRun: Boolean(opts.dryRun),
+        maxTurns: parsePositiveIntOption(opts.maxTurns, 8, "--max-turns"),
+        maxTurnChars: parsePositiveIntOption(opts.maxTurnChars, 1200, "--max-turn-chars"),
+        codewithAuthProfile: opts.codewithAuthProfile,
+        codewithMode: mode as CodewithLaunchMode,
+      });
+
+      if (opts.json) {
+        printJson(result);
+        return;
+      }
+
+      if (opts.printCommand) {
+        if (!result.launch) {
+          console.error(`Error: target '${target}' does not have a v1 launch command`);
+          process.exit(1);
+        }
+        console.log(result.launch.shell_command);
+        return;
+      }
+
+      console.log(`${result.written ? "Created" : "Prepared"} handoff bundle: ${result.bundle_path}`);
+      console.log(`  id:      ${result.bundle.id}`);
+      console.log(`  target:  ${result.bundle.target.agent}`);
+      console.log(`  hash:    ${result.bundle.bundle_hash}`);
+      console.log(`  status:  ${result.bundle.status}`);
+      console.log("  source exit: not automatic (v1 has no target ack/source-kill protocol)");
+      if (result.bundle.warnings.length > 0) {
+        console.log("\nWarnings:");
+        for (const warning of result.bundle.warnings) console.log(`  - ${warning}`);
+      }
+      if (result.launch) {
+        console.log("\nCommand:");
+        console.log(`  ${result.launch.shell_command}`);
+      }
+
+      if (opts.launch) {
+        if (!result.launch) {
+          console.error(`Error: target '${target}' does not have a v1 launch command`);
+          process.exit(1);
+        }
+        const proc = Bun.spawn({
+          cmd: result.launch.command,
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        const exitCode = await proc.exited;
+        process.exit(exitCode);
+      }
+    } catch (error: any) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
     }
   });
 

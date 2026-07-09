@@ -15,6 +15,23 @@ export type {
 } from "./lib/transfer.js";
 
 export {
+  createExternalHandoffBundleV1,
+  redactHandoffText,
+  renderHandoffSkillWrapper,
+} from "./lib/handoff.js";
+export type {
+  CodewithLaunchMode,
+  CreateExternalHandoffBundleOptions,
+  ExternalHandoffBundleV1,
+  ExternalHandoffResultV1,
+  HandoffAuthRef,
+  HandoffLaunchPlan,
+  HandoffStatus,
+  HandoffTarget,
+  HandoffTurnV1,
+} from "./lib/handoff.js";
+
+export {
   encodePath,
   decodePath,
   getClaudeProjectsDir,

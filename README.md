@@ -99,6 +99,41 @@ actions that would be taken.
 Existing maintenance commands (`relocate`, `transfer`, `migrate`, `paths`)
 remain available.
 
+## Cross-agent handoff
+
+`sessions handoff <target>` creates a typed `ExternalHandoffBundleV1` JSON file
+under `~/.hasna/sessions/handoffs/` for safe slash-command wrappers such as
+`/handoff codewith`.
+
+```bash
+# Build and write a bundle, then print the Codewith continuation command
+sessions handoff codewith --print-command
+
+# Hook-friendly mode: prefer explicit session/transcript hints when available
+sessions handoff codewith \
+  --source-agent claude \
+  --source-session "$CLAUDE_SESSION_ID" \
+  --source-transcript "$CLAUDE_TRANSCRIPT_PATH" \
+  --cwd "$PWD" \
+  --json
+
+# Preview without writing or launching
+sessions handoff codewith --dry-run --json
+
+# Emit installable wrapper skill text named "handoff"; does not write global files
+sessions handoff --emit-skill claude
+sessions handoff --emit-skill codewith
+sessions handoff --emit-skill codex
+sessions handoff --emit-skill opencode
+sessions handoff --emit-skill cursor
+```
+
+The v1 protocol is deliberately not a live tmux paste. It writes redacted
+context, recent turns, cwd/repo/git summary, auth/profile references by name
+only, verification notes, blockers, a bundle hash, and a rendered target
+command. Source exit is not automatic because v1 has no target acknowledgement
+protocol.
+
 ## MCP Server
 
 ```bash
