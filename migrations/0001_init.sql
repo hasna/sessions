@@ -1,8 +1,7 @@
 -- open-sessions cloud schema (Postgres). PURE REMOTE per Amendment A1.
 -- Mirrors the SQLite schema in src/db/database.ts, column-for-column, for the
--- shared RDS. Cloud stores normalized sessions, messages, and tool calls.
--- Raw provider transcript files and future large blob artifacts stay local or
--- go to S3 later (do NOT bulk-load raw transcript blobs into pg).
+-- shared RDS. Cloud stores session/message/tool metadata; large blobs stay in
+-- local SQLite and go to S3 later (do NOT bulk-load blobs into pg).
 
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
