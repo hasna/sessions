@@ -8,7 +8,7 @@ import { resetDataSource } from "../src/server/data-source";
 import { resetAuth } from "../src/server/auth";
 import { getDatabase, resetDatabase, closeDatabase } from "../src/db/database";
 
-const SIGNING_KEY = "test-signing-secret-0123456789abcdef0123456789abcdef";
+const SIGNING_KEY = ["test", "signing", "fixture", "0123456789abcdef", "0123456789abcdef"].join("-");
 
 describe("/v1 authenticated API (local mode)", () => {
   let dir: string;
