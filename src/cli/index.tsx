@@ -9,7 +9,6 @@
 
 import { Command } from "commander";
 import { registerEventsCommands } from "@hasna/events/commander";
-import { registerStorageCommands } from "./storage.js";
 import {
   existsSync,
   mkdirSync,
@@ -32,24 +31,19 @@ import {
   formatBytes,
 } from "../lib/transfer.js";
 import {
+  createExternalHandoffBundleV1,
+  renderHandoffSkillWrapper,
+  type CodewithLaunchMode,
+} from "../lib/handoff.js";
+import {
   getClaudeProjectsDir,
   decodePath,
   encodePath,
   findMatchingProjectDirs,
-  resolveProjectPath,
 } from "../lib/paths.js";
 import { getPackageVersion } from "../lib/package.js";
-import {
-  buildClaudeResumeCommand,
-  findSession,
-  formatSessionTable,
-  historySessions,
-  latestSession,
-  latestSessionForProject,
-  listSessions,
-  renameSession,
-  searchSessions,
-} from "../lib/sessions.js";
+import type { Session } from "../types/index.js";
+import type { SessionStore } from "../db/session-store.js";
 import {
   formatLivePaneTable,
   listLivePanes,
@@ -131,8 +125,52 @@ function parseOptionalNonNegativeNumberOption(raw: string | undefined, name: str
   return value;
 }
 
-async function pickSessionFromList() {
-  const sessions = listSessions().slice(0, 20);
+function collectRepeatableOption(value: string, previous: string[] = []): string[] {
+  previous.push(value);
+  return previous;
+}
+
+/** Format a table of Store sessions (LocalStore | ApiStore), never the registry. */
+function formatSessionTable(sessions: Session[]): string {
+  if (sessions.length === 0) {
+    return "No sessions found.";
+  }
+
+  const headers = ["TITLE", "SOURCE", "PROJECT", "MODEL", "MACHINE", "SESSION"];
+  const rows = sessions.map((s) => [
+    s.title ?? "(untitled)",
+    s.source,
+    s.project_name ?? "",
+    s.model ?? "-",
+    s.machine ?? "?",
+    s.id.slice(0, 12),
+  ]);
+  const widths = headers.map((header, index) =>
+    Math.max(header.length, ...rows.map((row) => row[index].length))
+  );
+
+  const render = (cols: string[]) =>
+    cols
+      .map((value, index) => value.padEnd(widths[index]))
+      .join("  ")
+      .trimEnd();
+
+  return [render(headers), ...rows.map(render)].join("\n");
+}
+
+/**
+ * Build the underlying resume command for a Store session using its provider
+ * and provider-native id. Only claude sessions are resumable this way today.
+ */
+function buildResumeCommand(session: Session): string[] {
+  if (session.source === "claude") {
+    return ["claude", "--resume", session.source_id];
+  }
+  throw new Error(`resume is not supported for source '${session.source}' (only claude)`);
+}
+
+async function pickSessionFromList(store: SessionStore): Promise<Session> {
+  const sessions = await store.recent(20);
   if (sessions.length === 0) {
     throw new Error("No sessions available to pick from");
   }
@@ -140,7 +178,7 @@ async function pickSessionFromList() {
   console.log("Select a session to resume:\n");
   sessions.forEach((session, index) => {
     console.log(
-      `  ${index + 1}. ${session.friendlyName}  ${session.projectSlug}  ${session.status}  ${session.sessionId.slice(0, 12)}`
+      `  ${index + 1}. ${session.title ?? "(untitled)"}  ${session.project_name ?? ""}  ${session.source}  ${session.id.slice(0, 12)}`
     );
   });
 
@@ -166,7 +204,6 @@ program
   .version(getPackageVersion())
   .description("Universal AI coding session search and management");
 
-registerStorageCommands(program);
 registerEventsCommands(program, { source: "sessions" });
 
 // ─── relocate ──────────────────────────────────────────────────────────────
@@ -180,24 +217,40 @@ program
   .option("--no-db", "Skip updating the sessions SQLite database")
   .option("--json", "Output result as JSON")
   .option("-v, --verbose", "Print detailed progress")
-  .action((oldPath: string, newPath: string, opts: any) => {
+  .action(async (oldPath: string, newPath: string, opts: any) => {
     // Resolve ~ to home directory
     if (oldPath.startsWith("~")) oldPath = join(homedir(), oldPath.slice(1));
     if (newPath.startsWith("~")) newPath = join(homedir(), newPath.slice(1));
 
+    // Phase 1: on-box transcript files (always local — this machine's raw files).
     const result = relocate(oldPath, newPath, {
       dryRun: opts.dryRun,
-      updateDb: opts.db !== false,
       verbose: opts.json ? false : opts.verbose,
     });
+
+    // Phase 2: the session INDEX (project_path/source_path) — routed through the
+    // Store so self_hosted mode updates the shared cloud registry, not a raw
+    // on-box SQLite write. `--no-db` skips it; dry-run never mutates.
+    const updateDb = opts.db !== false;
+    let dbRowsUpdated = 0;
+    if (updateDb && !opts.dryRun) {
+      const { resolveSessionStore } = await import("../db/session-store.js");
+      try {
+        const r = await resolveSessionStore().relocatePaths(oldPath, newPath);
+        dbRowsUpdated = r.rowsUpdated;
+      } catch (err) {
+        result.errors.push({ file: "<store>", error: (err as Error).message });
+      }
+    }
 
     if (opts.json) {
       printJson({
         oldPath,
         newPath,
         dryRun: Boolean(opts.dryRun),
-        updateDb: opts.db !== false,
+        updateDb,
         ...result,
+        dbRowsUpdated,
       });
       if (result.errors.length > 0) {
         process.exit(1);
@@ -217,7 +270,7 @@ program
     console.log(`  Index files updated: ${result.indexFilesUpdated}`);
     console.log(`  Claude JSONL updated: ${result.jsonlFilesUpdated}`);
     console.log(`  Codex JSONL updated: ${result.codexFilesUpdated}`);
-    console.log(`  DB rows updated:     ${result.dbRowsUpdated}`);
+    console.log(`  DB rows updated:     ${dbRowsUpdated}`);
 
     if (result.errors.length > 0) {
       console.log(`\n  Errors (${result.errors.length}):`);
@@ -394,6 +447,140 @@ transfer
           "Run 'sessions ingest --force' to index imported sessions in the search DB."
         );
       }
+    }
+  });
+
+// ─── handoff ───────────────────────────────────────────────────────────────
+
+program
+  .command("handoff [target]")
+  .description("Create an ExternalHandoffBundleV1 for safe cross-agent handoff")
+  .option("--source-agent <agent>", "Source agent name, e.g. claude or codewith")
+  .option("--source-session <id>", "Source provider-native session id")
+  .option("--source-transcript <path>", "Source transcript JSONL path")
+  .option("--cwd <path>", "Source working directory (default: current cwd)")
+  .option("--idempotency-key <key>", "Stable key for repeatable bundle id/path")
+  .option("--context-summary <text>", "Redacted human summary to include in the bundle")
+  .option("--auth-ref <ref>", "Auth/profile reference by name only, e.g. codewith:live-codewith", collectRepeatableOption, [])
+  .option("--codewith-auth-profile <name>", "Add --auth-profile <name> to rendered Codewith commands")
+  .option("--codewith-mode <mode>", "Rendered Codewith launch mode: interactive or exec", "interactive")
+  .option("--verification <text>", "Verification note to include in the bundle", collectRepeatableOption, [])
+  .option("--blocker <text>", "Blocker note to include in the bundle", collectRepeatableOption, [])
+  .option("--max-turns <n>", "Maximum recent transcript turns to include", "8")
+  .option("--max-turn-chars <n>", "Maximum characters per recent turn", "1200")
+  .option("--dry-run", "Build the bundle preview without writing or launching")
+  .option("--print-command", "Print only the rendered target command")
+  .option("--launch", "Launch the rendered target command; never exits/kills the source")
+  .option("--emit-skill <agent>", "Print installable wrapper skill text named 'handoff' for claude, codewith, codex, opencode, or cursor")
+  .option("--json", "Output JSON")
+  .action(async (target: string | undefined, opts: any) => {
+    if (opts.emitSkill) {
+      try {
+        const content = renderHandoffSkillWrapper(opts.emitSkill);
+        if (opts.json) {
+          printJson({ name: "handoff", agent: opts.emitSkill, content });
+          return;
+        }
+        await writeStdout(content);
+        return;
+      } catch (error: any) {
+        console.error(`Error: ${error.message}`);
+        process.exit(1);
+      }
+    }
+
+    if (!target) {
+      console.error("Error: target is required (for example: sessions handoff codewith)");
+      process.exit(1);
+    }
+
+    const mode = String(opts.codewithMode ?? "interactive");
+    if (mode !== "interactive" && mode !== "exec") {
+      console.error("Error: --codewith-mode must be interactive or exec");
+      process.exit(1);
+    }
+    if (opts.printCommand && opts.json) {
+      console.error("Error: --print-command cannot be combined with --json");
+      process.exit(1);
+    }
+    if (opts.launch && opts.printCommand) {
+      console.error("Error: --launch cannot be combined with --print-command");
+      process.exit(1);
+    }
+    if (opts.launch && (opts.dryRun || opts.json)) {
+      console.error("Error: --launch cannot be combined with --dry-run or --json");
+      process.exit(1);
+    }
+    if (opts.launch && target.trim().toLowerCase() !== "codewith") {
+      console.error(`Error: target '${target}' does not have a v1 launch command`);
+      process.exit(1);
+    }
+
+    try {
+      const result = createExternalHandoffBundleV1({
+        target,
+        sourceAgent: opts.sourceAgent,
+        sourceSession: opts.sourceSession,
+        sourceTranscript: opts.sourceTranscript,
+        cwd: opts.cwd,
+        idempotencyKey: opts.idempotencyKey,
+        contextSummary: opts.contextSummary,
+        authRefs: opts.authRef,
+        verification: opts.verification,
+        blockers: opts.blocker,
+        dryRun: Boolean(opts.dryRun),
+        maxTurns: parsePositiveIntOption(opts.maxTurns, 8, "--max-turns"),
+        maxTurnChars: parsePositiveIntOption(opts.maxTurnChars, 1200, "--max-turn-chars"),
+        codewithAuthProfile: opts.codewithAuthProfile,
+        codewithMode: mode as CodewithLaunchMode,
+      });
+
+      if (opts.json) {
+        printJson(result);
+        return;
+      }
+
+      if (opts.printCommand) {
+        if (!result.launch) {
+          console.error(`Error: target '${target}' does not have a v1 launch command`);
+          process.exit(1);
+        }
+        console.log(result.launch.shell_command);
+        return;
+      }
+
+      console.log(`${result.written ? "Created" : "Prepared"} handoff bundle: ${result.bundle_path}`);
+      console.log(`  id:      ${result.bundle.id}`);
+      console.log(`  target:  ${result.bundle.target.agent}`);
+      console.log(`  hash:    ${result.bundle.bundle_hash}`);
+      console.log(`  status:  ${result.bundle.status}`);
+      console.log("  source exit: not automatic (v1 has no target ack/source-kill protocol)");
+      if (result.bundle.warnings.length > 0) {
+        console.log("\nWarnings:");
+        for (const warning of result.bundle.warnings) console.log(`  - ${warning}`);
+      }
+      if (result.launch) {
+        console.log("\nCommand:");
+        console.log(`  ${result.launch.shell_command}`);
+      }
+
+      if (opts.launch) {
+        if (!result.launch) {
+          console.error(`Error: target '${target}' does not have a v1 launch command`);
+          process.exit(1);
+        }
+        const proc = Bun.spawn({
+          cmd: result.launch.command,
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        const exitCode = await proc.exited;
+        process.exit(exitCode);
+      }
+    } catch (error: any) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
     }
   });
 
@@ -585,11 +772,16 @@ program
 
 program
   .command("list")
-  .description("List known sessions with friendly names")
-  .option("-p, --project <value>", "Filter by project slug or path")
+  .description("List known sessions from the active store (local index, or the self_hosted /v1 API when HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are set)")
+  .option("-p, --project <value>", "Filter by project name or path")
+  .option("-l, --limit <n>", "Maximum results", "50")
   .option("--json", "Output as JSON")
-  .action((opts: any) => {
-    const sessions = listSessions({ project: opts.project });
+  .action(async (opts: any) => {
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const sessions = await resolveSessionStore().list({
+      project_path: opts.project,
+      limit: parsePositiveIntOption(opts.limit, 50, "--limit"),
+    });
     if (opts.json) {
       printJson(sessions);
       return;
@@ -599,29 +791,31 @@ program
   });
 
 program
-  .command("rename <id-or-name> <friendly-name>")
-  .description("Assign a manual friendly name to a session")
+  .command("rename <id-or-prefix> <title>")
+  .description("Set a session's title in the active store (local index, or the self_hosted /v1 API when HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are set)")
   .option("--json", "Output as JSON")
-  .action((identifier: string, friendlyName: string, opts: any) => {
-    try {
-      const session = renameSession(identifier, friendlyName);
-      if (opts.json) {
-        printJson(session);
-        return;
-      }
-
-      console.log(
-        `Renamed ${session.sessionId} -> ${session.friendlyName}`
-      );
-    } catch (error: any) {
-      console.error(`Error: ${error.message}`);
+  .action(async (identifier: string, title: string, opts: any) => {
+    const trimmed = title.trim();
+    if (!trimmed) {
+      console.error("Error: title cannot be empty");
       process.exit(1);
     }
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const session = await resolveSessionStore().rename(identifier, trimmed);
+    if (!session) {
+      console.error(`Error: session not found (or ambiguous prefix): ${identifier}`);
+      process.exit(1);
+    }
+    if (opts.json) {
+      printJson(session);
+      return;
+    }
+    console.log(`Renamed ${session.id} -> ${session.title}`);
   });
 
 program
-  .command("resume [id-or-name]")
-  .description("Resume a session by friendly name, session ID, or latest project session")
+  .command("resume [id-or-prefix]")
+  .description("Resume a session by id/prefix, latest project session, or the most recent session (resolved via the active store)")
   .option("-p, --project <value>", "Resume the most recent session for a project")
   .option("--last", "Resume the most recently active session")
   .option("--pick", "Interactively pick a session from the most recent results")
@@ -629,23 +823,25 @@ program
   .option("--json", "Output the selected session as JSON")
   .action(async (identifier: string | undefined, opts: any) => {
     try {
-      let session = null;
+      const { resolveSessionStore } = await import("../db/session-store.js");
+      const store = resolveSessionStore();
+      let session: Session | null = null;
 
       if (opts.pick) {
-        session = await pickSessionFromList();
+        session = await pickSessionFromList(store);
       } else if (opts.project) {
-        session = latestSessionForProject(opts.project);
+        session = (await store.list({ project_path: opts.project, limit: 1 }))[0] ?? null;
       } else if (opts.last || !identifier) {
-        session = latestSession();
+        session = (await store.recent(1))[0] ?? null;
       } else {
-        session = findSession(identifier);
+        session = await store.get(identifier);
       }
 
       if (!session) {
         throw new Error("No matching session found");
       }
 
-      const command = buildClaudeResumeCommand(session);
+      const command = buildResumeCommand(session);
       if (opts.json) {
         printJson({
           session,
@@ -675,17 +871,33 @@ program
 
 program
   .command("history")
-  .description("Show known sessions with history filters")
-  .option("-p, --project <value>", "Filter by project slug or path")
+  .description("Show sessions from the active store with history filters")
+  .option("-p, --project <value>", "Filter by project name or path")
   .option("--today", "Only include sessions active today")
-  .option("--agent <value>", "Filter by provider, agent name, or custom title")
+  .option("--agent <value>", "Filter by provider (source) or title substring")
+  .option("-l, --limit <n>", "Maximum results before filtering", "200")
   .option("--json", "Output as JSON")
-  .action((opts: any) => {
-    const sessions = historySessions({
-      project: opts.project,
-      today: Boolean(opts.today),
-      agent: opts.agent,
+  .action(async (opts: any) => {
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    let sessions = await resolveSessionStore().list({
+      project_path: opts.project,
+      limit: parsePositiveIntOption(opts.limit, 200, "--limit"),
     });
+
+    if (opts.today) {
+      const today = new Date().toISOString().slice(0, 10);
+      sessions = sessions.filter((s) => (s.started_at ?? s.ingested_at ?? "").startsWith(today));
+    }
+
+    if (opts.agent) {
+      const needle = String(opts.agent).toLowerCase();
+      sessions = sessions.filter(
+        (s) =>
+          s.source.toLowerCase().includes(needle) ||
+          (s.title ?? "").toLowerCase().includes(needle) ||
+          (s.model ?? "").toLowerCase().includes(needle)
+      );
+    }
 
     if (opts.json) {
       printJson(sessions);
@@ -698,15 +910,15 @@ program
 program
   .command("transcript-search <query>")
   .alias("registry-search")
-  .description("Search raw Claude transcript files by text")
-  .option("-p, --project <value>", "Filter by project slug or path")
+  .description("Full-text search across indexed session transcripts via the active store (local index, or the self_hosted /v1 API)")
+  .option("-p, --project <value>", "Filter by project name or path")
   .option("--limit <count>", "Maximum matches to return", "20")
   .option("--json", "Output as JSON")
-  .action((query: string, opts: any) => {
+  .action(async (query: string, opts: any) => {
     const limit = parsePositiveIntOption(opts.limit, 20, "--limit");
-
-    const matches = searchSessions(query, {
-      project: opts.project,
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const matches = await resolveSessionStore().searchContent(query, {
+      project_path: opts.project,
       limit,
     });
 
@@ -721,8 +933,9 @@ program
     }
 
     for (const match of matches) {
-      console.log(`${match.session.friendlyName}  ${match.session.projectSlug}`);
+      console.log(`${match.source}  ${match.title ?? "(untitled)"}${match.project_name ? `  [${match.project_name}]` : ""}`);
       console.log(`  ${match.snippet}`);
+      console.log(`  ${match.session_id}`);
     }
   });
 
@@ -863,15 +1076,17 @@ program
   .option("--interval <seconds>", "Refresh interval in seconds", "5")
   .option("--json", "Output one JSON snapshot and exit")
   .option("--once", "Render a single snapshot and exit")
-  .action((opts: any) => {
+  .action(async (opts: any) => {
     const intervalSeconds = Number.parseInt(opts.interval, 10);
     if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
       console.error("Error: --interval must be a positive integer");
       process.exit(1);
     }
 
-    const render = () => {
-      const sessions = listSessions({ project: opts.project });
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const store = resolveSessionStore();
+    const render = async () => {
+      const sessions = await store.list({ project_path: opts.project });
       if (opts.json) {
         printJson(sessions);
         return;
@@ -884,12 +1099,12 @@ program
       console.log(formatSessionTable(sessions));
     };
 
-    render();
+    await render();
     if (opts.json || opts.once) {
       return;
     }
 
-    const timer = setInterval(render, intervalSeconds * 1000);
+    const timer = setInterval(() => void render(), intervalSeconds * 1000);
     process.on("SIGINT", () => {
       clearInterval(timer);
       process.exit(0);
@@ -900,68 +1115,51 @@ program
   .command("paths")
   .description("List all project paths with session counts")
   .option("--json", "Output as JSON")
-  .action((opts: any) => {
-    const projectsDir = getClaudeProjectsDir();
+  .action(async (opts: { json?: boolean }) => {
+    // Route through the Store so this is mode-aware: local mode reads the on-box
+    // index; self_hosted mode hits /v1/stats and reports the SHARED cloud
+    // registry's project paths. Never scan the local filesystem in cloud mode —
+    // that was the split-brain bug (byte-identical local output regardless of
+    // mode). The orphaned-path (`!`) marker is a local-filesystem concern and is
+    // only meaningful for on-box projects, so it is shown in local mode only.
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const store = resolveSessionStore();
+    const stats = await store.stats();
 
-    if (!existsSync(projectsDir)) {
-      console.error("Claude projects directory not found:", projectsDir);
-      process.exit(1);
-    }
-
-    const dirs = readdirSync(projectsDir);
-    const projects: Array<{
-      path: string;
-      encodedDir: string;
-      sessions: number;
-      exists: boolean;
-    }> = [];
-
-    for (const dir of dirs) {
-      const dirPath = join(projectsDir, dir);
-      try {
-        if (!statSync(dirPath).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-
-      const resolvedPath = resolveProjectPath(projectsDir, dir);
-      const files = readdirSync(dirPath);
-      const sessionCount = files.filter((f) => f.endsWith(".jsonl")).length;
-      const pathExists = existsSync(resolvedPath);
-
-      projects.push({
-        path: resolvedPath,
-        encodedDir: dir,
-        sessions: sessionCount,
-        exists: pathExists,
-      });
-    }
-
-    // Sort by session count descending
-    projects.sort((a, b) => b.sessions - a.sessions);
+    const projects = stats.projects
+      .map((p) => {
+        const path = p.project_path ?? p.project_name ?? "(unknown)";
+        const exists =
+          store.mode === "local" && p.project_path ? existsSync(p.project_path) : true;
+        return { path, sessions: p.session_count, exists };
+      })
+      .sort((a, b) => b.sessions - a.sessions);
 
     if (opts.json) {
       printJson(projects);
-    } else {
-      console.log("Claude Code Session Paths\n");
-      const maxPath = Math.max(60, ...projects.map((p) => p.path.length));
+      return;
+    }
 
-      for (const p of projects) {
-        const marker = p.exists ? " " : "!";
-        const countStr = String(p.sessions).padStart(4);
-        console.log(
-          `${marker} ${p.path.padEnd(maxPath)} ${countStr} sessions`
-        );
-      }
+    console.log(`Session Paths (${store.mode})\n`);
+    const maxPath = Math.max(60, ...projects.map((p) => p.path.length));
 
+    for (const p of projects) {
+      const marker = p.exists ? " " : "!";
+      const countStr = String(p.sessions).padStart(4);
+      console.log(`${marker} ${p.path.padEnd(maxPath)} ${countStr} sessions`);
+    }
+
+    if (store.mode === "local") {
       const orphaned = projects.filter((p) => !p.exists);
       if (orphaned.length > 0) {
         console.log(
           `\n! = path no longer exists (${orphaned.length} orphaned, use 'sessions relocate' to fix)`
         );
       }
-      console.log(`\nTotal: ${projects.length} projects, ${projects.reduce((s, p) => s + p.sessions, 0)} sessions`);
     }
+    console.log(
+      `\nTotal: ${projects.length} projects, ${projects.reduce((s, p) => s + p.sessions, 0)} sessions`
+    );
   });
 
 program
@@ -969,8 +1167,8 @@ program
   .description("List machines that have contributed sessions, with counts")
   .option("--json", "Output as JSON")
   .action(async (opts: { json?: boolean }) => {
-    const { listMachines } = await import("../db/machines.js");
-    const machines = listMachines();
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const machines = await resolveSessionStore().machines();
     if (opts.json) return void printJson(machines);
     if (machines.length === 0) {
       console.log("No machines recorded yet. Run 'sessions ingest' or 'sessions sync'.");
@@ -983,70 +1181,75 @@ program
 
 program
   .command("sync")
-  .description("Ingest local sessions, then sync to/from storage so every machine shares one index")
-  .option("--no-ingest", "Skip the local ingest before syncing")
-  .option("--no-pull", "Push only — don't pull other machines' sessions")
+  .description("Ingest local sessions; in self_hosted (api) mode, push their metadata to the shared cloud registry so every machine sees one index")
+  .option("--no-ingest", "Skip the local ingest before pushing")
   .option("--json", "Output as JSON")
-  .action(async (opts: { ingest?: boolean; pull?: boolean; json?: boolean }) => {
+  .action(async (opts: { ingest?: boolean; json?: boolean }) => {
     try {
-      const { ingestAll } = await import("../lib/ingest/index.js");
-      const { recomputeMachineCounts } = await import("../db/machines.js");
-      const { getStorageConfig, hasStorageDatabaseConfig } = await import("../db/storage-config.js");
-
-      const runStorage = async (direction: "push" | "pull") => {
-        try {
-          const { pushStorageChanges, pullStorageChanges } = await import("../db/storage-sync.js");
-          const results = direction === "push"
-            ? await pushStorageChanges()
-            : await pullStorageChanges();
-          const errors = results.flatMap((result) => result.errors);
-          return { code: errors.length > 0 ? 1 : 0, output: errors.join("\n"), results };
-        } catch (e) {
-          return { code: 1, output: `failed to run storage ${direction}: ${(e as Error).message}` };
-        }
-      };
-      const skipStorage = (direction: "push" | "pull") => ({
-        code: 0,
-        output: `storage not configured; skipped remote ${direction}`,
-        skipped: true,
-      });
+      const { resolveSessionStore, getLocalStore } = await import("../db/session-store.js");
+      // Ingest + the local read always target the on-box index (the sync source),
+      // so they go through the explicit LocalStore accessor — never a raw db import.
+      const local = getLocalStore();
 
       const result: Record<string, unknown> = {};
       if (opts.ingest !== false) {
-        result.ingest = ingestAll();
+        result.ingest = await local.ingest();
         if (!opts.json) for (const r of (result.ingest as { source: string; sessions: number }[])) console.log(`ingest ${r.source}: +${r.sessions} sessions`);
       }
-      const storageConfig = getStorageConfig();
-      const shouldSkipStorage = storageConfig.mode === "local" && !hasStorageDatabaseConfig();
-      if (shouldSkipStorage) {
-        if (!opts.json) console.log("storage not configured; local index updated only");
-        result.push = skipStorage("push");
-        if (opts.pull !== false) result.pull = skipStorage("pull");
+      await local.recomputeMachines();
+
+      const store = resolveSessionStore();
+      if (store.mode === "local") {
+        // No DSN client sync exists any more. In local mode the on-box index IS
+        // the store; there is nothing to push. Set HASNA_SESSIONS_API_URL +
+        // HASNA_SESSIONS_API_KEY (self_hosted) to share one cloud index.
+        result.push = { pushed: 0, skipped: true, reason: "local mode; on-box index is authoritative (set HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY to share the cloud)" };
+        if (!opts.json) console.log("local mode; on-box index only (set HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY to share the cloud).");
       } else {
-        if (!opts.json) console.log("pushing to storage...");
-        result.push = await runStorage("push");
-        if (opts.pull !== false) {
-          if (!opts.json) console.log("pulling from storage...");
-          result.pull = await runStorage("pull");
+        // self_hosted/cloud: push every locally-indexed session's metadata to the
+        // shared /v1 registry via the ApiStore (idempotent upsert on source:source_id).
+        if (!opts.json) console.log("pushing local session metadata to the shared cloud registry...");
+        const localSessions = await local.list({ limit: 100000 });
+        let pushed = 0;
+        const errors: string[] = [];
+        for (const s of localSessions) {
+          try {
+            await store.create({
+              id: s.id,
+              source: s.source,
+              source_id: s.source_id,
+              source_path: s.source_path,
+              title: s.title,
+              project_path: s.project_path,
+              project_name: s.project_name,
+              model: s.model,
+              model_provider: s.model_provider,
+              git_branch: s.git_branch,
+              git_sha: s.git_sha,
+              git_origin_url: s.git_origin_url,
+              cli_version: s.cli_version,
+              is_subagent: s.is_subagent,
+              parent_session_id: s.parent_session_id,
+              machine: s.machine,
+              started_at: s.started_at,
+              ended_at: s.ended_at,
+              metadata: s.metadata,
+            });
+            pushed++;
+          } catch (e) {
+            errors.push(`${s.id}: ${(e as Error).message}`);
+          }
+        }
+        result.push = { pushed, total: localSessions.length, errors };
+        if (!opts.json) console.log(`push: ${pushed}/${localSessions.length} session(s)${errors.length ? ` — ${errors.length} error(s)` : ""}`);
+        if (errors.length > 0) {
+          if (opts.json) { printJson(result); process.exit(1); }
+          for (const e of errors.slice(0, 10)) console.error(e);
+          process.exit(1);
         }
       }
-      recomputeMachineCounts();
 
-      const push = result.push as { code: number };
-      const pull = result.pull as { code: number } | undefined;
-      const failed = push.code !== 0 || (pull?.code ?? 0) !== 0;
-
-      if (opts.json) {
-        printJson(result);
-        if (failed) process.exit(1);
-        return;
-      }
-
-      console.log(`push: ${push.code === 0 ? "ok" : `FAILED (exit ${push.code})`}`);
-      if (pull) {
-        console.log(`pull: ${pull.code === 0 ? "ok" : `FAILED (exit ${pull.code})`}`);
-      }
-      if (failed) process.exit(1);
+      if (opts.json) { printJson(result); return; }
       console.log("Done. Run 'sessions machines' to see contributors.");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1061,9 +1264,9 @@ program
   .description("Merge another machine's sessions database into this one (preserves machine tags) — RDS-free sync")
   .option("--json", "Output as JSON")
   .action(async (path: string, opts: { json?: boolean }) => {
-    const { mergeFromDb } = await import("../db/merge.js");
+    const { resolveSessionStore } = await import("../db/session-store.js");
     try {
-      const r = mergeFromDb(path);
+      const r = await resolveSessionStore().mergeFromDb(path);
       if (opts.json) return void printJson(r);
       console.log(`Merged from ${path}: +${r.sessions} sessions, +${r.messages} messages, +${r.tool_calls} tool calls, +${r.embeddings} embeddings`);
     } catch (e) {
@@ -1083,7 +1286,7 @@ program
   .option("--status", "Print provider watch status and exit")
   .option("--json", "Output status as JSON with --status")
   .action(async (opts: { source?: string[]; initial?: boolean; debounce?: string; poll?: string; status?: boolean; json?: boolean }) => {
-    const { ingestAll } = await import("../lib/ingest/index.js");
+    const { getLocalStore } = await import("../db/session-store.js");
     const { getWatchStatus, startWatch } = await import("../lib/watch.js");
     const sources = opts.source?.length ? opts.source : undefined;
     const debounceMs = parsePositiveIntOption(opts.debounce, 2000, "--debounce");
@@ -1102,7 +1305,7 @@ program
     }
     if (opts.initial !== false) {
       console.log("Initial ingest…");
-      for (const r of ingestAll({ sources })) {
+      for (const r of await getLocalStore().ingest({ sources })) {
         console.log(`  ${r.source}: ${r.sessions} sessions (${r.ingested} files, ${r.skipped} unchanged)`);
       }
     } else {
@@ -1182,17 +1385,10 @@ program
       console.error(`Session not found (or ambiguous prefix): ${id}`);
       process.exit(1);
     }
-    // Message/tool-call bodies are only available from the local index; the
-    // cloud /v1 surface returns session metadata (no blobs).
-    type Message = import("../types/index.js").Message;
-    type ToolCall = import("../types/index.js").ToolCall;
-    let messages: Message[] = [];
-    let tools: ToolCall[] = [];
-    if (store.mode === "local") {
-      const { getMessages, getToolCalls } = await import("../db/sessions.js");
-      messages = getMessages(s.id);
-      tools = getToolCalls(s.id);
-    }
+    // Message/tool-call bodies come through the Store. The cloud /v1 surface
+    // returns session metadata only (no blobs), so these are empty in cloud mode.
+    const messages = await store.messages(s.id);
+    const tools = await store.toolCalls(s.id);
     const n = parsePositiveIntOption(opts.messages, 12, "--messages");
     const previewMessages = messages.slice(0, n);
     if (opts.json) return void printJson({ session: s, messages: previewMessages, tools });
@@ -1288,19 +1484,18 @@ program
   .option("-l, --limit <n>", "Max results", "50")
   .option("--json", "Output as JSON")
   .action(async (opts: { type?: string; related?: string; session?: string; limit?: string; json?: boolean }) => {
-    const { listEntities, relatedSessions, sessionGraph } = await import("../lib/graph.js");
+    const { resolveSessionStore } = await import("../db/session-store.js");
+    const store = resolveSessionStore();
     type EntityType = "project" | "tool" | "model" | "provider" | "repo";
     const TYPES = ["project", "tool", "model", "provider", "repo"];
     const limit = parseInt(opts.limit ?? "50", 10) || 50;
 
     if (opts.session) {
-      const { getSessionByPrefix } = await import("../db/sessions.js");
-      const s = getSessionByPrefix(opts.session);
-      if (!s) {
+      const g = await store.graphSession(opts.session);
+      if (!g) {
         console.error(`Session not found: ${opts.session}`);
         process.exit(1);
       }
-      const g = sessionGraph(s.id);
       if (opts.json) return void printJson(g);
       console.log(`project: ${g?.project ?? "?"}`);
       console.log(`model:   ${g?.model ?? "?"} (${g?.provider ?? "?"})`);
@@ -1317,7 +1512,7 @@ program
         console.error("--related must be <type>:<name>, e.g. tool:Bash (type: project|tool|model|provider|repo)");
         process.exit(1);
       }
-      const sessions = relatedSessions(type as EntityType, name, limit);
+      const sessions = await store.graphRelated(type as EntityType, name, limit);
       if (opts.json) return void printJson(sessions);
       for (const s of sessions) {
         console.log(`${s.source.padEnd(7)} ${(s.project_name ?? "").padEnd(20)} ${s.title ?? "(untitled)"}  ${s.session_id.slice(0, 8)}`);
@@ -1329,7 +1524,7 @@ program
       console.error(`Unknown type '${opts.type}'. Use: ${TYPES.join(", ")}`);
       process.exit(1);
     }
-    const entities = listEntities(opts.type as EntityType | undefined);
+    const entities = await store.graphEntities(opts.type as EntityType | undefined);
     if (opts.json) return void printJson(entities);
     let lastType = "";
     for (const e of entities.slice(0, opts.type ? entities.length : 100)) {
@@ -1347,9 +1542,9 @@ program
   .option("-l, --limit <n>", "Max messages to embed this run", "200")
   .option("--json", "Output as JSON")
   .action(async (opts: { limit?: string; json?: boolean }) => {
-    const { embedSessions } = await import("../lib/embeddings.js");
+    const { resolveSessionStore } = await import("../db/session-store.js");
     try {
-      const result = await embedSessions({ limit: parseInt(opts.limit ?? "200", 10) || 200 });
+      const result = await resolveSessionStore().embed({ limit: parseInt(opts.limit ?? "200", 10) || 200 });
       if (opts.json) return void printJson(result);
       console.log(`Embedded ${result.chunksEmbedded} chunks across ${result.messagesProcessed} messages.`);
     } catch (err) {
@@ -1375,12 +1570,13 @@ program
       query: string,
       opts: { source?: string; project?: string; machine?: string; limit?: string; tools?: boolean; semantic?: boolean; hybrid?: boolean; json?: boolean }
     ) => {
-      const { search, searchToolCalls } = await import("../lib/search.js");
+      const { resolveSessionStore } = await import("../db/session-store.js");
+      const store = resolveSessionStore();
       const limit = parsePositiveIntOption(opts.limit, 20, "--limit");
       const o = { limit, source: opts.source, project_path: opts.project, machine: opts.machine };
 
       if (opts.tools) {
-        const hits = searchToolCalls(query, o);
+        const hits = await store.searchToolCalls(query, o);
         if (opts.json) return void printJson(hits);
         if (hits.length === 0) return void console.log("No matching tool calls.");
         for (const h of hits) {
@@ -1392,15 +1588,14 @@ program
 
       let hits;
       if (opts.semantic || opts.hybrid) {
-        const { semanticSearch, hybridSearch } = await import("../lib/vector-search.js");
         try {
-          hits = opts.hybrid ? await hybridSearch(query, o) : await semanticSearch(query, o);
+          hits = opts.hybrid ? await store.hybridSearch(query, o) : await store.semanticSearch(query, o);
         } catch (err) {
           console.error(`Semantic search failed (is OPENAI_API_KEY set and have you run 'sessions embed'?): ${(err as Error).message}`);
           process.exit(1);
         }
       } else {
-        hits = search(query, o);
+        hits = await store.searchContent(query, o);
       }
       if (opts.json) return void printJson(hits);
       if (hits.length === 0) return void console.log("No matching sessions.");
@@ -1429,8 +1624,8 @@ program
       opts: { source?: string; project?: string; machine?: string; limit?: string; semantic?: boolean; json?: boolean }
     ) => {
       const limit = parsePositiveIntOption(opts.limit, 10, "--limit");
-      const { recallSessions } = await import("../lib/recall.js");
-      const response = await recallSessions(query, {
+      const { resolveSessionStore } = await import("../db/session-store.js");
+      const response = await resolveSessionStore().recall(query, {
         source: opts.source,
         project_path: opts.project,
         machine: opts.machine,
@@ -1476,12 +1671,14 @@ program
   );
 
 async function runIngestCommand(opts: { source?: string; force?: boolean; verbose?: boolean; json?: boolean }) {
-  const { ingestAll, ingestSource } = await import("../lib/ingest/index.js");
+  const { getLocalStore } = await import("../db/session-store.js");
   const onProgress = opts.verbose ? (m: string) => console.log(m) : undefined;
   try {
-    const results = opts.source
-      ? [ingestSource(opts.source, { force: opts.force, onProgress })]
-      : ingestAll({ force: opts.force, onProgress });
+    const results = await getLocalStore().ingest({
+      source: opts.source,
+      force: opts.force,
+      onProgress,
+    });
     if (opts.json) {
       printJson(results);
       return;
@@ -1511,4 +1708,12 @@ function addIngestCommand(name: string, description: string) {
 addIngestCommand("ingest", "Index AI coding sessions (claude, codex, gemini) into the searchable database");
 addIngestCommand("reindex", "Alias for ingest; refresh the searchable session index");
 
-program.parse();
+// Use parseAsync + a single top-level catch so async command actions that throw
+// (e.g. a cloud /v1 HTTP error, or an operation not served by the cloud API like
+// `recall` in self_hosted mode) surface a clean one-line message and a non-zero
+// exit — never an unhandled-rejection stack trace.
+program.parseAsync().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`Error: ${message}`);
+  process.exit(1);
+});

@@ -15,8 +15,25 @@
 
 import { resolveStorageClient } from "@hasna/contracts/client/storage";
 import type { HasnaStorageClient } from "@hasna/contracts/client/storage";
-import type { Machine, Session } from "../types/index.js";
+import type { Machine, Message, Session, ToolCall } from "../types/index.js";
 import type { UpsertSessionInput } from "./cloud/store.js";
+import type { SearchHit, ToolCallHit } from "../lib/search.js";
+import type { Entity, EntityType, RelatedSession, SessionGraph } from "../lib/graph.js";
+import type { RecallOptions, RecallResponse } from "../lib/recall.js";
+import type { EmbedResult } from "../lib/embeddings.js";
+import type { MergeResult } from "./merge.js";
+import type { IngestResult } from "../lib/ingest/index.js";
+
+export interface IngestStoreOptions {
+  /** Ingest only this provider (claude | codex | gemini). */
+  source?: string;
+  /** Ingest only these providers. Ignored when `source` is set. */
+  sources?: string[];
+  /** Re-ingest even files unchanged since the last run. */
+  force?: boolean;
+  /** Progress callback (one line per event). */
+  onProgress?: (message: string) => void;
+}
 
 export type Env = Record<string, string | undefined>;
 
@@ -48,9 +65,57 @@ export interface SessionStore {
   get(idOrPrefix: string): Promise<Session | null>;
   create(input: UpsertSessionInput): Promise<Session>;
   remove(id: string): Promise<boolean>;
+  /**
+   * Set a session's title (the "rename" operation), resolving by full id or a
+   * unique id/source_id prefix. Local mode updates the on-box SQLite index;
+   * self_hosted mode PATCHes `/v1/sessions/{id}` so the shared cloud registry is
+   * what actually changes. Returns the updated session, or null if not found.
+   */
+  rename(idOrPrefix: string, title: string): Promise<Session | null>;
+  /**
+   * Rewrite session paths after a project directory move (old -> new): updates
+   * project_path / source_path in the active index. Local mode touches the
+   * on-box SQLite index; self_hosted mode hits `/v1/relocate` so the shared
+   * cloud registry is what actually changes (never a split-brain no-op).
+   */
+  relocatePaths(oldPath: string, newPath: string): Promise<{ rowsUpdated: number }>;
   search(query: string, opts: ListOptions): Promise<SearchHitDto[]>;
   machines(): Promise<Machine[]>;
   stats(): Promise<StoreStats>;
+  /** Message bodies for a session (local index only; cloud /v1 does not serve blobs). */
+  messages(sessionId: string): Promise<Message[]>;
+  /** Tool-call records for a session (local index only; cloud /v1 does not serve blobs). */
+  toolCalls(sessionId: string): Promise<ToolCall[]>;
+  /** Full content search (message bodies + metadata), one hit per session. */
+  searchContent(query: string, opts: ListOptions): Promise<SearchHit[]>;
+  /** Tool-call search (name / input / output). */
+  searchToolCalls(query: string, opts: ListOptions): Promise<ToolCallHit[]>;
+  /** Semantic (embedding) search. */
+  semanticSearch(query: string, opts: ListOptions): Promise<SearchHit[]>;
+  /** Hybrid full-text + semantic search (RRF). */
+  hybridSearch(query: string, opts: ListOptions): Promise<SearchHit[]>;
+  /** Natural-language recall with evidence, touched files, and resume metadata. */
+  recall(query: string, opts: RecallOptions): Promise<RecallResponse>;
+  /** Knowledge-graph entities (projects/tools/models/providers/repos). */
+  graphEntities(type?: EntityType): Promise<Entity[]>;
+  /** Sessions related to a graph entity. */
+  graphRelated(type: EntityType, name: string, limit: number): Promise<RelatedSession[]>;
+  /** The entity neighborhood of a single session. */
+  graphSession(idOrPrefix: string): Promise<SessionGraph | null>;
+  /** Generate embeddings for indexed messages (index maintenance). */
+  embed(opts: { limit?: number }): Promise<EmbedResult>;
+  /** Merge another machine's local sessions DB into this one (local-to-local sync). */
+  mergeFromDb(path: string): Promise<MergeResult>;
+  /**
+   * Index local transcript files into the on-box session index. This is an
+   * inherently LOCAL maintenance operation: even on a flipped (self_hosted)
+   * machine, `sync` ingests into the on-box index first and then pushes the
+   * metadata to the shared cloud `/v1` registry. The cloud transport has no
+   * local index, so it throws rather than pretending to ingest.
+   */
+  ingest(opts?: IngestStoreOptions): Promise<IngestResult[]>;
+  /** Recompute per-machine session counts in the index (index maintenance). */
+  recomputeMachines(): Promise<void>;
 }
 
 const APP = "sessions";
@@ -109,6 +174,25 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
         throw error;
       }
     },
+    async rename(idOrPrefix, title) {
+      try {
+        const res = await t.patch<{ session: Session }>(
+          `/sessions/${encodeURIComponent(idOrPrefix)}`,
+          { title },
+        );
+        return res.session ?? null;
+      } catch (error) {
+        if (isNotFound(error)) return null;
+        throw error;
+      }
+    },
+    async relocatePaths(oldPath, newPath) {
+      const res = await t.post<{ ok?: boolean; rowsUpdated?: number }>("/relocate", {
+        oldPath,
+        newPath,
+      });
+      return { rowsUpdated: res.rowsUpdated ?? 0 };
+    },
     async search(query, opts) {
       const res = await t.get<{ results: SearchHitDto[] }>("/search", {
         query: { q: query, ...listQuery(opts) },
@@ -124,7 +208,88 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
       const { ok: _ok, ...stats } = res;
       return stats;
     },
+    // Message/tool-call blobs are not loaded into the cloud /v1 surface (they stay
+    // on-box / go to S3). Return empty rather than fabricating — callers that need
+    // bodies must read them from the local index.
+    async messages() {
+      return [];
+    },
+    async toolCalls() {
+      return [];
+    },
+    async searchContent(query, opts) {
+      const res = await t.get<{ results: SearchHit[] }>("/search/content", {
+        query: { q: query, ...listQuery(opts) },
+      });
+      return res.results ?? [];
+    },
+    async searchToolCalls(query, opts) {
+      const res = await t.get<{ results: ToolCallHit[] }>("/search/tools", {
+        query: { q: query, ...listQuery(opts) },
+      });
+      return res.results ?? [];
+    },
+    async graphEntities(type) {
+      const res = await t.get<{ entities: Entity[] }>("/graph", {
+        query: type ? { type } : {},
+      });
+      return res.entities ?? [];
+    },
+    async graphRelated(type, name, limit) {
+      const res = await t.get<{ sessions: RelatedSession[] }>("/graph", {
+        query: { related: `${type}:${name}`, limit },
+      });
+      return res.sessions ?? [];
+    },
+    async graphSession(idOrPrefix) {
+      try {
+        const res = await t.get<{ graph: SessionGraph | null }>("/graph", {
+          query: { session: idOrPrefix },
+        });
+        return res.graph ?? null;
+      } catch (error) {
+        if (isNotFound(error)) return null;
+        throw error;
+      }
+    },
+    // Not yet available server-side: these require the local embedding/FTS index
+    // or a local-to-local DB merge. Fail loudly instead of silently reading the
+    // local SQLite island (that was the split-brain bug).
+    semanticSearch() {
+      return notAvailableInCloud("semantic search");
+    },
+    hybridSearch() {
+      return notAvailableInCloud("hybrid search");
+    },
+    recall() {
+      return notAvailableInCloud("recall");
+    },
+    embed() {
+      return notAvailableInCloud("embed");
+    },
+    mergeFromDb() {
+      return notAvailableInCloud("import-db");
+    },
+    ingest() {
+      return notAvailableInCloud("ingest");
+    },
+    recomputeMachines() {
+      return notAvailableInCloud("recompute-machines");
+    },
   };
+}
+
+/**
+ * Loud, explicit failure for operations that are not (yet) served by the cloud
+ * `/v1` API. NEVER silently fall back to the local SQLite index in cloud mode —
+ * that is exactly the split-brain we are eliminating.
+ */
+function notAvailableInCloud(op: string): never {
+  throw new Error(
+    `'${op}' is not available in self_hosted mode: it depends on the local session index ` +
+      `(embeddings / full recall / local DB merge), which the cloud /v1 API does not serve. ` +
+      `Run it on a machine in local mode (unset HASNA_SESSIONS_API_URL/API_KEY).`,
+  );
 }
 
 /** Local store: SQLite index, loaded lazily so cloud-only runs never open the DB. */
@@ -156,6 +321,14 @@ function localStore(): SessionStore {
       }
       deleteSession(id);
       return true;
+    },
+    async rename(idOrPrefix, title) {
+      const { updateSessionTitle } = await import("./sessions.js");
+      return updateSessionTitle(idOrPrefix, title);
+    },
+    async relocatePaths(oldPath, newPath) {
+      const { relocatePathsInDb } = await import("./sessions.js");
+      return relocatePathsInDb(oldPath, newPath);
     },
     async search(query, opts) {
       const { searchSessions } = await import("../lib/search.js");
@@ -192,6 +365,68 @@ function localStore(): SessionStore {
         projects,
       };
     },
+    async messages(sessionId) {
+      const { getMessages } = await import("./sessions.js");
+      return getMessages(sessionId);
+    },
+    async toolCalls(sessionId) {
+      const { getToolCalls } = await import("./sessions.js");
+      return getToolCalls(sessionId);
+    },
+    async searchContent(query, opts) {
+      const { search } = await import("../lib/search.js");
+      return search(query, opts);
+    },
+    async searchToolCalls(query, opts) {
+      const { searchToolCalls } = await import("../lib/search.js");
+      return searchToolCalls(query, opts);
+    },
+    async semanticSearch(query, opts) {
+      const { semanticSearch } = await import("../lib/vector-search.js");
+      return semanticSearch(query, opts);
+    },
+    async hybridSearch(query, opts) {
+      const { hybridSearch } = await import("../lib/vector-search.js");
+      return hybridSearch(query, opts);
+    },
+    async recall(query, opts) {
+      const { recallSessions } = await import("../lib/recall.js");
+      return recallSessions(query, opts);
+    },
+    async graphEntities(type) {
+      const { listEntities } = await import("../lib/graph.js");
+      return listEntities(type);
+    },
+    async graphRelated(type, name, limit) {
+      const { relatedSessions } = await import("../lib/graph.js");
+      return relatedSessions(type, name, limit);
+    },
+    async graphSession(idOrPrefix) {
+      const { sessionGraph } = await import("../lib/graph.js");
+      const { getSessionByPrefix } = await import("./sessions.js");
+      const session = getSessionByPrefix(idOrPrefix);
+      if (!session) return null;
+      return sessionGraph(session.id);
+    },
+    async embed(opts) {
+      const { embedSessions } = await import("../lib/embeddings.js");
+      return embedSessions(opts);
+    },
+    async mergeFromDb(path) {
+      const { mergeFromDb } = await import("./merge.js");
+      return mergeFromDb(path);
+    },
+    async ingest(opts = {}) {
+      const { ingestAll, ingestSource } = await import("../lib/ingest/index.js");
+      if (opts.source) {
+        return [ingestSource(opts.source, { force: opts.force, onProgress: opts.onProgress })];
+      }
+      return ingestAll({ sources: opts.sources, force: opts.force, onProgress: opts.onProgress });
+    },
+    async recomputeMachines() {
+      const { recomputeMachineCounts } = await import("./machines.js");
+      recomputeMachineCounts();
+    },
   };
 }
 
@@ -206,5 +441,19 @@ export function resolveSessionStore(
 ): SessionStore {
   const resolved = resolveStorageClient(APP, env, overrides);
   if (resolved.transport === "cloud-http") return cloudStore(resolved.client);
+  return localStore();
+}
+
+/**
+ * The LocalStore transport, resolved unconditionally (independent of env).
+ *
+ * Used only by the inherently-local index path: `ingest`/`reindex`/`ingest-watch`
+ * populate the on-box index, and `sync` reads the on-box index to push it to the
+ * shared cloud `/v1` registry even when the resolved store is `cloud`. This is
+ * NOT a per-command local read fallback — the split-brain bug where reads
+ * silently drifted to the local SQLite island stays deleted; those paths go
+ * through `resolveSessionStore()`.
+ */
+export function getLocalStore(): SessionStore {
   return localStore();
 }

@@ -21,6 +21,14 @@ function runCli(args: string[]) {
       HASNA_SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       HASNA_SESSIONS_DIR: join(TEST_DIR, "sessions-home"),
+      HASNA_SESSIONS_API_URL: "",
+      HASNA_SESSIONS_API_KEY: "",
+      HASNA_SESSIONS_MODE: "local",
+      HASNA_SESSIONS_STORAGE_MODE: "local",
+      SESSIONS_API_URL: "",
+      SESSIONS_API_KEY: "",
+      SESSIONS_MODE: "local",
+      SESSIONS_STORAGE_MODE: "local",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -38,6 +46,14 @@ function runCliPipe(command: string) {
       HASNA_SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       HASNA_SESSIONS_DIR: join(TEST_DIR, "sessions-home"),
+      HASNA_SESSIONS_API_URL: "",
+      HASNA_SESSIONS_API_KEY: "",
+      HASNA_SESSIONS_MODE: "local",
+      HASNA_SESSIONS_STORAGE_MODE: "local",
+      SESSIONS_API_URL: "",
+      SESSIONS_API_KEY: "",
+      SESSIONS_MODE: "local",
+      SESSIONS_STORAGE_MODE: "local",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -261,7 +277,7 @@ describe("CLI JSON output", () => {
     expect(payload.projectsImported).toBe(1);
   });
 
-  it("resolves paths from transcript cwd for hyphenated Claude project directories", () => {
+  it("lists indexed project paths with session counts (Store-routed, mode-aware)", () => {
     const projectDir = join(PROJECTS_DIR, "-Users-test-client-dashboard");
     mkdirSync(projectDir, { recursive: true });
     writeFileSync(
@@ -280,9 +296,15 @@ describe("CLI JSON output", () => {
       "utf-8"
     );
 
+    // `paths` now routes through the Store (the on-box index in local mode),
+    // so it reflects indexed sessions rather than a raw filesystem scan.
+    expect(runCli(["ingest", "--source", "claude", "--json"]).exitCode).toBe(0);
+
     const result = runCli(["paths", "--json"]);
     const payload = parseJsonOutput(result);
-    const project = payload.find((entry: { encodedDir: string }) => entry.encodedDir === "-Users-test-client-dashboard");
+    const project = payload.find(
+      (entry: { path: string }) => entry.path === "/Users/test/client-dashboard"
+    );
     expect(project).toMatchObject({
       path: "/Users/test/client-dashboard",
       sessions: 1,
@@ -330,7 +352,11 @@ describe("CLI JSON output", () => {
       const result = runCliPipe(command);
       expect(Buffer.from(result.stderr).toString("utf-8")).toBe("");
       expect(result.exitCode).toBe(0);
-      expect(Number(Buffer.from(result.stdout).toString("utf-8").trim())).toBeGreaterThan(0);
+      const count = Number(Buffer.from(result.stdout).toString("utf-8").trim());
+      if (!(count > 0)) {
+        throw new Error(`expected positive JSON count for ${command}, got ${count}`);
+      }
+      expect(count).toBeGreaterThan(0);
     }
   });
 

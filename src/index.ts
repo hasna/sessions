@@ -15,6 +15,23 @@ export type {
 } from "./lib/transfer.js";
 
 export {
+  createExternalHandoffBundleV1,
+  redactHandoffText,
+  renderHandoffSkillWrapper,
+} from "./lib/handoff.js";
+export type {
+  CodewithLaunchMode,
+  CreateExternalHandoffBundleOptions,
+  ExternalHandoffBundleV1,
+  ExternalHandoffResultV1,
+  HandoffAuthRef,
+  HandoffLaunchPlan,
+  HandoffStatus,
+  HandoffTarget,
+  HandoffTurnV1,
+} from "./lib/handoff.js";
+
+export {
   encodePath,
   decodePath,
   getClaudeProjectsDir,
@@ -24,23 +41,6 @@ export {
   findMatchingProjectDirs,
   computeRelocatedDir,
 } from "./lib/paths.js";
-
-export {
-  loadSessionRegistry,
-  saveSessionRegistry,
-  refreshSessionRegistry,
-  listSessions,
-  findSession,
-  latestSession,
-  latestSessionForProject,
-  renameSession,
-  buildClaudeResumeCommand,
-  formatSessionTable,
-  historySessions,
-  searchSessions,
-} from "./lib/sessions.js";
-
-export type { SessionRecord, SessionSearchResult, SessionStatus } from "./lib/sessions.js";
 
 export {
   buildLivePane,
@@ -101,45 +101,29 @@ export type {
   RecallToolCall,
 } from "./lib/recall.js";
 
-export { SqliteAdapter } from "./db/sqlite-adapter.js";
-export { getDatabase, closeDatabase, resetDatabase, initSchema } from "./db/database.js";
-export {
-  getStorageConfig,
-  getStorageConnectionString,
-  getConnectionString,
-  getStorageDatabaseEnv,
-  getStorageDatabaseEnvName,
-  getStorageDatabaseUrl,
-  SESSIONS_STORAGE_ENV,
-  SESSIONS_STORAGE_FALLBACK_ENV,
-  STORAGE_DATABASE_ENV,
-  STORAGE_MODE_ENV,
-  type StorageConfig,
-  type StorageMode,
-  type StorageEnv,
-} from "./db/storage-config.js";
-export { PgAdapterAsync } from "./db/remote-storage.js";
-export { applyPgMigrations } from "./db/pg-migrate.js";
-export {
-  STORAGE_TABLES,
-  SESSIONS_STORAGE_TABLES,
-  getStoragePg,
-  getStorageStatus,
-  parseStorageTables,
-  pullStorageChanges,
-  pushStorageChanges,
-  runStorageMigrations,
-  syncStorageChanges,
-} from "./db/storage-sync.js";
-export type { StorageStatus, SyncResult } from "./db/storage-sync.js";
+// NOTE: the raw SQLite escape hatch (SqliteAdapter / getDatabase / closeDatabase /
+// resetDatabase / initSchema) is intentionally NOT re-exported from the package
+// main. Direct SQLite access outside the Store seam is exactly the split-brain
+// this refactor eliminates: a consumer importing it in self_hosted/cloud mode
+// would read the local island instead of the shared cloud registry. The on-box
+// SQLite index is reachable only behind the Store (LocalStore transport, below).
 
-// --- Cloud (Postgres) data plane + serve surface (Amendment A1, PURE REMOTE) ---
-export { isCloudMode, getCloudClient, closeCloudClient, APP_NAME } from "./db/cloud/client.js";
-export { runCloudMigrations } from "./db/cloud/migrate.js";
-export { loadMigrations, resolveMigrationsDir } from "./db/cloud/migrations.js";
-export * as cloudStore from "./db/cloud/store.js";
-export { buildOpenApiDocument } from "./server/openapi.js";
-export { createSessionsServer, bootstrapServer } from "./server/app.js";
+// --- Client storage abstraction (the ONE seam: LocalStore | ApiStore) ---
+export {
+  resolveSessionStore,
+  type SessionStore,
+  type Env,
+  type ListOptions,
+  type SearchHitDto,
+  type StoreStats,
+} from "./db/session-store.js";
+
+// NOTE: the Postgres (RDS) data plane + HTTP serve surface (getCloudClient /
+// isCloudMode / cloudStore / createSessionsServer / migrations / OpenAPI) reads
+// DATABASE_URL and opens a `pg` pool. It is server-only and lives behind the
+// `@hasna/sessions/server` subpath — it is intentionally NOT re-exported here so
+// the client-importable package main never reaches a DSN data plane. Clients use
+// `@hasna/sessions/storage` (the Store).
 
 // --- Generated SDK ---
 export {

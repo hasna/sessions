@@ -4,9 +4,47 @@
   "name": "sessions",
   "class": "service",
   "contractVersion": "v1",
-  "kitVersion": "0.4.1",
+  "kitVersion": "0.5.2",
   "description": "Search and sync AI coding sessions (Claude, Codex, Gemini). Local mode uses SQLite at ~/.hasna/sessions/sessions.db; cloud mode (HASNA_SESSIONS_STORAGE_MODE=cloud) is PURE REMOTE per Amendment A1 — sessions-serve reads/writes the shared cloud Postgres directly (schema + session metadata only; large message/tool blobs live in SQLite locally and go to S3 later).",
-  "bins": ["sessions", "sessions-mcp", "sessions-serve"],
+  "bins": [
+    "sessions",
+    "sessions-mcp",
+    "sessions-serve"
+  ],
+  "deploymentModes": [
+    "local",
+    "self-hosted"
+  ],
+  "serviceSurfaces": [
+    {
+      "name": "http",
+      "status": "supported",
+      "bin": "sessions-serve",
+      "mcpBin": "sessions-mcp",
+      "authMode": "api-key",
+      "deploymentModes": [
+        "local",
+        "self-hosted"
+      ],
+      "health": {
+        "method": "GET",
+        "path": "/health",
+        "public": true
+      },
+      "readiness": {
+        "method": "GET",
+        "path": "/ready",
+        "public": true
+      },
+      "version": {
+        "method": "GET",
+        "path": "/version",
+        "public": true
+      },
+      "apiBasePath": "/v1",
+      "openApiPath": "/openapi.json"
+    }
+  ],
   "storage": {
     "mode": "local",
     "envPrefix": "HASNA_SESSIONS_",
@@ -16,7 +54,11 @@
   },
   "metadata": {
     "serve": {
-      "healthEndpoints": ["/health", "/ready", "/version"],
+      "healthEndpoints": [
+        "/health",
+        "/ready",
+        "/version"
+      ],
       "versionedApiPrefix": "/v1",
       "openapi": "/openapi.json",
       "auth": "api-key (@hasna/contracts/auth)"

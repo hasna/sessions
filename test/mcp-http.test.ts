@@ -79,11 +79,10 @@ describe("sessions MCP HTTP transport", () => {
       const toolNames = (listPayload.result?.tools ?? []).map((tool) => tool.name);
       expect(toolNames).toContain("search_sessions");
       expect(toolNames).toContain("register_agent");
-      expect(toolNames).toContain("sessions_storage_status");
-      expect(toolNames).toContain("sessions_storage_push");
-      expect(toolNames).toContain("sessions_storage_pull");
-      expect(toolNames).toContain("sessions_storage_sync");
-      expect(toolNames).toContain("sessions_storage_feedback");
+      // DSN-on-client storage sync tools were removed in the Store refactor.
+      expect(toolNames).not.toContain("sessions_storage_push");
+      expect(toolNames).not.toContain("sessions_storage_pull");
+      expect(toolNames).not.toContain("sessions_storage_sync");
       expect(toolNames.some((name) => name.toLowerCase().includes("cloud"))).toBe(false);
     } finally {
       server.stop(true);

@@ -7,41 +7,35 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { SqliteAdapter as Database } from "../db/sqlite-adapter.js";
-import { existsSync, mkdirSync } from "fs";
-import { join, dirname } from "path";
-import { homedir } from "os";
 import { getPackageInfo, getPackageVersion } from "../lib/package.js";
-import { search, searchToolCalls } from "../lib/search.js";
-import {
-  getRecentSessions,
-  listSessions,
-  getSessionByPrefix,
-  getMessages,
-  getToolCalls,
-  getProjectStats,
-} from "../db/sessions.js";
-import { ingestAll, ingestSource } from "../lib/ingest/index.js";
-import { getIngestionStats } from "../db/ingestion.js";
-import { listMachines } from "../db/machines.js";
-import { embedSessions } from "../lib/embeddings.js";
-import { semanticSearch, hybridSearch } from "../lib/vector-search.js";
-import { listEntities, relatedSessions, sessionGraph } from "../lib/graph.js";
-import { recallSessions } from "../lib/recall.js";
-import {
-  buildClaudeResumeCommand,
-  findSession,
-  historySessions,
-  latestSession,
-  latestSessionForProject,
-  listSessions as listRegistrySessions,
-  renameSession,
-  searchSessions,
-} from "../lib/sessions.js";
 import { listAdapters, getAdapter } from "../lib/adapters/index.js";
 import type { CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
-import { registerSessionsStorageTools } from "./storage-tools.js";
+import { resolveSessionStore, getLocalStore } from "../db/session-store.js";
+import type { Session } from "../types/index.js";
+
+/**
+ * Build the underlying resume command for a Store session using its provider
+ * and provider-native id. Only claude sessions are resumable this way today.
+ */
+function buildResumeCommand(session: Session): string[] {
+  if (session.source === "claude") {
+    return ["claude", "--resume", session.source_id];
+  }
+  throw new Error(`resume is not supported for source '${session.source}' (only claude)`);
+}
+
+// Session-record store seam (SAME resolver the CLI uses). When the client-flip
+// resolves to cloud-http — HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY set
+// (self_hosted) — the core session-record read tools (recent/list/get/machines/
+// stats/search) route to https://sessions.hasna.xyz/v1 with the bearer key so
+// every machine's MCP sees the ONE shared cloud session registry. Env unset =>
+// local SQLite index exactly as before (no regression). Analytical/local-only
+// tools (ingest, embed, semantic/graph/recall, tool-call search, adapters) have
+// no /v1 surface and always operate on the local transcript index.
+function sessionStore() {
+  return resolveSessionStore();
+}
 
 const packageInfo = getPackageInfo();
 
@@ -104,7 +98,11 @@ server.registerResource(
     description: "Current ingestion, project, and machine statistics for the local sessions index.",
     mimeType: "application/json",
   },
-  async (uri) => jsonResource(uri, { ingestion: getIngestionStats(), projects: getProjectStats().slice(0, 30), machines: listMachines() })
+  async (uri) => {
+    const store = sessionStore();
+    const [s, machines] = await Promise.all([store.stats(), store.machines()]);
+    return jsonResource(uri, { ingestion: s.by_source, projects: s.projects.slice(0, 30), machines });
+  }
 );
 
 server.registerResource(
@@ -115,7 +113,7 @@ server.registerResource(
     description: "Most recently active indexed sessions.",
     mimeType: "application/json",
   },
-  async (uri) => jsonResource(uri, { sessions: getRecentSessions(20) })
+  async (uri) => jsonResource(uri, { sessions: await sessionStore().recent(20) })
 );
 
 server.registerResource(
@@ -128,9 +126,15 @@ server.registerResource(
   },
   async (uri, variables) => {
     const id = String(variables.id ?? "");
-    const session = getSessionByPrefix(id);
+    const store = sessionStore();
+    const session = await store.get(id);
     if (!session) return jsonResource(uri, { ok: false, error: `session not found: ${id}` });
-    return jsonResource(uri, { ok: true, session, messages: getMessages(session.id), tool_calls: getToolCalls(session.id) });
+    return jsonResource(uri, {
+      ok: true,
+      session,
+      messages: await store.messages(session.id),
+      tool_calls: await store.toolCalls(session.id),
+    });
   }
 );
 
@@ -223,7 +227,7 @@ server.tool(
   },
   async (a: { query: string; source?: string; project_path?: string; machine?: string; limit?: number }) => {
     try {
-      return ok(search(a.query, { source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
+      return ok(await sessionStore().searchContent(a.query, { source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
     } catch (e) {
       return fail(e);
     }
@@ -240,7 +244,7 @@ server.tool(
   },
   async (a: { query: string; source?: string; limit?: number }) => {
     try {
-      return ok(searchToolCalls(a.query, { source: a.source, limit: a.limit }));
+      return ok(await sessionStore().searchToolCalls(a.query, { source: a.source, limit: a.limit }));
     } catch (e) {
       return fail(e);
     }
@@ -260,7 +264,7 @@ server.tool(
   },
   async (a: { query: string; source?: string; project_path?: string; machine?: string; limit?: number; semantic?: boolean }) => {
     try {
-      return ok(await recallSessions(a.query, {
+      return ok(await sessionStore().recall(a.query, {
         source: a.source,
         project_path: a.project_path,
         machine: a.machine,
@@ -279,7 +283,7 @@ server.tool(
   { limit: z.number().optional().describe("Max results (default 20)") },
   async (a: { limit?: number }) => {
     try {
-      return ok(getRecentSessions(a.limit ?? 20));
+      return ok(await sessionStore().recent(a.limit ?? 20));
     } catch (e) {
       return fail(e);
     }
@@ -297,7 +301,7 @@ server.tool(
   },
   async (a: { source?: string; project_path?: string; machine?: string; limit?: number }) => {
     try {
-      return ok(listSessions({ source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
+      return ok(await sessionStore().list({ source: a.source, project_path: a.project_path, machine: a.machine, limit: a.limit }));
     } catch (e) {
       return fail(e);
     }
@@ -310,7 +314,7 @@ server.tool(
   {},
   async () => {
     try {
-      return ok(listMachines());
+      return ok(await sessionStore().machines());
     } catch (e) {
       return fail(e);
     }
@@ -326,11 +330,20 @@ server.tool(
   },
   async (a: { id: string; message_limit?: number }) => {
     try {
-      const session = getSessionByPrefix(a.id);
+      const store = sessionStore();
+      // Everything routes through the Store (LocalStore | ApiStore). The cloud
+      // /v1 registry stores session metadata only, so message/tool transcripts
+      // come back empty in self_hosted mode (they live on the producing machine).
+      const session = await store.get(a.id);
       if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
-      let messages = getMessages(session.id);
+      let messages = await store.messages(session.id);
       if (a.message_limit) messages = messages.slice(0, a.message_limit);
-      return ok({ session, messages, tool_calls: getToolCalls(session.id) });
+      const tool_calls = await store.toolCalls(session.id);
+      const note =
+        store.mode === "local"
+          ? undefined
+          : "self_hosted registry: metadata only; message/tool transcripts live on the producing machine's local index";
+      return ok(note ? { session, messages, tool_calls, note } : { session, messages, tool_calls });
     } catch (e) {
       return fail(e);
     }
@@ -346,9 +359,10 @@ server.tool(
   },
   async (a: { source?: string; force?: boolean }) => {
     try {
-      const results = a.source
-        ? [ingestSource(a.source, { force: a.force })]
-        : ingestAll({ force: a.force });
+      // Ingest is an on-box index operation (staging source for `sync`), so it
+      // always routes through the explicit LocalStore accessor — never a raw
+      // db/lib-ingest import in the tool layer.
+      const results = await getLocalStore().ingest({ source: a.source, force: a.force });
       return ok(results);
     } catch (e) {
       return fail(e);
@@ -362,7 +376,8 @@ server.tool(
   {},
   async () => {
     try {
-      return ok({ ingestion: getIngestionStats(), projects: getProjectStats().slice(0, 30) });
+      const s = await sessionStore().stats();
+      return ok({ ingestion: s.by_source, projects: s.projects.slice(0, 30), totals: { session_count: s.session_count, message_count: s.message_count, tool_call_count: s.tool_call_count } });
     } catch (e) {
       return fail(e);
     }
@@ -382,7 +397,8 @@ server.tool(
   async (a: { query: string; hybrid?: boolean; source?: string; project_path?: string; limit?: number }) => {
     try {
       const o = { source: a.source, project_path: a.project_path, limit: a.limit };
-      return ok(a.hybrid ? await hybridSearch(a.query, o) : await semanticSearch(a.query, o));
+      const store = sessionStore();
+      return ok(a.hybrid ? await store.hybridSearch(a.query, o) : await store.semanticSearch(a.query, o));
     } catch (e) {
       return fail(e);
     }
@@ -395,7 +411,7 @@ server.tool(
   { limit: z.number().optional().describe("Max messages to embed this run (default 200)") },
   async (a: { limit?: number }) => {
     try {
-      return ok(await embedSessions({ limit: a.limit }));
+      return ok(await sessionStore().embed({ limit: a.limit }));
     } catch (e) {
       return fail(e);
     }
@@ -420,175 +436,165 @@ server.tool(
     limit?: number;
   }) => {
     try {
-      if (a.session_id) return ok(sessionGraph(a.session_id));
-      if (a.related_type && a.related_name) return ok(relatedSessions(a.related_type, a.related_name, a.limit ?? 50));
-      return ok(listEntities(a.type));
+      const store = sessionStore();
+      if (a.session_id) return ok(await store.graphSession(a.session_id));
+      if (a.related_type && a.related_name) return ok(await store.graphRelated(a.related_type, a.related_name, a.limit ?? 50));
+      return ok(await store.graphEntities(a.type));
     } catch (e) {
       return fail(e);
     }
   }
 );
 
-// ─── Friendly-name registry + resume tools ───────────────────────────────────
+// ─── Session listing / resume / rename tools (Store-backed) ───────────────────
+// Every tool below routes through the SAME resolveSessionStore() seam as the
+// core query tools: local SQLite index by default, or the shared self_hosted
+// /v1 cloud registry when HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are
+// set. There is no separate on-box friendly-name registry any more (that was the
+// split-brain: a second session view that ignored the shared cloud).
 
 server.tool(
   "sessions_list",
-  "List known sessions with friendly names and metadata.",
-  { project: z.string().optional() },
-  async (args: { project?: string }) => {
-    return textJson(listRegistrySessions({ project: args.project }));
+  "List sessions from the active store (local index, or the shared self_hosted /v1 registry).",
+  { project: z.string().optional(), limit: z.number().int().positive().optional() },
+  async (args: { project?: string; limit?: number }) => {
+    try {
+      return textJson(await sessionStore().list({ project_path: args.project, limit: args.limit }));
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
 server.tool(
   "sessions_history",
-  "List historical sessions with optional today/project/agent filters.",
+  "List sessions from the active store with optional today/project/agent filters.",
   {
     project: z.string().optional(),
     today: z.boolean().optional(),
     agent: z.string().optional(),
+    limit: z.number().int().positive().optional(),
   },
-  async (args: { project?: string; today?: boolean; agent?: string }) => {
-    return textJson(
-      historySessions({
-        project: args.project,
-        today: args.today,
-        agent: args.agent,
-      })
-    );
+  async (args: { project?: string; today?: boolean; agent?: string; limit?: number }) => {
+    try {
+      let sessions = await sessionStore().list({ project_path: args.project, limit: args.limit ?? 200 });
+      if (args.today) {
+        const today = new Date().toISOString().slice(0, 10);
+        sessions = sessions.filter((s) => (s.started_at ?? s.ingested_at ?? "").startsWith(today));
+      }
+      if (args.agent) {
+        const needle = args.agent.toLowerCase();
+        sessions = sessions.filter(
+          (s) =>
+            s.source.toLowerCase().includes(needle) ||
+            (s.title ?? "").toLowerCase().includes(needle) ||
+            (s.model ?? "").toLowerCase().includes(needle)
+        );
+      }
+      return textJson(sessions);
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
 server.tool(
   "sessions_search",
-  "Search session transcripts by text query (registry-backed).",
+  "Full-text search across indexed session transcripts via the active store.",
   {
     query: z.string(),
     project: z.string().optional(),
     limit: z.number().int().positive().optional(),
   },
   async (args: { query: string; project?: string; limit?: number }) => {
-    return textJson(
-      searchSessions(args.query, {
-        project: args.project,
-        limit: args.limit,
-      })
-    );
+    try {
+      return textJson(await sessionStore().searchContent(args.query, { project_path: args.project, limit: args.limit }));
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
 server.tool(
   "sessions_resume",
-  "Resolve a session by friendly name, session ID, or latest project session and return the underlying Claude resume command.",
+  "Resolve a session by id/prefix, latest project session, or the most recent session, and return the underlying Claude resume command.",
   {
     identifier: z.string().optional(),
     project: z.string().optional(),
     latest: z.boolean().optional(),
   },
   async (args: { identifier?: string; project?: string; latest?: boolean }) => {
-    let session = null;
-    if (args.project) {
-      session = latestSessionForProject(args.project);
-    } else if (args.latest || !args.identifier) {
-      session = latestSession();
-    } else {
-      session = findSession(args.identifier);
-    }
+    try {
+      const store = sessionStore();
+      let session: Session | null = null;
+      if (args.project) {
+        session = (await store.list({ project_path: args.project, limit: 1 }))[0] ?? null;
+      } else if (args.latest || !args.identifier) {
+        session = (await store.recent(1))[0] ?? null;
+      } else {
+        session = await store.get(args.identifier);
+      }
 
-    if (!session) {
-      return {
-        content: [{ type: "text" as const, text: "No matching session found" }],
-        isError: true,
-      };
-    }
+      if (!session) {
+        return { content: [{ type: "text" as const, text: "No matching session found" }], isError: true };
+      }
 
-    return textJson({
-      session,
-      command: buildClaudeResumeCommand(session),
-    });
+      return textJson({ session, command: buildResumeCommand(session) });
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
 server.tool(
   "sessions_rename",
-  "Assign a manual friendly name to a session.",
-  { identifier: z.string(), friendly_name: z.string() },
-  async (args: { identifier: string; friendly_name: string }) => {
+  "Set a session's title in the active store (local index, or the shared self_hosted /v1 registry).",
+  { identifier: z.string(), title: z.string() },
+  async (args: { identifier: string; title: string }) => {
     try {
-      return textJson(renameSession(args.identifier, args.friendly_name));
-    } catch (error) {
-      return {
-        content: [{ type: "text" as const, text: String(error) }],
-        isError: true,
-      };
+      const title = args.title.trim();
+      if (!title) return fail("title cannot be empty");
+      const session = await sessionStore().rename(args.identifier, title);
+      if (!session) return fail(`session not found (or ambiguous prefix): ${args.identifier}`);
+      return textJson(session);
+    } catch (e) {
+      return fail(e);
     }
   }
 );
 
 server.tool(
   "sessions_watch",
-  "Return the current watch snapshot for known sessions.",
+  "Return the current session snapshot from the active store.",
   { project: z.string().optional() },
   async (args: { project?: string }) => {
-    return textJson({
-      generated_at: new Date().toISOString(),
-      sessions: listRegistrySessions({ project: args.project }),
-    });
+    try {
+      return textJson({
+        generated_at: new Date().toISOString(),
+        sessions: await sessionStore().list({ project_path: args.project }),
+      });
+    } catch (e) {
+      return fail(e);
+    }
   }
 );
 
 server.tool(
   "sessions_stats",
-  "Return session counts and high-level activity breakdown (registry-backed).",
-  { project: z.string().optional() },
-  async (args: { project?: string }) => {
-    const sessions = listRegistrySessions({ project: args.project });
-    const active = sessions.filter((session) => session.status === "active").length;
-    const idle = sessions.length - active;
-    const projectCounts = sessions.reduce<Record<string, number>>((acc, session) => {
-      acc[session.projectSlug] = (acc[session.projectSlug] ?? 0) + 1;
-      return acc;
-    }, {});
-
-    return textJson({
-      total_sessions: sessions.length,
-      active_sessions: active,
-      idle_sessions: idle,
-      project_counts: projectCounts,
-    });
-  }
-);
-
-// ─── Feedback ───────────────────────────────────────────────────────────────
-
-function getFeedbackDb(): Database {
-  const home = homedir();
-  const dbPath = join(home, ".hasna", "sessions", "sessions.db");
-  const dir = dirname(dbPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const db = new Database(dbPath);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("CREATE TABLE IF NOT EXISTS feedback (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), message TEXT NOT NULL, email TEXT, category TEXT DEFAULT 'general', version TEXT, machine_id TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-  return db;
-}
-
-server.tool(
-  "send_feedback",
-  "Send feedback about this service",
-  { message: z.string(), email: z.string().optional(), category: z.enum(["bug", "feature", "general"]).optional() },
-  async (params: { message: string; email?: string; category?: string }) => {
+  "Return session counts and a per-source / per-project breakdown from the active store.",
+  {},
+  async () => {
     try {
-      const db = getFeedbackDb();
-      db.run("INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)", [
-        params.message,
-        params.email || null,
-        params.category || "general",
-        packageInfo.version,
-      ]);
-      db.close();
-      return { content: [{ type: "text" as const, text: "Feedback saved. Thank you!" }] };
+      const s = await sessionStore().stats();
+      return textJson({
+        total_sessions: s.session_count,
+        total_messages: s.message_count,
+        total_tool_calls: s.tool_call_count,
+        by_source: s.by_source,
+        projects: s.projects.slice(0, 30),
+      });
     } catch (e) {
-      return { content: [{ type: "text" as const, text: String(e) }], isError: true };
+      return fail(e);
     }
   }
 );
@@ -731,7 +737,6 @@ server.tool(
       dryRun: args.dry_run,
       verbose: args.verbose,
       projectPath: args.project,
-      updateRegistry: true,
     });
 
     return textJson({
@@ -741,8 +746,6 @@ server.tool(
     });
   }
 );
-
-registerSessionsStorageTools(server);
 
   return server;
 }

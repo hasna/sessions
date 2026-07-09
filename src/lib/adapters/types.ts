@@ -108,6 +108,4 @@ export interface ImportOptions {
   dryRun?: boolean;
   /** Print detailed progress */
   verbose?: boolean;
-  /** Also write to the sessions registry */
-  updateRegistry?: boolean;
 }
