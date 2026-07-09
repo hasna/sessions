@@ -424,7 +424,7 @@ export async function upsertSession(
      ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
         $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-        $26, $27, $27, $28
+        $26, $27, $28, $29, $30
      )
      ON CONFLICT (source, source_id) DO UPDATE SET
         source_path = EXCLUDED.source_path,
@@ -481,6 +481,7 @@ export async function upsertSession(
       input.duration_seconds ?? null,
       input.source_modified_at ?? null,
       input.machine ?? null,
+      now,
       now,
       metadata,
     ],
