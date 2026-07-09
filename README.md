@@ -1,6 +1,6 @@
 # @hasna/sessions
 
-Search and sync your AI coding sessions — a unified, full-text searchable index
+Search and resume your AI coding sessions — a unified, full-text searchable index
 of every Claude Code, OpenAI Codex, and Gemini session on your machine.
 
 [![npm](https://img.shields.io/npm/v/@hasna/sessions)](https://www.npmjs.com/package/@hasna/sessions)
@@ -41,7 +41,7 @@ sessions search "auth bug" --hybrid          # blend full-text + semantic (RRF)
 
 # High-level recall for coding threads: FTS + optional semantic + tools + graph
 sessions recall "find the thread where we implemented stripe webhooks"
-sessions recall "resume building the CLI storage sync" --json
+sessions recall "resume building the API auth flow" --json
 
 # Knowledge graph — entities (projects/tools/models/repos) and their links
 sessions graph                               # all entities with counts
@@ -145,7 +145,8 @@ Exposes session tools for agents/orchestrators: `search_sessions`,
 `get_session`, `ingest`, `embed`, `session_stats`, `knowledge_graph`, plus
 registry-backed tools (`sessions_list`, `sessions_history`, `sessions_search`,
 `sessions_resume`, `sessions_rename`, `sessions_watch`, `sessions_stats`),
-cross-adapter import tools, agent registry, feedback, and storage-sync tools.
+cross-adapter import tools, and agent registry tools. MCP no longer exposes the
+removed DSN-on-client push/pull tools or direct feedback write tool.
 
 ## HTTP mode
 
@@ -165,32 +166,18 @@ Endpoints: `GET /health` → `{"status":"ok","name":"sessions"}`, MCP at `/mcp`.
 Uses stateless `StreamableHTTPServerTransport` (shared process, many clients).
 `sessions-mcp` without flags still uses stdio (unchanged).
 
-## REST API
+## Local and self-hosted registry mode
 
-```bash
-sessions-serve
-```
+By default sessions use the local SQLite index at `~/.hasna/sessions/`.
+`sessions sync` ingests local sessions and recomputes machine metadata. In local
+mode the on-box index is authoritative, so there is nothing to push or pull.
 
-Endpoints: `/search?q=`, `/recall?q=`, `/tool-calls?q=`, `/recent`, `/list`, `/sessions/:id`,
-`/stats`, `/health`, `/info`.
-
-## Storage Sync
-
-Storage sync is optional. By default sessions use local SQLite at `~/.hasna/sessions/`.
-The top-level `sessions sync` command refreshes the local index first and skips
-remote push when the self_hosted API is not configured. With
-`HASNA_SESSIONS_MODE=self_hosted`, the Sessions API URL, and a Sessions API key,
-it idempotently imports sessions, messages, and tool calls into the shared `/v1`
-API. Live pushes require a successful `--backup-command`; raw SQLite file copies
-are not treated as a safe backup while the local DB may be active.
-
-```bash
-HASNA_SESSIONS_MODE=self_hosted \
-HASNA_SESSIONS_API_URL=https://sessions.hasna.xyz \
-sessions sync --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups' --json
-```
-
-The server owns the Postgres data plane. Clients do not connect to RDS directly.
+To share one registry across machines, point the CLI or MCP server at a
+self-hosted `sessions-serve` instance with `HASNA_SESSIONS_API_URL` and
+`HASNA_SESSIONS_API_KEY`. In that mode `sessions sync` pushes locally indexed
+session metadata and content to the authenticated `/v1` API. Clients do not
+open a Postgres DSN, and the former client-side storage subcommand family has
+been removed.
 
 ## Self-Hosted API Sync
 
@@ -235,6 +222,12 @@ sessions daemon --interval 60 --backup-command 'sessions transfer export --outpu
 sessions sync --watch --interval 60 --max-iterations 10
 ```
 
+Run the service-side Postgres schema with `sessions-serve migrate` using the
+owner DSN. The current server-side storage mode value is
+`HASNA_SESSIONS_STORAGE_MODE=cloud`, but this README uses "self-hosted" for the
+deployment mode: the service runs in Hasna-owned infrastructure or your own
+server, and clients talk to its `/v1` API.
+
 ## Adapter notes
 
 Indexed ingestion currently uses stable local files for Claude Code, local Codex
@@ -244,7 +237,7 @@ a durable local export or API; avoid scraping transient cloud/cache formats.
 
 ## HTTP service (`sessions-serve`) + SDK
 
-`sessions-serve` exposes an HTTP API with the standard health surface and a
+`sessions-serve` exposes unauthenticated health/documentation endpoints and a
 versioned, API-key-authenticated `/v1` API:
 
 - `GET /health`, `GET /ready`, `GET /version` → `{ status, version, mode }`
@@ -253,6 +246,13 @@ versioned, API-key-authenticated `/v1` API:
   `/v1/sessions/:id` (get/delete), `/v1/sessions/:id/messages`,
   `/v1/sessions/:id/tool-calls`,
   `/v1/search`, `/v1/recent`, `/v1/machines`, `/v1/stats`
+- Additional authenticated server routes: `PATCH /v1/sessions/:id`,
+  `POST /v1/relocate`, `GET /v1/search/content`,
+  `GET /v1/search/tools`, `GET /v1/graph`
+
+Legacy unauthenticated content routes such as `/search`, `/recall`,
+`/tool-calls`, `/recent`, `/list`, `/machines`, `/stats`, and `/sessions/:id`
+are removed and should return 404. Use the `/v1` routes with an API key.
 
 Auth uses `@hasna/contracts` API keys (header `x-api-key` or
 `Authorization: Bearer`). Set the signing secret with
@@ -260,11 +260,11 @@ Auth uses `@hasna/contracts` API keys (header `x-api-key` or
 issue keys with `bunx @hasna/contracts issue-key --app sessions --scopes
 'sessions:read,sessions:write'`.
 
-Amendment A1 (PURE REMOTE): in cloud mode (`HASNA_SESSIONS_STORAGE_MODE=cloud`
-+ `HASNA_SESSIONS_DATABASE_URL`) the service reads/writes the shared cloud
-Postgres directly — no sync engine or cache in the service. Apply the schema
-with `sessions-serve migrate` (run with the owner DSN). See `docker-compose.yml`
-for a self-host stack (serve + Postgres) and `Dockerfile` for the ARM64 image.
+In self-hosted server mode (`HASNA_SESSIONS_STORAGE_MODE=cloud` +
+`HASNA_SESSIONS_DATABASE_URL`) the service reads/writes Postgres directly: no
+client-side DSN sync engine and no service-side cache. Apply the schema with
+`sessions-serve migrate` (run with the owner DSN). See `docker-compose.yml` for
+a self-hosted stack (serve + Postgres) and `Dockerfile` for the ARM64 image.
 
 The generated, dependency-free SDK is published at `@hasna/sessions/sdk`:
 
