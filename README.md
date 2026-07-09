@@ -27,6 +27,7 @@ sessions ingest                # all providers
 sessions ingest --source codex # one provider
 sessions ingest --force        # re-index everything
 sessions sync --json           # ingest locally; pushes content when self_hosted API env is set
+sessions sync --dry-run --json # plan a self_hosted /v1 content push
 
 # Full-text search across every session
 sessions search "kubernetes deploy"
@@ -65,6 +66,10 @@ sessions bulk stop --open-only --status idle,dead --dry-run
 # Keep the index continuously fresh (fs.watch + periodic safety re-scan)
 sessions watch-ingest
 sessions watch-ingest --status
+
+# Keep local changes ready for self_hosted sync (bounded polling; Ctrl-C to stop)
+sessions daemon --dry-run --interval 60
+sessions sync --watch --interval 60 --max-iterations 3
 
 # Manual refresh / reindex
 sessions reindex
@@ -146,11 +151,48 @@ tool calls into the shared `/v1` API.
 
 ```bash
 HASNA_SESSIONS_MODE=self_hosted \
-SESSIONS_API_URL=https://sessions.hasna.xyz \
+HASNA_SESSIONS_API_URL=https://sessions.hasna.xyz \
 sessions sync --json
 ```
 
 The server owns the Postgres data plane. Clients do not connect to RDS directly.
+
+## Self-Hosted API Sync
+
+Use API sync when this machine should push local indexed sessions, messages, and
+tool calls to the Hasna self-hosted Sessions service over `/v1` instead of
+writing directly to a database. Configure:
+
+```bash
+export HASNA_SESSIONS_MODE=self_hosted
+export HASNA_SESSIONS_API_URL=https://sessions.hasna.xyz
+export HASNA_SESSIONS_API_KEY=...
+```
+
+Plan first:
+
+```bash
+sessions sync --dry-run --json
+sessions sync --dry-run --source claude --limit 100
+```
+
+Live sync creates a local SQLite backup under `~/.hasna/sessions/backups/`
+before pushing content to `/v1/sessions/import`. Pass a hook if you want the
+command to abort unless your own backup step succeeds. Hook output and the raw
+hook command are suppressed so secrets are not echoed.
+
+```bash
+sessions sync --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups'
+```
+
+For daemon/watch mode, use bounded polling. Unchanged cycles are suppressed so a
+long-running worker does not spam logs, and `--max-iterations` is available for
+smoke tests or supervised runs.
+
+```bash
+sessions daemon --interval 60
+sessions sync --watch --interval 60 --max-iterations 10
+```
 
 ## Adapter notes
 
