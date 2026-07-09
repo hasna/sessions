@@ -1,14 +1,23 @@
 // Cloud (Postgres) data access for open-sessions serve. PURE REMOTE (A1):
 // every function reads/writes the shared RDS directly through the vendored kit.
 //
-// Cloud holds session/message/tool metadata (large blobs stay local / go to S3
-// later), so search here is a metadata search (title/project) rather than the
-// SQLite FTS5 full-text index used in local mode.
+// Cloud holds sessions, messages, and tool calls in Postgres. Local SQLite is
+// only the on-box ingest/source index before a client pushes through /v1/import.
 
-import type { PoolQueryClient } from "../../generated/storage-kit/index.js";
-import type { Machine, Session } from "../../types/index.js";
+import type { PoolQueryClient, TypedQueryClient } from "../../generated/storage-kit/index.js";
+import type {
+  Machine,
+  Message,
+  MessageInsert,
+  Session,
+  SessionContentBackup,
+  SessionContentImport,
+  ToolCall,
+  ToolCallInsert,
+} from "../../types/index.js";
 import { getCloudClient } from "./client.js";
 import { encodePath } from "../../lib/paths.js";
+import { contentShrinkError } from "../../lib/content-import-safety.js";
 
 interface SessionRow {
   id: string;
@@ -40,6 +49,41 @@ interface SessionRow {
   updated_at: string;
   source_modified_at: string | null;
   machine: string | null;
+  metadata: string | null;
+  [key: string]: unknown;
+}
+
+interface MessageRow {
+  id: string;
+  session_id: string;
+  source_id: string | null;
+  parent_message_id: string | null;
+  role: string;
+  content: string | null;
+  content_preview: string | null;
+  model: string | null;
+  is_sidechain: boolean;
+  sequence_num: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  thinking_tokens: number;
+  timestamp: string | null;
+  metadata: string | null;
+  [key: string]: unknown;
+}
+
+interface ToolCallRow {
+  id: string;
+  message_id: string | null;
+  session_id: string;
+  tool_name: string;
+  tool_input: string | null;
+  tool_output: string | null;
+  duration_ms: number | null;
+  status: string | null;
+  timestamp: string | null;
   metadata: string | null;
   [key: string]: unknown;
 }
@@ -93,6 +137,53 @@ function rowToSession(row: SessionRow): Session {
   };
 }
 
+function parseMetadata(value: string | null): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function rowToMessage(row: MessageRow): Message {
+  return {
+    id: row.id,
+    session_id: row.session_id,
+    source_id: row.source_id,
+    parent_message_id: row.parent_message_id,
+    role: row.role as Message["role"],
+    content: row.content,
+    content_preview: row.content_preview,
+    model: row.model,
+    is_sidechain: Boolean(row.is_sidechain),
+    sequence_num: row.sequence_num === null ? null : num(row.sequence_num),
+    input_tokens: num(row.input_tokens),
+    output_tokens: num(row.output_tokens),
+    cache_read_tokens: num(row.cache_read_tokens),
+    cache_write_tokens: num(row.cache_write_tokens),
+    thinking_tokens: num(row.thinking_tokens),
+    timestamp: row.timestamp,
+    metadata: parseMetadata(row.metadata),
+  };
+}
+
+function rowToToolCall(row: ToolCallRow): ToolCall {
+  return {
+    id: row.id,
+    message_id: row.message_id,
+    session_id: row.session_id,
+    tool_name: row.tool_name,
+    tool_input: row.tool_input,
+    tool_output: row.tool_output,
+    duration_ms: row.duration_ms === null ? null : num(row.duration_ms),
+    status: (row.status as ToolCall["status"]) ?? null,
+    timestamp: row.timestamp,
+    metadata: parseMetadata(row.metadata),
+  };
+}
+
 export interface ListOptions {
   source?: string;
   project_path?: string;
@@ -125,7 +216,7 @@ function clampLimit(limit: number | undefined, fallback: number): number {
 
 export async function listSessions(
   opts: ListOptions = {},
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<Session[]> {
   const params: unknown[] = [];
   const where = buildFilters(opts, params);
@@ -140,7 +231,7 @@ export async function listSessions(
 
 export async function getRecentSessions(
   limit = 20,
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<Session[]> {
   const rows = await client.many<SessionRow>(
     `SELECT * FROM sessions ORDER BY COALESCE(started_at, ingested_at) DESC LIMIT $1`,
@@ -151,7 +242,7 @@ export async function getRecentSessions(
 
 export async function getSession(
   id: string,
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<Session | null> {
   const row = await client.get<SessionRow>(`SELECT * FROM sessions WHERE id = $1`, [id]);
   return row ? rowToSession(row) : null;
@@ -159,7 +250,7 @@ export async function getSession(
 
 export async function getSessionByPrefix(
   idOrPrefix: string,
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<Session | null> {
   const exact = await getSession(idOrPrefix, client);
   if (exact) return exact;
@@ -178,7 +269,7 @@ export interface SessionSearchHit {
 export async function searchSessions(
   query: string,
   opts: ListOptions = {},
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<SessionSearchHit[]> {
   const params: unknown[] = [`%${query}%`];
   const clauses = ["(title ILIKE $1 OR project_name ILIKE $1 OR project_path ILIKE $1)"];
@@ -207,7 +298,7 @@ export async function searchSessions(
   }));
 }
 
-export async function listMachines(client: PoolQueryClient = getCloudClient()): Promise<Machine[]> {
+export async function listMachines(client: TypedQueryClient = getCloudClient()): Promise<Machine[]> {
   const rows = await client.many<Machine & Record<string, unknown>>(
     `SELECT name, hostname, platform, first_seen_at, last_seen_at, session_count
        FROM machines ORDER BY last_seen_at DESC`,
@@ -230,7 +321,7 @@ export interface CloudStats {
   projects: { project_name: string | null; project_path: string | null; session_count: number }[];
 }
 
-export async function getStats(client: PoolQueryClient = getCloudClient()): Promise<CloudStats> {
+export async function getStats(client: TypedQueryClient = getCloudClient()): Promise<CloudStats> {
   const totals = await client.get<{ sessions: number; messages: number; tool_calls: number }>(
     `SELECT
         (SELECT COUNT(*) FROM sessions) AS sessions,
@@ -279,8 +370,17 @@ export interface UpsertSessionInput {
   is_subagent?: boolean;
   parent_session_id?: string | null;
   machine?: string | null;
+  total_input_tokens?: number;
+  total_output_tokens?: number;
+  total_cache_read_tokens?: number;
+  total_cache_write_tokens?: number;
+  total_thinking_tokens?: number;
+  message_count?: number;
+  tool_call_count?: number;
   started_at?: string | null;
   ended_at?: string | null;
+  duration_seconds?: number | null;
+  source_modified_at?: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -291,13 +391,13 @@ function randomId(): string {
 }
 
 /**
- * Insert or update a session (metadata only). Keyed on id (or a generated id).
- * Also upserts the (source, source_id) natural key on conflict. Returns the
- * stored row. Cloud is authoritative — no local mirror.
+ * Insert or update a session row. The (source, source_id) natural key is the
+ * idempotency key; a provided id is used only for new natural-key rows.
+ * Cloud is authoritative - no local mirror.
  */
 export async function upsertSession(
   input: UpsertSessionInput,
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<Session> {
   const validSources = new Set(["claude", "codex", "gemini"]);
   if (!validSources.has(input.source)) {
@@ -306,20 +406,27 @@ export async function upsertSession(
   if (!input.source_id || typeof input.source_id !== "string") {
     throw new Error("source_id is required");
   }
-  const id = input.id && input.id.length > 0 ? input.id : randomId();
+  const existing = await client.get<{ id: string }>(
+    `SELECT id FROM sessions WHERE source = $1 AND source_id = $2`,
+    [input.source, input.source_id],
+  );
+  const id = existing?.id ?? (input.id && input.id.length > 0 ? input.id : randomId());
   const metadata = JSON.stringify(input.metadata ?? {});
   const now = new Date().toISOString();
   await client.execute(
     `INSERT INTO sessions (
         id, source, source_id, source_path, title, project_path, project_name,
         model, model_provider, git_branch, git_sha, git_origin_url, cli_version,
-        is_subagent, parent_session_id, started_at, ended_at, machine,
-        ingested_at, updated_at, metadata
+        is_subagent, parent_session_id, total_input_tokens, total_output_tokens,
+        total_cache_read_tokens, total_cache_write_tokens, total_thinking_tokens,
+        message_count, tool_call_count, started_at, ended_at, duration_seconds,
+        source_modified_at, machine, ingested_at, updated_at, metadata
      ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $19, $20
+        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
+        $26, $27, $28, $29, $30
      )
-     ON CONFLICT (id) DO UPDATE SET
+     ON CONFLICT (source, source_id) DO UPDATE SET
         source_path = EXCLUDED.source_path,
         title = EXCLUDED.title,
         project_path = EXCLUDED.project_path,
@@ -332,8 +439,17 @@ export async function upsertSession(
         cli_version = EXCLUDED.cli_version,
         is_subagent = EXCLUDED.is_subagent,
         parent_session_id = EXCLUDED.parent_session_id,
+        total_input_tokens = EXCLUDED.total_input_tokens,
+        total_output_tokens = EXCLUDED.total_output_tokens,
+        total_cache_read_tokens = EXCLUDED.total_cache_read_tokens,
+        total_cache_write_tokens = EXCLUDED.total_cache_write_tokens,
+        total_thinking_tokens = EXCLUDED.total_thinking_tokens,
+        message_count = EXCLUDED.message_count,
+        tool_call_count = EXCLUDED.tool_call_count,
         started_at = EXCLUDED.started_at,
         ended_at = EXCLUDED.ended_at,
+        duration_seconds = EXCLUDED.duration_seconds,
+        source_modified_at = EXCLUDED.source_modified_at,
         machine = EXCLUDED.machine,
         updated_at = EXCLUDED.updated_at,
         metadata = EXCLUDED.metadata`,
@@ -353,9 +469,19 @@ export async function upsertSession(
       input.cli_version ?? null,
       input.is_subagent ?? false,
       input.parent_session_id ?? null,
+      input.total_input_tokens ?? 0,
+      input.total_output_tokens ?? 0,
+      input.total_cache_read_tokens ?? 0,
+      input.total_cache_write_tokens ?? 0,
+      input.total_thinking_tokens ?? 0,
+      input.message_count ?? 0,
+      input.tool_call_count ?? 0,
       input.started_at ?? null,
       input.ended_at ?? null,
+      input.duration_seconds ?? null,
+      input.source_modified_at ?? null,
       input.machine ?? null,
+      now,
       now,
       metadata,
     ],
@@ -363,6 +489,184 @@ export async function upsertSession(
   const stored = await getSession(id, client);
   if (!stored) throw new Error("failed to read back upserted session");
   return stored;
+}
+
+function sumMessages(messages: MessageInsert[], key: keyof MessageInsert): number {
+  let total = 0;
+  for (const message of messages) {
+    const value = message[key];
+    if (typeof value === "number") total += value;
+  }
+  return total;
+}
+
+function messageId(input: MessageInsert): string {
+  return input.id && input.id.length > 0 ? input.id : randomId();
+}
+
+function toolCallId(input: ToolCallInsert): string {
+  return input.id && input.id.length > 0 ? input.id : randomId();
+}
+
+function validMessageRole(role: unknown): role is Message["role"] {
+  return ["user", "assistant", "system", "tool", "info", "thinking"].includes(String(role));
+}
+
+function validToolStatus(status: unknown): status is ToolCall["status"] {
+  return status === null || status === undefined || ["success", "error", "timeout"].includes(String(status));
+}
+
+export interface SessionContentImportResult {
+  session: Session;
+  imported: { messages: number; toolCalls: number };
+  backup: SessionContentBackup | null;
+}
+
+export async function importSessionContent(
+  input: SessionContentImport,
+  client: PoolQueryClient = getCloudClient(),
+): Promise<SessionContentImportResult> {
+  if (!input || typeof input !== "object") throw new Error("expected a JSON object body");
+  if (!input.session || typeof input.session !== "object") throw new Error("session is required");
+  if (!Array.isArray(input.messages)) throw new Error("messages must be an array");
+  if (!Array.isArray(input.toolCalls)) throw new Error("toolCalls must be an array");
+  const messages = input.messages;
+  const toolCalls = input.toolCalls;
+  for (const message of messages) {
+    if (!validMessageRole(message.role)) throw new Error(`invalid message role '${String(message.role)}'`);
+  }
+  for (const toolCall of toolCalls) {
+    if (!toolCall.tool_name || typeof toolCall.tool_name !== "string") {
+      throw new Error("tool_call.tool_name is required");
+    }
+    if (!validToolStatus(toolCall.status)) {
+      throw new Error(`invalid tool_call status '${String(toolCall.status)}'`);
+    }
+  }
+
+  return client.transaction(async (tx) => {
+    const existing = await tx.get<{ id: string }>(
+      `SELECT id FROM sessions WHERE source = $1 AND source_id = $2`,
+      [input.session.source, input.session.source_id],
+    );
+    if (existing) {
+      const counts = await tx.get<{ messages: number; tool_calls: number }>(
+        `SELECT
+            (SELECT COUNT(*) FROM messages WHERE session_id = $1) AS messages,
+            (SELECT COUNT(*) FROM tool_calls WHERE session_id = $1) AS tool_calls`,
+        [existing.id],
+      );
+      const error = contentShrinkError(input, {
+        messages: num(counts?.messages),
+        toolCalls: num(counts?.tool_calls),
+      });
+      if (error) throw new Error(error);
+    }
+
+    const session = await upsertSession(
+      {
+        ...input.session,
+        message_count: messages.length,
+        tool_call_count: toolCalls.length,
+        total_input_tokens: input.session.total_input_tokens ?? sumMessages(messages, "input_tokens"),
+        total_output_tokens: input.session.total_output_tokens ?? sumMessages(messages, "output_tokens"),
+        total_cache_read_tokens:
+          input.session.total_cache_read_tokens ?? sumMessages(messages, "cache_read_tokens"),
+        total_cache_write_tokens:
+          input.session.total_cache_write_tokens ?? sumMessages(messages, "cache_write_tokens"),
+        total_thinking_tokens:
+          input.session.total_thinking_tokens ?? sumMessages(messages, "thinking_tokens"),
+      },
+      tx,
+    );
+
+    await tx.execute(`DELETE FROM tool_calls WHERE session_id = $1`, [session.id]);
+    await tx.execute(`DELETE FROM messages WHERE session_id = $1`, [session.id]);
+
+    for (const message of messages) {
+      await tx.execute(
+        `INSERT INTO messages (
+            id, session_id, source_id, parent_message_id, role, content, content_preview,
+            model, is_sidechain, sequence_num, input_tokens, output_tokens,
+            cache_read_tokens, cache_write_tokens, thinking_tokens, timestamp, metadata
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+          )`,
+        [
+          messageId(message),
+          session.id,
+          message.source_id ?? null,
+          message.parent_message_id ?? null,
+          message.role,
+          message.content ?? null,
+          message.content_preview ?? (message.content ? message.content.slice(0, 280) : null),
+          message.model ?? null,
+          message.is_sidechain ?? false,
+          message.sequence_num ?? null,
+          message.input_tokens ?? 0,
+          message.output_tokens ?? 0,
+          message.cache_read_tokens ?? 0,
+          message.cache_write_tokens ?? 0,
+          message.thinking_tokens ?? 0,
+          message.timestamp ?? null,
+          JSON.stringify(message.metadata ?? {}),
+        ],
+      );
+    }
+
+    for (const toolCall of toolCalls) {
+      await tx.execute(
+        `INSERT INTO tool_calls (
+            id, message_id, session_id, tool_name, tool_input, tool_output,
+            duration_ms, status, timestamp, metadata
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+          )`,
+        [
+          toolCallId(toolCall),
+          toolCall.message_id ?? null,
+          session.id,
+          toolCall.tool_name,
+          toolCall.tool_input ?? null,
+          toolCall.tool_output ?? null,
+          toolCall.duration_ms ?? null,
+          toolCall.status ?? null,
+          toolCall.timestamp ?? null,
+          JSON.stringify(toolCall.metadata ?? {}),
+        ],
+      );
+    }
+
+    const stored = await getSession(session.id, tx);
+    if (!stored) throw new Error("failed to read back imported session");
+    return {
+      session: stored,
+      imported: { messages: messages.length, toolCalls: toolCalls.length },
+      backup: input.backup ?? null,
+    };
+  });
+}
+
+export async function getMessages(
+  sessionId: string,
+  client: TypedQueryClient = getCloudClient(),
+): Promise<Message[]> {
+  const rows = await client.many<MessageRow>(
+    `SELECT * FROM messages WHERE session_id = $1 ORDER BY sequence_num ASC, timestamp ASC`,
+    [sessionId],
+  );
+  return rows.map(rowToMessage);
+}
+
+export async function getToolCalls(
+  sessionId: string,
+  client: TypedQueryClient = getCloudClient(),
+): Promise<ToolCall[]> {
+  const rows = await client.many<ToolCallRow>(
+    `SELECT * FROM tool_calls WHERE session_id = $1 ORDER BY timestamp ASC`,
+    [sessionId],
+  );
+  return rows.map(rowToToolCall);
 }
 
 export interface RelocateResult {
@@ -407,7 +711,7 @@ export async function relocatePaths(
 /** Delete a session by id. Returns true if a row was removed. */
 export async function deleteSession(
   id: string,
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<boolean> {
   const row = await client.get<{ id: string }>(
     `DELETE FROM sessions WHERE id = $1 RETURNING id`,
@@ -425,7 +729,7 @@ export async function deleteSession(
 export async function updateSessionTitle(
   idOrPrefix: string,
   title: string,
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<Session | null> {
   const target = await getSessionByPrefix(idOrPrefix, client);
   if (!target) return null;
@@ -480,7 +784,7 @@ function sessionFilterClauses(opts: ListOptions, params: unknown[], alias = "s")
 export async function searchContent(
   query: string,
   opts: ListOptions = {},
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<ContentSearchHit[]> {
   const limit = clampLimit(opts.limit, 20);
   const like = `%${query}%`;
@@ -552,7 +856,7 @@ export interface CloudToolCallHit {
 export async function searchToolCalls(
   query: string,
   opts: ListOptions = {},
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<CloudToolCallHit[]> {
   const limit = clampLimit(opts.limit, 20);
   const params: unknown[] = [`%${query}%`];
@@ -611,7 +915,7 @@ const ENTITY_TYPES: CloudEntityType[] = ["project", "tool", "model", "provider",
 /** Knowledge-graph entities (projects/tools/models/providers/repos) from the shared cloud. */
 export async function graphEntities(
   type: CloudEntityType | undefined,
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<CloudEntity[]> {
   const types = type ? [type] : ENTITY_TYPES;
   const out: CloudEntity[] = [];
@@ -635,7 +939,7 @@ export async function graphRelated(
   type: CloudEntityType,
   name: string,
   limit = 50,
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<CloudRelatedSession[]> {
   const rows = await client.many<Record<string, unknown>>(
     `${RELATED_SQL[type]} ORDER BY COALESCE(started_at, ingested_at) DESC LIMIT $2`,
@@ -662,7 +966,7 @@ export interface CloudSessionGraph {
 /** The entity neighborhood of one session (resolved by id or prefix) in the shared cloud. */
 export async function graphSession(
   idOrPrefix: string,
-  client: PoolQueryClient = getCloudClient(),
+  client: TypedQueryClient = getCloudClient(),
 ): Promise<CloudSessionGraph | null> {
   const session = await getSessionByPrefix(idOrPrefix, client);
   if (!session) return null;

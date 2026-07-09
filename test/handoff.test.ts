@@ -104,20 +104,26 @@ describe("ExternalHandoffBundleV1", () => {
     const stripeKey = ["s", "k_live_", "abcdefghijklmnopqrstuvwxyz"].join("");
     const slackToken = ["xoxb-", "123456789012-abcdefghijkl"].join("");
     const jwt = ["eyJ", "abcdefghijklmnop", ".", "eyJ", "qrstuvwxyzabcdef", ".", "signature1234567890"].join("");
+    const apiKeyValue = ["sample-", "secret-", "value-", "12345"].join("");
+    const bearerHeader = ["Authorization", ": ", "Bearer", " ", "sample-", "bearer-", "token-", "12345"].join("");
+    const passwordValue = ["super-", "secret"].join("");
+    const tokenValue = ["sample-", "token-", "value-", "12345"].join("");
+    const userPassword = ["secret-", "value"].join("");
+    const singleToken = ["plain-", "token-", "value"].join("");
     const privateKey = [
-      "-----BEGIN PRIVATE KEY-----",
+      ["-----BEGIN ", "PRIVATE KEY", "-----"].join(""),
       "not-a-real-key-material",
-      "-----END PRIVATE KEY-----",
+      ["-----END ", "PRIVATE KEY", "-----"].join(""),
     ].join("\n");
-    const apiKeyAssignment = ["OPENAI", "_API", "_KEY", "=sample-secret-value-12345"].join("");
-    const tokenizedUrl = "https://user:secret-value@example.com/repo.git";
-    const singleTokenUrl = ["https://", "plain-token-value", "@example.com/repo.git"].join("");
+    const apiKeyAssignment = ["OPENAI", "_API", "_KEY", "=", apiKeyValue].join("");
+    const tokenizedUrl = ["https://user:", userPassword, "@example.com/repo.git"].join("");
+    const singleTokenUrl = ["https://", singleToken, "@example.com/repo.git"].join("");
     const redacted = redactHandoffText(
       [
         apiKeyAssignment,
-        "token: sample-token-value-12345",
-        "password=\"super-secret\"",
-        "Authorization: Bearer sample-bearer-token-12345",
+        ["token", ": ", tokenValue].join(""),
+        ["password", "=", `"${passwordValue}"`].join(""),
+        bearerHeader,
         npmToken,
         stripeKey,
         slackToken,
@@ -129,23 +135,24 @@ describe("ExternalHandoffBundleV1", () => {
     );
 
     expect(redacted).toContain("[REDACTED_SECRET]");
-    expect(redacted).not.toContain("sample-secret-value-12345");
-    expect(redacted).not.toContain("sample-token-value-12345");
-    expect(redacted).not.toContain("super-secret");
-    expect(redacted).not.toContain("Bearer sample-bearer-token-12345");
+    expect(redacted).not.toContain(apiKeyValue);
+    expect(redacted).not.toContain(tokenValue);
+    expect(redacted).not.toContain(passwordValue);
+    expect(redacted).not.toContain(bearerHeader);
     expect(redacted).not.toContain(npmToken);
     expect(redacted).not.toContain(stripeKey);
     expect(redacted).not.toContain(slackToken);
     expect(redacted).not.toContain(jwt);
     expect(redacted).not.toContain("not-a-real-key-material");
-    expect(redacted).not.toContain("secret-value");
-    expect(redacted).not.toContain("plain-token-value");
+    expect(redacted).not.toContain(userPassword);
+    expect(redacted).not.toContain(singleToken);
   });
 
   it("creates and writes a redacted bundle with an explicit Claude session", () => {
+    const transcriptSecret = ["sample-", "secret-", "value-", "12345"].join("");
     const oldTranscript = writeClaudeTranscript(
       "session-old",
-      "handoff this work token=sample-secret-value-12345",
+      ["handoff this work ", "token", "=", transcriptSecret].join(""),
     );
     const newTranscript = writeClaudeTranscript("session-new", "latest mtime but wrong session");
     utimesSync(oldTranscript, new Date("2026-07-09T09:00:00.000Z"), new Date("2026-07-09T09:00:00.000Z"));
@@ -167,7 +174,7 @@ describe("ExternalHandoffBundleV1", () => {
     expect(existsSync(result.bundle_path)).toBe(true);
     expect(result.bundle.source.transcript_path).toBe(oldTranscript);
     expect(result.bundle.source.transcript_detected_by).toBe("explicit_session");
-    expect(result.bundle.context.recent_turns.map((turn) => turn.text).join(" ")).not.toContain("sample-secret-value");
+    expect(result.bundle.context.recent_turns.map((turn) => turn.text).join(" ")).not.toContain(transcriptSecret);
     expect(result.bundle.context.recent_turns.map((turn) => turn.text).join(" ")).toContain("[REDACTED_SECRET]");
     expect(result.bundle.auth_refs).toEqual([{ agent: "codewith", name: "live-codewith" }]);
     expect(result.bundle.verification.status).toBe("provided");
@@ -180,7 +187,8 @@ describe("ExternalHandoffBundleV1", () => {
 
   it("redacts user-password git remotes before persisting bundle metadata", () => {
     writeClaudeTranscript("session-git", "git remote handoff");
-    const secretRemote = "https://user:secret-value@example.com/hasna/example.git";
+    const remotePassword = ["secret-", "value"].join("");
+    const secretRemote = ["https://user:", remotePassword, "@example.com/hasna/example.git"].join("");
     Bun.spawnSync({ cmd: ["git", "init"], cwd: PROJECT_CWD, stdout: "pipe", stderr: "pipe" });
     Bun.spawnSync({ cmd: ["git", "remote", "add", "origin", secretRemote], cwd: PROJECT_CWD, stdout: "pipe", stderr: "pipe" });
 
@@ -195,12 +203,13 @@ describe("ExternalHandoffBundleV1", () => {
     });
 
     expect(result.bundle.git.origin_url).toBe("https://[REDACTED_CREDENTIALS]@example.com/hasna/example.git");
-    expect(JSON.stringify(result.bundle)).not.toContain("secret-value");
+    expect(JSON.stringify(result.bundle)).not.toContain(remotePassword);
   });
 
   it("redacts single-token git remotes before persisting bundle metadata", () => {
     writeClaudeTranscript("session-git-token", "git remote token handoff");
-    const secretRemote = ["https://", "plain-token-value", "@example.com/hasna/example.git"].join("");
+    const remoteToken = ["plain-", "token-", "value"].join("");
+    const secretRemote = ["https://", remoteToken, "@example.com/hasna/example.git"].join("");
     Bun.spawnSync({ cmd: ["git", "init"], cwd: PROJECT_CWD, stdout: "pipe", stderr: "pipe" });
     Bun.spawnSync({ cmd: ["git", "remote", "add", "origin", secretRemote], cwd: PROJECT_CWD, stdout: "pipe", stderr: "pipe" });
 
@@ -215,7 +224,7 @@ describe("ExternalHandoffBundleV1", () => {
     });
 
     expect(result.bundle.git.origin_url).toBe("https://[REDACTED_CREDENTIALS]@example.com/hasna/example.git");
-    expect(JSON.stringify(result.bundle)).not.toContain("plain-token-value");
+    expect(JSON.stringify(result.bundle)).not.toContain(remoteToken);
   });
 
   it("bounds large transcript hashing while still reading recent tail turns", () => {

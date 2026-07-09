@@ -169,6 +169,39 @@ export interface ParsedSession {
   toolCalls: ToolCallInsert[];
 }
 
+export interface SessionContentBackup {
+  /** Caller-created backup artifact path or URI, if available. */
+  artifact?: string | null;
+  /** ISO timestamp when the caller created or verified the backup. */
+  created_at?: string | null;
+  /** Human-readable backup note; do not include secrets. */
+  note?: string | null;
+}
+
+export interface SessionContentDestructiveIntent {
+  /**
+   * Allows an import payload to replace an existing session with fewer messages
+   * or tool calls. Requires a non-empty reason.
+   */
+  allowContentShrink: boolean;
+  /** Human-readable reason for intentionally shrinking synced content. */
+  reason: string;
+}
+
+export interface SessionContentImport extends ParsedSession {
+  /**
+   * Caller-provided backup/export metadata. The server records only this
+   * metadata in the response; callers own the actual SQLite-safe backup
+   * artifact lifecycle.
+   */
+  backup?: SessionContentBackup;
+  /**
+   * Explicit destructive intent for intentional content pruning. By default,
+   * import refuses to replace existing cloud content with fewer child rows.
+   */
+  destructive?: SessionContentDestructiveIntent;
+}
+
 // ── Errors ─────────────────────────────────────────────────────────────
 
 export class SessionNotFoundError extends Error {

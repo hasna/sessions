@@ -15,14 +15,15 @@
 
 import { resolveStorageClient } from "@hasna/contracts/client/storage";
 import type { HasnaStorageClient } from "@hasna/contracts/client/storage";
-import type { Machine, Message, Session, ToolCall } from "../types/index.js";
-import type { UpsertSessionInput } from "./cloud/store.js";
+import type { Machine, Message, Session, SessionContentImport, ToolCall } from "../types/index.js";
+import type { SessionContentImportResult, UpsertSessionInput } from "./cloud/store.js";
 import type { SearchHit, ToolCallHit } from "../lib/search.js";
 import type { Entity, EntityType, RelatedSession, SessionGraph } from "../lib/graph.js";
 import type { RecallOptions, RecallResponse } from "../lib/recall.js";
 import type { EmbedResult } from "../lib/embeddings.js";
 import type { MergeResult } from "./merge.js";
 import type { IngestResult } from "../lib/ingest/index.js";
+import { contentShrinkError } from "../lib/content-import-safety.js";
 
 export interface IngestStoreOptions {
   /** Ingest only this provider (claude | codex | gemini). */
@@ -64,6 +65,8 @@ export interface SessionStore {
   recent(limit: number): Promise<Session[]>;
   get(idOrPrefix: string): Promise<Session | null>;
   create(input: UpsertSessionInput): Promise<Session>;
+  /** Idempotently import/upsert a session with messages and tool calls. */
+  importContent(input: SessionContentImport): Promise<SessionContentImportResult>;
   remove(id: string): Promise<boolean>;
   /**
    * Set a session's title (the "rename" operation), resolving by full id or a
@@ -165,6 +168,20 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
       });
       return res.session;
     },
+    async importContent(input) {
+      const res = await t.post<{ session: Session; imported: { messages: number; toolCalls: number }; backup: SessionContentImport["backup"] | null }>(
+        "/sessions/import",
+        input,
+        {
+          idempotencyKey: `${input.session.source}:${input.session.source_id}:content`,
+        },
+      );
+      return {
+        session: res.session,
+        imported: res.imported,
+        backup: res.backup ?? null,
+      };
+    },
     async remove(id) {
       try {
         await t.del(`/sessions/${encodeURIComponent(id)}`);
@@ -208,14 +225,13 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
       const { ok: _ok, ...stats } = res;
       return stats;
     },
-    // Message/tool-call blobs are not loaded into the cloud /v1 surface (they stay
-    // on-box / go to S3). Return empty rather than fabricating — callers that need
-    // bodies must read them from the local index.
-    async messages() {
-      return [];
+    async messages(sessionId) {
+      const res = await t.get<{ messages: Message[] }>(`/sessions/${encodeURIComponent(sessionId)}/messages`);
+      return res.messages ?? [];
     },
-    async toolCalls() {
-      return [];
+    async toolCalls(sessionId) {
+      const res = await t.get<{ toolCalls: ToolCall[] }>(`/sessions/${encodeURIComponent(sessionId)}/tool-calls`);
+      return res.toolCalls ?? [];
     },
     async searchContent(query, opts) {
       const res = await t.get<{ results: SearchHit[] }>("/search/content", {
@@ -311,6 +327,28 @@ function localStore(): SessionStore {
     async create(input) {
       const { upsertSession } = await import("./sessions.js");
       return upsertSession(input as never);
+    },
+    async importContent(input) {
+      const { getMessages, getSessionByPrefix, getSessionBySource, getToolCalls, saveParsedSession } = await import("./sessions.js");
+      const existing =
+        getSessionBySource(input.session.source, input.session.source_id) ??
+        (input.session.id ? getSessionByPrefix(input.session.id) : null);
+      if (existing) {
+        const error = contentShrinkError(input, {
+          messages: getMessages(existing.id).length,
+          toolCalls: getToolCalls(existing.id).length,
+        });
+        if (error) throw new Error(error);
+      }
+      const session = saveParsedSession(input);
+      return {
+        session,
+        imported: {
+          messages: input.messages.length,
+          toolCalls: input.toolCalls.length,
+        },
+        backup: input.backup ?? null,
+      };
     },
     async remove(id) {
       const { getSession, deleteSession } = await import("./sessions.js");

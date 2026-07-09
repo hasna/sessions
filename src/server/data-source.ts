@@ -5,11 +5,12 @@
 // for self-hosters and tests without a Postgres. Both return identical wire
 // shapes so the generated SDK/OpenAPI is one contract.
 
-import type { Machine, Session } from "../types/index.js";
+import type { Machine, Message, Session, SessionContentImport, ToolCall } from "../types/index.js";
 import type { SearchHit, ToolCallHit } from "../lib/search.js";
 import type { Entity, EntityType, RelatedSession, SessionGraph } from "../lib/graph.js";
 import { isCloudMode } from "../db/cloud/client.js";
 import * as cloud from "../db/cloud/store.js";
+import { contentShrinkError } from "../lib/content-import-safety.js";
 
 export interface ListOptions {
   source?: string;
@@ -41,9 +42,12 @@ export interface DataSource {
   machines(): Promise<Machine[]>;
   stats(): Promise<Stats>;
   create(input: cloud.UpsertSessionInput): Promise<Session>;
+  importContent(input: SessionContentImport): Promise<cloud.SessionContentImportResult>;
   remove(id: string): Promise<boolean>;
   rename(idOrPrefix: string, title: string): Promise<Session | null>;
   relocatePaths(oldPath: string, newPath: string): Promise<{ rowsUpdated: number }>;
+  messages(sessionId: string): Promise<Message[]>;
+  toolCalls(sessionId: string): Promise<ToolCall[]>;
   searchContent(query: string, opts: ListOptions): Promise<SearchHit[]>;
   searchToolCalls(query: string, opts: ListOptions): Promise<ToolCallHit[]>;
   graphEntities(type?: EntityType): Promise<Entity[]>;
@@ -61,9 +65,12 @@ const cloudSource: DataSource = {
   machines: () => cloud.listMachines(),
   stats: () => cloud.getStats(),
   create: (input) => cloud.upsertSession(input),
+  importContent: (input) => cloud.importSessionContent(input),
   remove: (id) => cloud.deleteSession(id),
   rename: (idOrPrefix, title) => cloud.updateSessionTitle(idOrPrefix, title),
   relocatePaths: (oldPath, newPath) => cloud.relocatePaths(oldPath, newPath),
+  messages: (sessionId) => cloud.getMessages(sessionId),
+  toolCalls: (sessionId) => cloud.getToolCalls(sessionId),
   searchContent: (query, opts) => cloud.searchContent(query, opts),
   searchToolCalls: (query, opts) => cloud.searchToolCalls(query, opts),
   graphEntities: (type) => cloud.graphEntities(type as cloud.CloudEntityType | undefined),
@@ -137,6 +144,28 @@ function localSource(): DataSource {
       const { upsertSession } = await import("../db/sessions.js");
       return upsertSession(input as never);
     },
+    async importContent(input) {
+      const { getMessages, getSessionByPrefix, getSessionBySource, getToolCalls, saveParsedSession } = await import("../db/sessions.js");
+      const existing =
+        getSessionBySource(input.session.source, input.session.source_id) ??
+        (input.session.id ? getSessionByPrefix(input.session.id) : null);
+      if (existing) {
+        const error = contentShrinkError(input, {
+          messages: getMessages(existing.id).length,
+          toolCalls: getToolCalls(existing.id).length,
+        });
+        if (error) throw new Error(error);
+      }
+      const session = saveParsedSession(input);
+      return {
+        session,
+        imported: {
+          messages: input.messages.length,
+          toolCalls: input.toolCalls.length,
+        },
+        backup: input.backup ?? null,
+      };
+    },
     async remove(id) {
       const { getSession, deleteSession } = await import("../db/sessions.js");
       try {
@@ -154,6 +183,14 @@ function localSource(): DataSource {
     async relocatePaths(oldPath, newPath) {
       const { relocatePathsInDb } = await import("../db/sessions.js");
       return relocatePathsInDb(oldPath, newPath);
+    },
+    async messages(sessionId) {
+      const { getMessages } = await import("../db/sessions.js");
+      return getMessages(sessionId);
+    },
+    async toolCalls(sessionId) {
+      const { getToolCalls } = await import("../db/sessions.js");
+      return getToolCalls(sessionId);
     },
     async searchContent(query, opts) {
       const { search } = await import("../lib/search.js");

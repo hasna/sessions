@@ -26,7 +26,8 @@ projects, and time.
 sessions ingest                # all providers
 sessions ingest --source codex # one provider
 sessions ingest --force        # re-index everything
-sessions sync --json           # ingest locally; optionally push metadata via self-hosted /v1 API
+sessions sync --json           # ingest locally; pushes content when self_hosted API env is set
+sessions sync --dry-run --json # plan a self_hosted /v1 content push
 
 # Full-text search across every session
 sessions search "kubernetes deploy"
@@ -65,6 +66,10 @@ sessions bulk stop --open-only --status idle,dead --dry-run
 # Keep the index continuously fresh (fs.watch + periodic safety re-scan)
 sessions watch-ingest
 sessions watch-ingest --status
+
+# Keep local changes ready for self_hosted sync (bounded polling; Ctrl-C to stop)
+sessions daemon --dry-run --interval 60
+sessions sync --watch --interval 60 --max-iterations 3
 
 # Manual refresh / reindex
 sessions reindex
@@ -170,8 +175,52 @@ mode the on-box index is authoritative, so there is nothing to push or pull.
 To share one registry across machines, point the CLI or MCP server at a
 self-hosted `sessions-serve` instance with `HASNA_SESSIONS_API_URL` and
 `HASNA_SESSIONS_API_KEY`. In that mode `sessions sync` pushes locally indexed
-session metadata to the authenticated `/v1` API. Clients do not open a Postgres
-DSN, and the former client-side storage subcommand family has been removed.
+session metadata and content to the authenticated `/v1` API. Clients do not
+open a Postgres DSN, and the former client-side storage subcommand family has
+been removed.
+
+## Self-Hosted API Sync
+
+Use API sync when this machine should push local indexed sessions, messages, and
+tool calls to the Hasna self-hosted Sessions service over `/v1` instead of
+writing directly to a database. Configure:
+
+```bash
+export HASNA_SESSIONS_MODE=self_hosted
+export HASNA_SESSIONS_API_URL=https://sessions.hasna.xyz
+export HASNA_SESSIONS_API_KEY=...
+```
+
+Plan first:
+
+```bash
+sessions sync --dry-run --json
+sessions sync --dry-run --source claude --limit 100
+```
+
+Live sync requires a successful `--backup-command` before it pushes content to
+`/v1/sessions/import`. Use a SQLite-safe export such as `VACUUM INTO`, the
+SQLite backup API, or `sessions transfer export`; a raw file copy of an active
+SQLite DB is only a best-effort snapshot and is not accepted as the built-in
+safety gate. The import API refuses, by default, to replace existing session
+content with fewer messages or tool calls; intentional pruning must include
+`destructive.allowContentShrink: true` and a non-empty reason in the request
+body. Hook output and the raw hook command are suppressed so secrets are not
+echoed.
+
+```bash
+sessions sync --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups'
+```
+
+For daemon/watch mode, use bounded polling. Unchanged cycles are suppressed so a
+long-running worker does not spam logs. `sessions daemon` and
+`sessions sync --watch` default to `--max-iterations 60`; pass an explicit
+larger value for a longer supervised run.
+
+```bash
+sessions daemon --interval 60 --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups'
+sessions sync --watch --interval 60 --max-iterations 10
+```
 
 Run the service-side Postgres schema with `sessions-serve migrate` using the
 owner DSN. The current server-side storage mode value is
@@ -193,9 +242,10 @@ versioned, API-key-authenticated `/v1` API:
 
 - `GET /health`, `GET /ready`, `GET /version` → `{ status, version, mode }`
 - `GET /openapi.json` → OpenAPI 3 document (the SDK is generated from it)
-- OpenAPI/SDK-covered routes: `/v1/sessions` (list/create),
-  `/v1/sessions/:id` (get/delete), `/v1/search`, `/v1/recent`,
-  `/v1/machines`, `/v1/stats`
+- `/v1/sessions` (list/create), `/v1/sessions/import` (content upsert),
+  `/v1/sessions/:id` (get/delete), `/v1/sessions/:id/messages`,
+  `/v1/sessions/:id/tool-calls`,
+  `/v1/search`, `/v1/recent`, `/v1/machines`, `/v1/stats`
 - Additional authenticated server routes: `PATCH /v1/sessions/:id`,
   `POST /v1/relocate`, `GET /v1/search/content`,
   `GET /v1/search/tools`, `GET /v1/graph`

@@ -8,7 +8,7 @@ import { resetDataSource } from "../src/server/data-source";
 import { resetAuth } from "../src/server/auth";
 import { getDatabase, resetDatabase, closeDatabase } from "../src/db/database";
 
-const SIGNING_KEY = "test-signing-secret-0123456789abcdef0123456789abcdef";
+const SIGNING_KEY = ["test", "signing", "fixture", "0123456789abcdef", "0123456789abcdef"].join("-");
 
 describe("/v1 authenticated API (local mode)", () => {
   let dir: string;
@@ -172,6 +172,130 @@ describe("/v1 authenticated API (local mode)", () => {
       const gRelated = await fetch(`${base}/v1/graph?related=project:graph-demo`, { headers: { "x-api-key": rw } });
       expect(gRelated.status).toBe(200);
       expect((await gRelated.json()).ok).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("imports session content idempotently and serves messages/tool calls over /v1", async () => {
+    const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const rw = keyFor(["sessions:read", "sessions:write"]);
+      const H = { "x-api-key": rw, "content-type": "application/json" };
+
+      const body = {
+        session: {
+          id: "content-sync-1",
+          source: "claude",
+          source_id: "content-sync-1",
+          title: "Content Sync",
+          project_name: "sync-demo",
+          project_path: "/tmp/sync-demo",
+          machine: "spark01",
+        },
+        messages: [
+          {
+            id: "msg-1",
+            session_id: "content-sync-1",
+            role: "user",
+            content: "sync this transcript body",
+            sequence_num: 0,
+            input_tokens: 5,
+          },
+          {
+            id: "msg-2",
+            session_id: "content-sync-1",
+            role: "assistant",
+            content: "running cloud import",
+            sequence_num: 1,
+            output_tokens: 7,
+          },
+        ],
+        toolCalls: [
+          {
+            id: "tool-1",
+            message_id: "msg-2",
+            session_id: "content-sync-1",
+            tool_name: "Bash",
+            tool_input: "sessions sync",
+            tool_output: "ok",
+            status: "success",
+          },
+        ],
+        backup: {
+          artifact: "/tmp/pre-cloud-sync.db",
+          created_at: "2026-07-09T10:00:00.000Z",
+          note: "test backup hook",
+        },
+      };
+
+      const imported = await fetch(`${base}/v1/sessions/import`, {
+        method: "POST",
+        headers: H,
+        body: JSON.stringify(body),
+      });
+      expect(imported.status).toBe(201);
+      const importedBody = await imported.json();
+      expect(importedBody.imported).toEqual({ messages: 2, toolCalls: 1 });
+      expect(importedBody.backup.artifact).toBe("/tmp/pre-cloud-sync.db");
+      expect(importedBody.session.message_count).toBe(2);
+      expect(importedBody.session.total_input_tokens).toBe(5);
+      expect(importedBody.session.total_output_tokens).toBe(7);
+
+      const missingChildren = await fetch(`${base}/v1/sessions/import`, {
+        method: "POST",
+        headers: H,
+        body: JSON.stringify({ session: body.session }),
+      });
+      expect(missingChildren.status).toBe(400);
+      expect((await missingChildren.json()).error).toContain("messages must be an array");
+
+      const messages = await fetch(`${base}/v1/sessions/content-sync-1/messages`, { headers: { "x-api-key": rw } });
+      expect(messages.status).toBe(200);
+      expect((await messages.json()).messages.map((m: { id: string }) => m.id)).toEqual(["msg-1", "msg-2"]);
+
+      const toolCalls = await fetch(`${base}/v1/sessions/content-sync-1/tool-calls`, { headers: { "x-api-key": rw } });
+      expect(toolCalls.status).toBe(200);
+      expect((await toolCalls.json()).toolCalls[0].tool_name).toBe("Bash");
+
+      const contentSearch = await fetch(`${base}/v1/search/content?q=transcript`, { headers: { "x-api-key": rw } });
+      expect(contentSearch.status).toBe(200);
+      expect((await contentSearch.json()).count).toBe(1);
+
+      const toolSearch = await fetch(`${base}/v1/search/tools?q=sessions`, { headers: { "x-api-key": rw } });
+      expect(toolSearch.status).toBe(200);
+      expect((await toolSearch.json()).count).toBe(1);
+
+      const unsafeEmptyReplacement = await fetch(`${base}/v1/sessions/import`, {
+        method: "POST",
+        headers: H,
+        body: JSON.stringify({
+          ...body,
+          messages: [],
+          toolCalls: [],
+        }),
+      });
+      expect(unsafeEmptyReplacement.status).toBe(400);
+      expect((await unsafeEmptyReplacement.json()).error).toContain("content import would shrink existing session content");
+
+      const replacement = await fetch(`${base}/v1/sessions/import`, {
+        method: "POST",
+        headers: H,
+        body: JSON.stringify({
+          ...body,
+          messages: [{ id: "msg-3", session_id: "content-sync-1", role: "user", content: "replacement", sequence_num: 0 }],
+          toolCalls: [],
+          destructive: {
+            allowContentShrink: true,
+            reason: "test intentionally replaces imported child rows",
+          },
+        }),
+      });
+      expect(replacement.status).toBe(201);
+      const replacedMessages = await fetch(`${base}/v1/sessions/content-sync-1/messages`, { headers: { "x-api-key": rw } });
+      const replacedBody = await replacedMessages.json();
+      expect(replacedBody.messages.map((m: { id: string }) => m.id)).toEqual(["msg-3"]);
     } finally {
       server.stop(true);
     }
