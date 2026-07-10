@@ -25,6 +25,7 @@ Environment:
   HASNA_SESSIONS_STORAGE_MODE   local | cloud (default: local)
   HASNA_SESSIONS_DATABASE_URL   cloud Postgres DSN (cloud mode)
   HASNA_SESSIONS_API_SIGNING_KEY  HMAC signing key for /v1 API-key auth
+  HASNA_SESSIONS_MAX_REQUEST_BODY_SIZE  max request body bytes/units (cloud default: 512MiB)
 
 Endpoints:
   GET /health    liveness  -> { status, version, mode }

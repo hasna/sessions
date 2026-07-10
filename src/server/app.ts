@@ -10,6 +10,9 @@ const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
 };
 
+export const MAX_REQUEST_BODY_SIZE_ENV = "HASNA_SESSIONS_MAX_REQUEST_BODY_SIZE";
+export const SELF_HOSTED_DEFAULT_MAX_REQUEST_BODY_SIZE = 512 * 1024 * 1024;
+
 function json(payload: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(payload, null, 2), { status, headers: jsonHeaders });
 }
@@ -49,6 +52,41 @@ function listOptionsFromUrl(url: URL, defaultLimit: number): ListOptions {
   if (project) opts.project_path = project;
   if (machine) opts.machine = machine;
   return opts;
+}
+
+function parseByteSize(value: string): number | undefined {
+  const match = value
+    .trim()
+    .match(/^(\d+(?:\.\d+)?)\s*(b|kb|kib|mb|mib|gb|gib)?$/i);
+  if (!match) return undefined;
+
+  const amount = Number.parseFloat(match[1] ?? "");
+  if (!Number.isFinite(amount) || amount <= 0) return undefined;
+
+  const unit = (match[2] ?? "b").toLowerCase();
+  const multiplier =
+    unit === "gb" || unit === "gib"
+      ? 1024 * 1024 * 1024
+      : unit === "mb" || unit === "mib"
+        ? 1024 * 1024
+        : unit === "kb" || unit === "kib"
+          ? 1024
+          : 1;
+  const bytes = Math.floor(amount * multiplier);
+  return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : undefined;
+}
+
+export function resolveMaxRequestBodySize(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const configured = env[MAX_REQUEST_BODY_SIZE_ENV];
+  if (configured !== undefined) {
+    const parsed = parseByteSize(configured);
+    if (parsed !== undefined) return parsed;
+    throw new Error(
+      `${MAX_REQUEST_BODY_SIZE_ENV} must be a positive byte size, e.g. 536870912 or 512MiB.`,
+    );
+  }
+
+  return isCloudMode(env) ? SELF_HOSTED_DEFAULT_MAX_REQUEST_BODY_SIZE : undefined;
 }
 
 /** Serve mode string for the health/version contract. */
@@ -270,16 +308,19 @@ export function createSessionsServer(options: {
   port?: number;
   hostname?: string;
   enableMcp?: boolean;
+  maxRequestBodySize?: number;
 } = {}) {
   const pkg = getPackageInfo();
   const hostname = options.hostname ?? process.env.HOST ?? "127.0.0.1";
   const port = Number.isFinite(options.port)
     ? options.port
     : Number.parseInt(process.env.PORT || "3456", 10);
+  const maxRequestBodySize = options.maxRequestBodySize ?? resolveMaxRequestBodySize();
 
   return Bun.serve({
     hostname,
     port: Number.isFinite(port) ? port : 3456,
+    ...(maxRequestBodySize === undefined ? {} : { maxRequestBodySize }),
     async fetch(request) {
       if (options.enableMcp) {
         const { handleMcpHttpFetch } = await import("../mcp/http.js");
