@@ -4,6 +4,8 @@
 
 import { getPackageInfo } from "../lib/package.js";
 
+const tokenTotalSchema = { type: "integer", format: "int64" } as const;
+
 const sessionSchema = {
   type: "object",
   properties: {
@@ -22,11 +24,11 @@ const sessionSchema = {
     cli_version: { type: "string", nullable: true },
     is_subagent: { type: "boolean" },
     parent_session_id: { type: "string", nullable: true },
-    total_input_tokens: { type: "integer" },
-    total_output_tokens: { type: "integer" },
-    total_cache_read_tokens: { type: "integer" },
-    total_cache_write_tokens: { type: "integer" },
-    total_thinking_tokens: { type: "integer" },
+    total_input_tokens: tokenTotalSchema,
+    total_output_tokens: tokenTotalSchema,
+    total_cache_read_tokens: tokenTotalSchema,
+    total_cache_write_tokens: tokenTotalSchema,
+    total_thinking_tokens: tokenTotalSchema,
     message_count: { type: "integer" },
     tool_call_count: { type: "integer" },
     started_at: { type: "string", nullable: true },
@@ -171,11 +173,11 @@ export function buildOpenApiDocument(): Record<string, unknown> {
             cli_version: { type: "string", nullable: true },
             is_subagent: { type: "boolean" },
             parent_session_id: { type: "string", nullable: true },
-            total_input_tokens: { type: "integer" },
-            total_output_tokens: { type: "integer" },
-            total_cache_read_tokens: { type: "integer" },
-            total_cache_write_tokens: { type: "integer" },
-            total_thinking_tokens: { type: "integer" },
+            total_input_tokens: tokenTotalSchema,
+            total_output_tokens: tokenTotalSchema,
+            total_cache_read_tokens: tokenTotalSchema,
+            total_cache_write_tokens: tokenTotalSchema,
+            total_thinking_tokens: tokenTotalSchema,
             message_count: { type: "integer" },
             tool_call_count: { type: "integer" },
             machine: { type: "string", nullable: true },

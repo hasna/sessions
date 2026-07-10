@@ -18,6 +18,7 @@ import type {
 import { getCloudClient } from "./client.js";
 import { encodePath } from "../../lib/paths.js";
 import { contentShrinkError } from "../../lib/content-import-safety.js";
+import { sanitizeSessionContentImport, sanitizeSessionInsert } from "../../lib/import-sanitizer.js";
 
 interface SessionRow {
   id: string;
@@ -399,6 +400,7 @@ export async function upsertSession(
   input: UpsertSessionInput,
   client: TypedQueryClient = getCloudClient(),
 ): Promise<Session> {
+  input = sanitizeSessionInsert(input);
   const validSources = new Set(["claude", "codex", "gemini"]);
   if (!validSources.has(input.source)) {
     throw new Error(`invalid source '${input.source}' (expected claude|codex|gemini)`);
@@ -530,6 +532,7 @@ export async function importSessionContent(
   if (!input.session || typeof input.session !== "object") throw new Error("session is required");
   if (!Array.isArray(input.messages)) throw new Error("messages must be an array");
   if (!Array.isArray(input.toolCalls)) throw new Error("toolCalls must be an array");
+  input = sanitizeSessionContentImport(input);
   const messages = input.messages;
   const toolCalls = input.toolCalls;
   for (const message of messages) {
