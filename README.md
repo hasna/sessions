@@ -265,6 +265,9 @@ In self-hosted server mode (`HASNA_SESSIONS_STORAGE_MODE=cloud` +
 client-side DSN sync engine and no service-side cache. Apply the schema with
 `sessions-serve migrate` (run with the owner DSN). See `docker-compose.yml` for
 a self-hosted stack (serve + Postgres) and `Dockerfile` for the ARM64 image.
+Self-hosted mode raises Bun's request body limit to 512 MiB for large
+`/v1/sessions/import` payloads; override with
+`HASNA_SESSIONS_MAX_REQUEST_BODY_SIZE` using bytes or units such as `768MiB`.
 
 The generated, dependency-free SDK is published at `@hasna/sessions/sdk`:
 
