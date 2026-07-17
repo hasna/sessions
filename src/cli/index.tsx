@@ -1667,7 +1667,7 @@ program
 program
   .command("create")
   .description("Create a session record in the active store (local index, or the self_hosted /v1 API when HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are set)")
-  .requiredOption("--source <source>", "Session source: claude, codex, or gemini")
+  .requiredOption("--source <source>", "Session source: claude, codex, codewith, or gemini")
   .requiredOption("--source-id <id>", "Provider-native session id")
   .option("--title <title>", "Session title")
   .option("--project-path <path>", "Project path")
@@ -1796,7 +1796,7 @@ program
   .command("search-indexed <query>")
   .aliases(["search", "indexed-search"])
   .description("Full-text search across your indexed AI coding sessions")
-  .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
+  .option("-s, --source <source>", "Filter by provider: claude, codex, codewith, or gemini")
   .option("-p, --project <value>", "Filter by project name or path")
   .option("-m, --machine <name>", "Filter by machine (laptop-a, workstation-b, ...)")
   .option("-l, --limit <n>", "Maximum results", "20")
@@ -1851,7 +1851,7 @@ program
 program
   .command("recall <query>")
   .description("Recall a coding session by natural language, with evidence, touched files, graph context, and resume metadata")
-  .option("-s, --source <source>", "Filter by provider: claude, codex, or gemini")
+  .option("-s, --source <source>", "Filter by provider: claude, codex, codewith, or gemini")
   .option("-p, --project <value>", "Filter by project name or path")
   .option("-m, --machine <name>", "Filter by machine")
   .option("-l, --limit <n>", "Maximum results", "10")

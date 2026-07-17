@@ -1,7 +1,7 @@
 {
   "name": "@hasna/sessions",
   "version": "0.12.10",
-  "description": "Search and sync AI coding sessions (Claude, Codex, Gemini) — unified SQLite index with full-text search",
+  "description": "Search and sync AI coding sessions (Claude, Codex, Codewith, Gemini) — unified SQLite index with full-text search",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -62,6 +62,7 @@
     "search",
     "claude",
     "codex",
+    "codewith",
     "gemini",
     "mcp"
   ],

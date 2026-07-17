@@ -18,6 +18,8 @@ function runCli(args: string[]) {
       ...process.env,
       CLAUDE_PATH: TEST_DIR,
       CODEX_PATH: TEST_DIR,
+      CODEWITH_PATH: join(TEST_DIR, "codewith"),
+      GEMINI_PATH: join(TEST_DIR, "gemini"),
       HASNA_SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       HASNA_SESSIONS_DIR: join(TEST_DIR, "sessions-home"),
@@ -43,6 +45,8 @@ function runCliPipe(command: string) {
       ...process.env,
       CLAUDE_PATH: TEST_DIR,
       CODEX_PATH: TEST_DIR,
+      CODEWITH_PATH: join(TEST_DIR, "codewith"),
+      GEMINI_PATH: join(TEST_DIR, "gemini"),
       HASNA_SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       SESSIONS_DB_PATH: join(TEST_DIR, "sessions.db"),
       HASNA_SESSIONS_DIR: join(TEST_DIR, "sessions-home"),
@@ -363,12 +367,17 @@ describe("CLI JSON output", () => {
   it("emits parseable JSON for watch-ingest status and reindex alias", () => {
     const statusResult = runCli(["watch-ingest", "--status", "--json"]);
     const status = parseJsonOutput(statusResult);
+    const rootSources = status.roots.map((root: { source: string }) => root.source).sort();
+    expect(rootSources).toEqual(["claude", "codewith", "codex", "gemini"]);
     expect(status.sources).toContain("claude");
     expect(status.roots.some((root: { source: string; exists: boolean }) => root.source === "claude" && root.exists)).toBe(true);
+    expect(status.roots.some((root: { source: string; exists: boolean }) => root.source === "codewith" && !root.exists)).toBe(true);
+    expect(status.roots.some((root: { source: string; exists: boolean }) => root.source === "codex" && !root.exists)).toBe(true);
+    expect(status.roots.some((root: { source: string; exists: boolean }) => root.source === "gemini" && !root.exists)).toBe(true);
 
     const reindexResult = runCli(["reindex", "--json"]);
     const reindex = parseJsonOutput(reindexResult);
-    expect(reindex.some((entry: { source: string }) => entry.source === "claude")).toBe(true);
+    expect(reindex.map((entry: { source: string }) => entry.source).sort()).toEqual(["claude", "codewith", "codex", "gemini"]);
   });
 
   it("rejects invalid watch-ingest numeric options", () => {

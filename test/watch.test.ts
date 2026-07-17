@@ -24,6 +24,7 @@ beforeEach(() => {
   mkdirSync(projectDir, { recursive: true });
   process.env.CLAUDE_PATH = join(root, "claude");
   process.env.CODEX_PATH = join(root, "codex-missing");
+  process.env.CODEWITH_PATH = join(root, "codewith-missing");
   process.env.GEMINI_PATH = join(root, "gemini-missing");
   // Use a temp FILE db (not :memory:) so the watcher's ingest and this test's
   // reads share state even if they resolve to separate db module singletons.
@@ -39,6 +40,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
   delete process.env.CLAUDE_PATH;
   delete process.env.CODEX_PATH;
+  delete process.env.CODEWITH_PATH;
   delete process.env.GEMINI_PATH;
   delete process.env.SESSIONS_DB_PATH;
 });
@@ -48,15 +50,20 @@ describe("startWatch", () => {
     const status = getWatchStatus({ debounceMs: 25, pollMs: 0 });
     expect(status.debounceMs).toBe(25);
     expect(status.pollMs).toBe(0);
+    expect(status.roots.map((root) => root.source).sort()).toEqual(["claude", "codewith", "codex", "gemini"]);
     expect(status.sources).toContain("claude");
     expect(status.roots.some((root) => root.source === "claude" && root.exists)).toBe(true);
     expect(status.roots.some((root) => root.source === "codex" && !root.exists)).toBe(true);
+    expect(status.roots.some((root) => root.source === "codewith" && !root.exists)).toBe(true);
+    expect(status.roots.some((root) => root.source === "gemini" && !root.exists)).toBe(true);
   });
 
   it("watches only providers whose dirs exist", () => {
     watcher = startWatch({ debounceMs: 50, pollMs: 200 });
     expect(watcher.sources).toContain("claude");
     expect(watcher.sources).not.toContain("codex"); // dir missing
+    expect(watcher.sources).not.toContain("codewith"); // dir missing
+    expect(watcher.sources).not.toContain("gemini"); // dir missing
     expect(watcher.roots.every((root) => root.exists)).toBe(true);
   });
 
