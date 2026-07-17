@@ -99,6 +99,48 @@ describe("cloud upsertSession SQL", () => {
     expect(JSON.parse(insertParams[29] as string)).toEqual({ reviewer: "postgres", safe: true });
     expect(session.metadata).toEqual({ reviewer: "postgres", safe: true });
   });
+
+  test("accepts codewith and keeps rejecting unknown sources before SQL writes", async () => {
+    let insertParams: readonly unknown[] = [];
+    let writes = 0;
+    const client: TypedQueryClient = {
+      async query() {
+        return { rows: [], rowCount: 0 };
+      },
+      async many() {
+        return [];
+      },
+      async one() {
+        throw new Error("one() not used in this test");
+      },
+      async get<T extends QueryResultRow>(sql: string): Promise<T | null> {
+        if (sql.includes("WHERE source = $1 AND source_id = $2")) return null;
+        if (sql.includes("WHERE id = $1")) return sessionRowFromParams(insertParams) as T;
+        throw new Error(`unexpected get SQL: ${sql}`);
+      },
+      async execute(_sql: string, params?: readonly unknown[]): Promise<void> {
+        writes++;
+        insertParams = params ?? [];
+      },
+    };
+
+    const session = await upsertSession(
+      {
+        id: "cloud-codewith-1",
+        source: "codewith",
+        source_id: "shared-native-id",
+        title: "Codewith cloud source",
+      },
+      client,
+    );
+    expect(session.source).toBe("codewith");
+    expect(insertParams[1]).toBe("codewith");
+
+    await expect(
+      upsertSession({ source: "unknown", source_id: "bad" }, client)
+    ).rejects.toThrow(/expected claude\|codex\|codewith\|gemini/);
+    expect(writes).toBe(1);
+  });
 });
 
 describe("cloud import sanitization", () => {

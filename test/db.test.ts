@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SqliteAdapter } from "../src/db/sqlite-adapter.js";
 import { getDatabase, resetDatabase, closeDatabase, initSchema } from "../src/db/database.js";
 import {
@@ -51,6 +54,164 @@ describe("schema migration", () => {
     expect(row).toBeTruthy();
     db.close();
   });
+
+  it("rebuilds an old source CHECK constraint transactionally and preserves content, FTS, indexes, and FKs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sessions-source-migration-"));
+    const path = join(dir, "sessions.db");
+    const db = new SqliteAdapter(path);
+    try {
+      db.exec("PRAGMA foreign_keys=ON");
+      db.exec(
+        `CREATE TABLE sessions (
+          id TEXT PRIMARY KEY,
+          source TEXT NOT NULL CHECK(source IN ('claude', 'codex', 'gemini')),
+          source_id TEXT NOT NULL,
+          source_path TEXT,
+          title TEXT,
+          project_path TEXT,
+          project_name TEXT,
+          model TEXT,
+          model_provider TEXT,
+          git_branch TEXT,
+          git_sha TEXT,
+          git_origin_url TEXT,
+          cli_version TEXT,
+          is_subagent INTEGER NOT NULL DEFAULT 0,
+          parent_session_id TEXT,
+          total_input_tokens INTEGER NOT NULL DEFAULT 0,
+          total_output_tokens INTEGER NOT NULL DEFAULT 0,
+          total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          total_cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          total_thinking_tokens INTEGER NOT NULL DEFAULT 0,
+          message_count INTEGER NOT NULL DEFAULT 0,
+          tool_call_count INTEGER NOT NULL DEFAULT 0,
+          started_at TEXT,
+          ended_at TEXT,
+          duration_seconds REAL,
+          ingested_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          source_modified_at TEXT,
+          machine TEXT,
+          metadata TEXT DEFAULT '{}',
+          UNIQUE(source, source_id)
+        )`
+      );
+      db.exec(
+        `CREATE TABLE messages (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          source_id TEXT,
+          parent_message_id TEXT,
+          role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system', 'tool', 'info', 'thinking')),
+          content TEXT,
+          content_preview TEXT,
+          model TEXT,
+          is_sidechain INTEGER NOT NULL DEFAULT 0,
+          sequence_num INTEGER,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          thinking_tokens INTEGER NOT NULL DEFAULT 0,
+          timestamp TEXT,
+          metadata TEXT DEFAULT '{}',
+          UNIQUE(session_id, source_id)
+        )`
+      );
+      db.exec(
+        `CREATE TABLE tool_calls (
+          id TEXT PRIMARY KEY,
+          message_id TEXT REFERENCES messages(id) ON DELETE CASCADE,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          tool_name TEXT NOT NULL,
+          tool_input TEXT,
+          tool_output TEXT,
+          duration_ms INTEGER,
+          status TEXT CHECK(status IN ('success', 'error', 'timeout')),
+          timestamp TEXT,
+          metadata TEXT DEFAULT '{}'
+        )`
+      );
+      db.exec(
+        `CREATE VIRTUAL TABLE sessions_fts USING fts5(
+          session_id UNINDEXED, title, project_name, project_path,
+          tokenize='porter unicode61'
+        )`
+      );
+      db.exec(
+        `CREATE VIRTUAL TABLE messages_fts USING fts5(
+          message_id UNINDEXED, session_id UNINDEXED, content,
+          tokenize='porter unicode61'
+        )`
+      );
+      db.exec(
+        `CREATE VIRTUAL TABLE tool_calls_fts USING fts5(
+          tool_call_id UNINDEXED, session_id UNINDEXED, tool_name, tool_input, tool_output,
+          tokenize='porter unicode61'
+        )`
+      );
+      db.exec("CREATE TABLE messages_fts_refs (rowid INTEGER PRIMARY KEY, session_id TEXT NOT NULL, message_id TEXT NOT NULL)");
+      db.exec("CREATE TABLE tool_calls_fts_refs (rowid INTEGER PRIMARY KEY, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL)");
+      db.exec("CREATE INDEX idx_sessions_source ON sessions(source)");
+      db.exec("INSERT INTO sessions (id, source, source_id, title, project_path, project_name, message_count, tool_call_count) VALUES ('s1', 'codex', 'same-native-id', 'Old Codex', '/p/api', 'api', 1, 1)");
+      db.exec("INSERT INTO messages (id, session_id, source_id, role, content, sequence_num) VALUES ('m1', 's1', 'm1', 'user', 'migration preserves this message', 0)");
+      db.exec("INSERT INTO tool_calls (id, message_id, session_id, tool_name, tool_input, tool_output, status) VALUES ('t1', 'm1', 's1', 'shell', 'echo ok', 'ok', 'success')");
+      db.exec("INSERT INTO sessions_fts(session_id, title, project_name, project_path) VALUES ('s1', 'Old Codex', 'api', '/p/api')");
+      db.exec("INSERT INTO messages_fts_refs(rowid, session_id, message_id) VALUES (1, 's1', 'm1')");
+      db.exec("INSERT INTO messages_fts(rowid, message_id, session_id, content) VALUES (1, 'm1', 's1', 'migration preserves this message')");
+      db.exec("INSERT INTO tool_calls_fts_refs(rowid, session_id, tool_call_id) VALUES (1, 's1', 't1')");
+      db.exec("INSERT INTO tool_calls_fts(rowid, tool_call_id, session_id, tool_name, tool_input, tool_output) VALUES (1, 't1', 's1', 'shell', 'echo ok', 'ok')");
+
+      initSchema(db);
+
+      const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").get() as { sql: string };
+      expect(table.sql).toContain("codewith");
+      expect((db.prepare("SELECT COUNT(*) AS c FROM sessions").get() as { c: number }).c).toBe(1);
+      expect((db.prepare("SELECT COUNT(*) AS c FROM messages").get() as { c: number }).c).toBe(1);
+      expect((db.prepare("SELECT COUNT(*) AS c FROM tool_calls").get() as { c: number }).c).toBe(1);
+      expect((db.prepare("SELECT COUNT(*) AS c FROM sessions_fts").get() as { c: number }).c).toBe(1);
+      expect((db.prepare("SELECT COUNT(*) AS c FROM messages_fts").get() as { c: number }).c).toBe(1);
+      expect((db.prepare("SELECT COUNT(*) AS c FROM tool_calls_fts").get() as { c: number }).c).toBe(1);
+      expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      const indexes = (db.prepare("PRAGMA index_list(sessions)").all() as { name: string }[]).map((row) => row.name);
+      expect(indexes).toContain("idx_sessions_source");
+      const hit = db
+        .prepare("SELECT session_id FROM messages_fts WHERE messages_fts MATCH ?")
+        .get("preserves") as { session_id: string } | undefined;
+      expect(hit?.session_id).toBe("s1");
+      db.prepare("INSERT INTO sessions (id, source, source_id) VALUES ('cw1', 'codewith', 'same-native-id')").run();
+      expect(() =>
+        db.prepare("INSERT INTO sessions (id, source, source_id) VALUES ('bad', 'unknown', 'bad')").run()
+      ).toThrow();
+      expect(readdirSync(join(dir, "migration-backups")).some((name) => name.startsWith("sessions-pre-codewith-source-"))).toBe(true);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a legacy database usable when source constraint preflight fails", () => {
+    const db = new SqliteAdapter(":memory:");
+    db.exec(
+      `CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        title TEXT,
+        project_path TEXT,
+        model TEXT,
+        parent_session_id TEXT,
+        started_at TEXT,
+        UNIQUE(source, source_id)
+      )`
+    );
+    db.exec("INSERT INTO sessions (id, source, source_id, title) VALUES ('legacy', 'unknown', 'bad', 'still readable')");
+
+    expect(() => initSchema(db)).toThrow(/unknown sources/);
+    const row = db.prepare("SELECT title FROM sessions WHERE id = 'legacy'").get() as { title: string };
+    expect(row.title).toBe("still readable");
+    db.close();
+  });
 });
 
 describe("upsertSession", () => {
@@ -73,6 +234,13 @@ describe("upsertSession", () => {
     const fetched = getSession(s.id);
     expect(fetched.title).toBe("Fix the bug");
     expect(fetched.project_name).toBe("app");
+  });
+
+  it("accepts codewith in a fresh database and rejects unknown sources", () => {
+    const s = upsertSession({ source: "codewith", source_id: "cw-1", title: "Codewith rollout" });
+    expect(s.source).toBe("codewith");
+    expect(getSessionBySource("codewith", "cw-1")?.id).toBe(s.id);
+    expect(() => upsertSession({ source: "unknown" as never, source_id: "bad" })).toThrow();
   });
 
   it("is idempotent on (source, source_id) — updates in place, keeps the same id", () => {

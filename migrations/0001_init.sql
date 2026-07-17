@@ -5,7 +5,7 @@
 
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
-  source TEXT NOT NULL CHECK(source IN ('claude', 'codex', 'gemini')),
+  source TEXT NOT NULL CHECK(source IN ('claude', 'codex', 'codewith', 'gemini')),
   source_id TEXT NOT NULL,
   source_path TEXT,
   title TEXT,
