@@ -1202,6 +1202,87 @@ program
     }
   });
 
+interface BackfillCliOptions {
+  apply?: boolean;
+  confirmApply?: string;
+  allowProduction?: boolean;
+  batchSize?: string;
+  concurrency?: string;
+  source?: string;
+  pilot?: string;
+  rangeStart?: string;
+  rangeEnd?: string;
+  knownId?: string[];
+  checkpoint?: string;
+  backupCommand?: string;
+  maxSessionBytes?: string;
+  maxTotalBytes?: string;
+  json?: boolean;
+}
+
+function printBackfillSummary(result: Awaited<ReturnType<typeof import("../lib/backfill.js").runSessionBackfill>>): void {
+  console.log(`backfill ${result.mode}`);
+  console.log(`  files:      ${result.inventory.files}`);
+  console.log(`  inventory:  ${result.inventory.selectableSessions} selectable session(s), ${result.inventory.duplicates} duplicate(s), ${result.inventory.errors} error(s)`);
+  console.log(`  selected:   ${result.selection.selected} session(s), ${formatBytes(result.selection.selectedEstimatedBytes)} estimated`);
+  console.log(`  content:    ${result.selection.selectedMessages} messages, ${result.selection.selectedToolCalls} tool calls`);
+  console.log(`  limits:     batch=${result.limits.batchSize}, concurrency=${result.limits.concurrency}, max-session=${formatBytes(result.limits.maxSessionBytes)}`);
+  console.log(`  checkpoint: ${result.checkpoint.path}`);
+  if (result.dryRun) {
+    console.log("  apply:      not run (dry-run/inventory mode)");
+  } else {
+    console.log(`  applied:    ${result.applied.pushed} pushed, ${result.applied.skipped} skipped, ${result.applied.failed} failed`);
+  }
+  for (const warning of result.warnings) console.log(`  warning:    ${warning}`);
+  for (const error of result.errors.slice(0, 8)) console.error(`  error:      ${error}`);
+  if (result.errors.length > 8) console.error(`  error:      ... ${result.errors.length - 8} more`);
+}
+
+program
+  .command("backfill")
+  .description("Inventory or explicitly apply a bounded, checkpointed self_hosted session-content backfill")
+  .option("--apply", "Apply the selected backfill to the self_hosted /v1 API (default is inventory/dry-run)")
+  .option("--confirm-apply <token>", "Required with --apply; pass BACKFILL_APPLY")
+  .option("--allow-production", "Allow applying to production-like hasna.xyz API URLs")
+  .option("-s, --source <source>", "Only backfill one provider: claude, codex, codewith, gemini")
+  .option("--pilot <n>", "Deterministically select the first n sessions after sorting by source/source_id")
+  .option("--range-start <source:id>", "Inclusive deterministic range start")
+  .option("--range-end <source:id>", "Inclusive deterministic range end")
+  .option("--known-id <source:id>", "Require and verify a known source-qualified id", collectRepeatableOption, [])
+  .option("--batch-size <n>", "Maximum staged child records materialized per parser batch", "128")
+  .option("--concurrency <n>", "Maximum concurrent session payload imports", "1")
+  .option("--max-session-bytes <n>", "Fail closed if any selected session estimate exceeds this many bytes", String(64 * 1024 * 1024))
+  .option("--max-total-bytes <n>", "Required with --apply; fail closed if selected estimate exceeds this many bytes")
+  .option("--checkpoint <path>", "Durable checkpoint JSON path")
+  .option("--backup-command <command>", "Required with --apply; output is suppressed")
+  .option("--json", "Output machine-readable JSON")
+  .action(async (opts: BackfillCliOptions) => {
+    try {
+      const { runSessionBackfill } = await import("../lib/backfill.js");
+      const result = await runSessionBackfill({
+        apply: Boolean(opts.apply),
+        confirmApply: opts.confirmApply,
+        allowProduction: Boolean(opts.allowProduction),
+        source: opts.source,
+        pilot: opts.pilot == null ? undefined : parseNonNegativeIntOption(opts.pilot, 0, "--pilot"),
+        rangeStart: opts.rangeStart,
+        rangeEnd: opts.rangeEnd,
+        knownIds: opts.knownId ?? [],
+        batchSize: parsePositiveIntOption(opts.batchSize, 128, "--batch-size"),
+        concurrency: parsePositiveIntOption(opts.concurrency, 1, "--concurrency"),
+        maxSessionBytes: parsePositiveIntOption(opts.maxSessionBytes, 64 * 1024 * 1024, "--max-session-bytes"),
+        maxTotalBytes: opts.maxTotalBytes == null ? undefined : parsePositiveIntOption(opts.maxTotalBytes, 0, "--max-total-bytes"),
+        checkpointPath: opts.checkpoint,
+        backupCommand: opts.backupCommand,
+      });
+      if (opts.json) printJson(result);
+      else printBackfillSummary(result);
+      if (result.errors.length > 0 || result.applied.failed > 0) process.exit(1);
+    } catch (error) {
+      failCli(error);
+    }
+  });
+
 interface ApiSyncCliOptions {
   dryRun?: boolean;
   watch?: boolean;

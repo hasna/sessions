@@ -1,0 +1,768 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import type { SessionParser } from "./ingest/types.js";
+import { listParsers } from "./ingest/index.js";
+import { getSessionsDir } from "./paths.js";
+import type { SessionStore } from "../db/session-store.js";
+import type {
+  MessageInsert,
+  ParsedSession,
+  SessionContentBackup,
+  SessionContentImport,
+  SessionInsert,
+  SessionSource,
+  StagedParsedSession,
+  ToolCallInsert,
+} from "../types/index.js";
+import { isSessionSource } from "../types/index.js";
+
+const CHECKPOINT_VERSION = 1;
+const DEFAULT_BATCH_SIZE = 128;
+const DEFAULT_CONCURRENCY = 1;
+const DEFAULT_MAX_SESSION_BYTES = 64 * 1024 * 1024;
+const APPLY_CONFIRMATION = "BACKFILL_APPLY";
+
+export interface BackfillKey {
+  source: SessionSource;
+  sourceId: string;
+  key: string;
+}
+
+export interface BackfillInventoryEntry extends BackfillKey {
+  sourcePath: string | null;
+  messageCount: number;
+  toolCallCount: number;
+  estimatedBytes: number;
+  maxBufferedLineBytes: number;
+  maxNormalizedBatchRecords: number;
+  duplicateOf: string | null;
+}
+
+export interface BackfillCheckpointEntry {
+  source: SessionSource;
+  sourceId: string;
+  sourcePath: string | null;
+  estimatedBytes: number;
+  messages: number;
+  toolCalls: number;
+  updatedAt: string;
+  note?: string;
+}
+
+export interface BackfillCheckpoint {
+  version: typeof CHECKPOINT_VERSION;
+  createdAt: string;
+  updatedAt: string;
+  completed: Record<string, BackfillCheckpointEntry>;
+  failed: Record<string, BackfillCheckpointEntry>;
+  skipped: Record<string, BackfillCheckpointEntry>;
+}
+
+export interface BackfillRunOptions {
+  apply?: boolean;
+  confirmApply?: string;
+  allowProduction?: boolean;
+  batchSize?: number;
+  concurrency?: number;
+  source?: SessionSource | string;
+  sources?: Array<SessionSource | string>;
+  pilot?: number;
+  rangeStart?: string;
+  rangeEnd?: string;
+  knownIds?: string[];
+  checkpointPath?: string;
+  backupCommand?: string;
+  maxSessionBytes?: number;
+  maxTotalBytes?: number;
+  env?: Record<string, string | undefined>;
+  parsers?: SessionParser[];
+  store?: SessionStore;
+  now?: () => Date;
+}
+
+export interface BackfillRunResult {
+  target: "self_hosted_api";
+  dryRun: boolean;
+  mode: "inventory" | "apply";
+  inventory: {
+    files: number;
+    sessions: number;
+    selectableSessions: number;
+    duplicates: number;
+    errors: number;
+    messages: number;
+    toolCalls: number;
+    estimatedBytes: number;
+    largestSessionBytes: number;
+    maxBufferedLineBytes: number;
+    maxNormalizedBatchRecords: number;
+  };
+  selection: {
+    requestedSources: string[];
+    pilot: number | null;
+    rangeStart: string | null;
+    rangeEnd: string | null;
+    selected: number;
+    selectedMessages: number;
+    selectedToolCalls: number;
+    selectedEstimatedBytes: number;
+    selectedKeys: string[];
+    knownIds: Array<BackfillKey & { found: boolean; selected: boolean; verified: boolean | null }>;
+  };
+  limits: {
+    batchSize: number;
+    concurrency: number;
+    maxSessionBytes: number;
+    maxTotalBytes: number | null;
+    maxResidentSessionPayloadBytes: number;
+  };
+  gates: {
+    confirmation: { required: string; satisfied: boolean };
+    production: { url: string | null; productionLike: boolean; allowed: boolean };
+    capacity: { checked: boolean; allowed: boolean; reason: string | null };
+    backup: {
+      required: boolean;
+      configured: boolean;
+      ran: boolean;
+      exitCode: number | null;
+      verified: SessionContentBackup | null;
+      reason: string | null;
+    };
+  };
+  checkpoint: {
+    path: string;
+    loadedCompleted: number;
+    completed: number;
+    failed: number;
+    skipped: number;
+    resumedSkipped: number;
+  };
+  applied: {
+    attempted: number;
+    pushed: number;
+    failed: number;
+    skipped: number;
+    verifiedKnownIds: number;
+    maxMaterializedSessionBytes: number;
+    maxMaterializedBatchRecords: number;
+  };
+  duplicates: Array<{ key: string; kept: string | null; duplicate: string | null }>;
+  errors: string[];
+  warnings: string[];
+}
+
+type ParsedOrStagedSession =
+  | { kind: "parsed"; parsed: ParsedSession; maxBufferedLineBytes: number; maxNormalizedBatchRecords: number }
+  | { kind: "staged"; staged: StagedParsedSession; maxBufferedLineBytes: number; maxNormalizedBatchRecords: number };
+
+interface MaterializedSession {
+  input: SessionContentImport;
+  estimatedBytes: number;
+  maxBatchRecords: number;
+}
+
+function nowIso(now: () => Date): string {
+  return now().toISOString();
+}
+
+function positiveInt(value: number | undefined, fallback: number, name: string): number {
+  if (value == null) return fallback;
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+  return value;
+}
+
+function nonNegativeInt(value: number | undefined, fallback: number, name: string): number {
+  if (value == null) return fallback;
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`);
+  return value;
+}
+
+function byteLength(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value));
+}
+
+function sessionKey(source: string, sourceId: string): string {
+  return `${source}:${sourceId}`;
+}
+
+function parseBackfillKey(raw: string): BackfillKey {
+  const colon = raw.indexOf(":");
+  if (colon <= 0 || colon === raw.length - 1) {
+    throw new Error(`backfill ids must be source-qualified as <source>:<source_id>: ${raw}`);
+  }
+  const source = raw.slice(0, colon);
+  if (!isSessionSource(source)) {
+    throw new Error(`unknown session source '${source}' in id '${raw}'`);
+  }
+  const sourceId = raw.slice(colon + 1);
+  return { source, sourceId, key: sessionKey(source, sourceId) };
+}
+
+function checkpointPath(path: string | undefined): string {
+  return path ?? join(getSessionsDir(), "backfill", "checkpoint.json");
+}
+
+function emptyCheckpoint(now: () => Date): BackfillCheckpoint {
+  const ts = nowIso(now);
+  return {
+    version: CHECKPOINT_VERSION,
+    createdAt: ts,
+    updatedAt: ts,
+    completed: {},
+    failed: {},
+    skipped: {},
+  };
+}
+
+function readCheckpoint(path: string, now: () => Date): BackfillCheckpoint {
+  if (!existsSync(path)) return emptyCheckpoint(now);
+  const parsed = JSON.parse(readFileSync(path, "utf-8")) as BackfillCheckpoint;
+  if (parsed.version !== CHECKPOINT_VERSION) {
+    throw new Error(`unsupported backfill checkpoint version at ${path}`);
+  }
+  return {
+    ...emptyCheckpoint(now),
+    ...parsed,
+    completed: parsed.completed ?? {},
+    failed: parsed.failed ?? {},
+    skipped: parsed.skipped ?? {},
+  };
+}
+
+function writeCheckpoint(path: string, checkpoint: BackfillCheckpoint, now: () => Date): void {
+  mkdirSync(dirname(path), { recursive: true });
+  checkpoint.updatedAt = nowIso(now);
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(checkpoint, null, 2)}\n`, "utf-8");
+  renameSync(tmp, path);
+}
+
+function checkpointEntry(entry: BackfillInventoryEntry, now: () => Date, note?: string): BackfillCheckpointEntry {
+  return {
+    source: entry.source,
+    sourceId: entry.sourceId,
+    sourcePath: entry.sourcePath,
+    estimatedBytes: entry.estimatedBytes,
+    messages: entry.messageCount,
+    toolCalls: entry.toolCallCount,
+    updatedAt: nowIso(now),
+    note,
+  };
+}
+
+function requestedSourceList(opts: BackfillRunOptions): string[] {
+  const requested = opts.source ? [opts.source, ...(opts.sources ?? [])] : (opts.sources ?? []);
+  if (requested.length === 0) return [];
+  const out: string[] = [];
+  for (const source of requested) {
+    if (!isSessionSource(String(source))) throw new Error(`unknown session source '${String(source)}'`);
+    out.push(String(source));
+  }
+  return [...new Set(out)].sort();
+}
+
+function selectParsers(opts: BackfillRunOptions): SessionParser[] {
+  const requested = new Set(requestedSourceList(opts));
+  const parsers = opts.parsers ?? listParsers();
+  const selected = requested.size > 0 ? parsers.filter((parser) => requested.has(parser.source)) : parsers;
+  selected.sort((a, b) => a.source.localeCompare(b.source));
+  return selected;
+}
+
+function estimateParsed(parsed: ParsedSession): number {
+  return byteLength(parsed.session) + byteLength(parsed.messages) + byteLength(parsed.toolCalls);
+}
+
+function estimateStaged(staged: StagedParsedSession, batchSize: number): { bytes: number; maxBatchRecords: number } {
+  let bytes = byteLength(staged.session);
+  let maxBatchRecords = 0;
+  staged.forEachMessageBatch(batchSize, (batch) => {
+    maxBatchRecords = Math.max(maxBatchRecords, batch.length);
+    bytes += byteLength(batch);
+  });
+  staged.forEachToolCallBatch(batchSize, (batch) => {
+    maxBatchRecords = Math.max(maxBatchRecords, batch.length);
+    bytes += byteLength(batch);
+  });
+  return { bytes, maxBatchRecords };
+}
+
+function entryFromParsed(parsed: ParsedSession, maxBufferedLineBytes: number, maxNormalizedBatchRecords: number): BackfillInventoryEntry {
+  return {
+    source: parsed.session.source,
+    sourceId: parsed.session.source_id,
+    key: sessionKey(parsed.session.source, parsed.session.source_id),
+    sourcePath: parsed.session.source_path ?? null,
+    messageCount: parsed.messages.length,
+    toolCallCount: parsed.toolCalls.length,
+    estimatedBytes: estimateParsed(parsed),
+    maxBufferedLineBytes,
+    maxNormalizedBatchRecords,
+    duplicateOf: null,
+  };
+}
+
+function entryFromStaged(
+  staged: StagedParsedSession,
+  batchSize: number,
+  maxBufferedLineBytes: number,
+  maxNormalizedBatchRecords: number,
+): BackfillInventoryEntry {
+  const estimate = estimateStaged(staged, batchSize);
+  return {
+    source: staged.session.source,
+    sourceId: staged.session.source_id,
+    key: sessionKey(staged.session.source, staged.session.source_id),
+    sourcePath: staged.session.source_path ?? null,
+    messageCount: staged.messageCount,
+    toolCallCount: staged.toolCallCount,
+    estimatedBytes: estimate.bytes,
+    maxBufferedLineBytes,
+    maxNormalizedBatchRecords: Math.max(maxNormalizedBatchRecords, estimate.maxBatchRecords),
+    duplicateOf: null,
+  };
+}
+
+function cleanupParsedSessions(sessions: ParsedOrStagedSession[]): void {
+  for (const session of sessions) {
+    if (session.kind === "staged") session.staged.cleanup();
+  }
+}
+
+function parseFileSessions(parser: SessionParser, file: string): ParsedOrStagedSession[] {
+  const result = parser.parseFileResult?.(file, { preferStaging: true }) ?? { sessions: parser.parseFile(file) };
+  const out: ParsedOrStagedSession[] = [];
+  for (const parsed of result.sessions) {
+    out.push({
+      kind: "parsed",
+      parsed,
+      maxBufferedLineBytes: result.maxBufferedLineBytes ?? 0,
+      maxNormalizedBatchRecords: result.maxNormalizedBatchRecords ?? Math.max(parsed.messages.length, parsed.toolCalls.length),
+    });
+  }
+  for (const staged of result.stagedSessions ?? []) {
+    out.push({
+      kind: "staged",
+      staged,
+      maxBufferedLineBytes: result.maxBufferedLineBytes ?? 0,
+      maxNormalizedBatchRecords: result.maxNormalizedBatchRecords ?? staged.maxNormalizedBatchRecords,
+    });
+  }
+  return out;
+}
+
+function inventoryParsers(
+  parsers: SessionParser[],
+  batchSize: number,
+): { entries: BackfillInventoryEntry[]; files: number; errors: string[] } {
+  const entries: BackfillInventoryEntry[] = [];
+  const errors: string[] = [];
+  let files = 0;
+  for (const parser of parsers) {
+    const parserFiles = [...parser.listSessionFiles()].sort();
+    files += parserFiles.length;
+    for (const file of parserFiles) {
+      let sessions: ParsedOrStagedSession[] = [];
+      try {
+        sessions = parseFileSessions(parser, file);
+        for (const session of sessions) {
+          if (session.kind === "parsed") {
+            entries.push(entryFromParsed(session.parsed, session.maxBufferedLineBytes, session.maxNormalizedBatchRecords));
+          } else {
+            entries.push(entryFromStaged(session.staged, batchSize, session.maxBufferedLineBytes, session.maxNormalizedBatchRecords));
+          }
+        }
+      } catch (error) {
+        errors.push(`${parser.source}:${file}: ${(error as Error).message}`);
+      } finally {
+        cleanupParsedSessions(sessions);
+      }
+    }
+  }
+  entries.sort((a, b) => a.key.localeCompare(b.key) || String(a.sourcePath).localeCompare(String(b.sourcePath)));
+
+  const firstByKey = new Map<string, BackfillInventoryEntry>();
+  for (const entry of entries) {
+    const first = firstByKey.get(entry.key);
+    if (!first) {
+      firstByKey.set(entry.key, entry);
+    } else {
+      entry.duplicateOf = first.sourcePath;
+    }
+  }
+  return { entries, files, errors };
+}
+
+function selectEntries(
+  entries: BackfillInventoryEntry[],
+  opts: BackfillRunOptions,
+): BackfillInventoryEntry[] {
+  const rangeStart = opts.rangeStart ? parseBackfillKey(opts.rangeStart).key : null;
+  const rangeEnd = opts.rangeEnd ? parseBackfillKey(opts.rangeEnd).key : null;
+  const pilot = opts.pilot == null ? null : nonNegativeInt(opts.pilot, 0, "--pilot");
+  let selected = entries.filter((entry) => !entry.duplicateOf);
+  if (rangeStart) selected = selected.filter((entry) => entry.key >= rangeStart);
+  if (rangeEnd) selected = selected.filter((entry) => entry.key <= rangeEnd);
+  if (pilot !== null) selected = selected.slice(0, pilot);
+  return selected;
+}
+
+function materializeParsed(parsed: ParsedSession): MaterializedSession {
+  return {
+    input: parsed,
+    estimatedBytes: estimateParsed(parsed),
+    maxBatchRecords: Math.max(parsed.messages.length, parsed.toolCalls.length),
+  };
+}
+
+function materializeStaged(staged: StagedParsedSession, batchSize: number): MaterializedSession {
+  const messages: MessageInsert[] = [];
+  const toolCalls: ToolCallInsert[] = [];
+  let maxBatchRecords = 0;
+  staged.forEachMessageBatch(batchSize, (batch) => {
+    maxBatchRecords = Math.max(maxBatchRecords, batch.length);
+    messages.push(...batch);
+  });
+  staged.forEachToolCallBatch(batchSize, (batch) => {
+    maxBatchRecords = Math.max(maxBatchRecords, batch.length);
+    toolCalls.push(...batch);
+  });
+  const session: SessionInsert = {
+    ...staged.session,
+    message_count: staged.messageCount,
+    tool_call_count: staged.toolCallCount,
+    total_input_tokens: staged.session.total_input_tokens ?? staged.totalInputTokens,
+    total_output_tokens: staged.session.total_output_tokens ?? staged.totalOutputTokens,
+    total_cache_read_tokens: staged.session.total_cache_read_tokens ?? staged.totalCacheReadTokens,
+    total_cache_write_tokens: staged.session.total_cache_write_tokens ?? staged.totalCacheWriteTokens,
+    total_thinking_tokens: staged.session.total_thinking_tokens ?? staged.totalThinkingTokens,
+  };
+  const input = { session, messages, toolCalls };
+  return {
+    input,
+    estimatedBytes: byteLength(session) + byteLength(messages) + byteLength(toolCalls),
+    maxBatchRecords,
+  };
+}
+
+function materializeEntry(
+  parsers: SessionParser[],
+  entry: BackfillInventoryEntry,
+  batchSize: number,
+): MaterializedSession {
+  const parser = parsers.find((candidate) => candidate.source === entry.source);
+  if (!parser) throw new Error(`no parser registered for ${entry.source}`);
+  if (!entry.sourcePath) throw new Error(`${entry.key}: no source path available`);
+  let sessions: ParsedOrStagedSession[] = [];
+  try {
+    sessions = parseFileSessions(parser, entry.sourcePath);
+    const match = sessions.find((session) => {
+      const candidate = session.kind === "parsed" ? session.parsed.session : session.staged.session;
+      return candidate.source === entry.source && candidate.source_id === entry.sourceId;
+    });
+    if (!match) throw new Error(`${entry.key}: source file no longer contains this session`);
+    return match.kind === "parsed" ? materializeParsed(match.parsed) : materializeStaged(match.staged, batchSize);
+  } finally {
+    cleanupParsedSessions(sessions);
+  }
+}
+
+function runBackupCommand(command: string | undefined, apply: boolean): BackfillRunResult["gates"]["backup"] {
+  const trimmed = command?.trim();
+  if (!apply) {
+    return {
+      required: false,
+      configured: Boolean(trimmed),
+      ran: false,
+      exitCode: null,
+      verified: null,
+      reason: trimmed ? "dry-run" : null,
+    };
+  }
+  if (!trimmed) {
+    return {
+      required: true,
+      configured: false,
+      ran: false,
+      exitCode: null,
+      verified: null,
+      reason: "apply requires --backup-command to complete a backup/capacity preflight gate",
+    };
+  }
+  const result = spawnSync("bash", ["-lc", trimmed], { stdio: "ignore" });
+  const exitCode = result.error ? 1 : result.status ?? (result.signal ? 1 : 0);
+  return {
+    required: true,
+    configured: true,
+    ran: true,
+    exitCode,
+    verified:
+      exitCode === 0
+        ? {
+            artifact: null,
+            created_at: new Date().toISOString(),
+            note: "user-supplied backfill backup command completed before apply",
+          }
+        : null,
+    reason: exitCode === 0 ? null : `backup command failed with exit ${exitCode}`,
+  };
+}
+
+function isProductionLikeUrl(raw: string | undefined): boolean {
+  if (!raw) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host === "sessions.hasna.xyz" || host.endsWith(".hasna.xyz");
+  } catch {
+    return false;
+  }
+}
+
+async function resolveApplyStore(opts: BackfillRunOptions): Promise<SessionStore> {
+  if (opts.store) return opts.store;
+  const { resolveSessionStore } = await import("../db/session-store.js");
+  return resolveSessionStore();
+}
+
+function createResult(
+  opts: BackfillRunOptions,
+  entries: BackfillInventoryEntry[],
+  selected: BackfillInventoryEntry[],
+  files: number,
+  inventoryErrors: string[],
+  checkpoint: BackfillCheckpoint,
+  path: string,
+  batchSize: number,
+  concurrency: number,
+  maxSessionBytes: number,
+  maxTotalBytes: number | null,
+): BackfillRunResult {
+  const apply = Boolean(opts.apply);
+  const env = opts.env ?? process.env;
+  const apiUrl = env.HASNA_SESSIONS_API_URL || null;
+  const duplicateEntries = entries.filter((entry) => entry.duplicateOf);
+  const known = (opts.knownIds ?? []).map(parseBackfillKey);
+  const selectedKeys = new Set(selected.map((entry) => entry.key));
+  const allKeys = new Set(entries.map((entry) => entry.key));
+  const selectedEstimatedBytes = selected.reduce((sum, entry) => sum + entry.estimatedBytes, 0);
+  const largestSessionBytes = entries.reduce((max, entry) => Math.max(max, entry.estimatedBytes), 0);
+  const selectedLargestSessionBytes = selected.reduce((max, entry) => Math.max(max, entry.estimatedBytes), 0);
+  const productionLike = isProductionLikeUrl(apiUrl ?? undefined);
+  const capacityReason =
+    apply && maxTotalBytes === null
+      ? "apply requires --max-total-bytes so the capacity gate is explicit"
+      : selectedLargestSessionBytes > maxSessionBytes
+        ? `selected session estimate ${selectedLargestSessionBytes} exceeds max session bytes ${maxSessionBytes}`
+        : maxTotalBytes !== null && selectedEstimatedBytes > maxTotalBytes
+          ? `selected estimate ${selectedEstimatedBytes} exceeds max total bytes ${maxTotalBytes}`
+          : null;
+  const confirmationSatisfied = !apply || opts.confirmApply === APPLY_CONFIRMATION;
+  const productionAllowed = !apply || !productionLike || Boolean(opts.allowProduction);
+  const capacityAllowed = capacityReason === null;
+  const backupPreflightAllowed = apply && confirmationSatisfied && productionAllowed && capacityAllowed;
+  const backup = backupPreflightAllowed
+    ? runBackupCommand(opts.backupCommand, true)
+    : runBackupCommand(opts.backupCommand, false);
+  if (apply && !backupPreflightAllowed) {
+    backup.required = true;
+    backup.reason = "backup command not run because earlier apply preflight gates failed";
+  }
+  const result: BackfillRunResult = {
+    target: "self_hosted_api",
+    dryRun: !apply,
+    mode: apply ? "apply" : "inventory",
+    inventory: {
+      files,
+      sessions: entries.length,
+      selectableSessions: entries.length - duplicateEntries.length,
+      duplicates: duplicateEntries.length,
+      errors: inventoryErrors.length,
+      messages: entries.reduce((sum, entry) => sum + entry.messageCount, 0),
+      toolCalls: entries.reduce((sum, entry) => sum + entry.toolCallCount, 0),
+      estimatedBytes: entries.reduce((sum, entry) => sum + entry.estimatedBytes, 0),
+      largestSessionBytes,
+      maxBufferedLineBytes: entries.reduce((max, entry) => Math.max(max, entry.maxBufferedLineBytes), 0),
+      maxNormalizedBatchRecords: entries.reduce((max, entry) => Math.max(max, entry.maxNormalizedBatchRecords), 0),
+    },
+    selection: {
+      requestedSources: requestedSourceList(opts),
+      pilot: opts.pilot ?? null,
+      rangeStart: opts.rangeStart ?? null,
+      rangeEnd: opts.rangeEnd ?? null,
+      selected: selected.length,
+      selectedMessages: selected.reduce((sum, entry) => sum + entry.messageCount, 0),
+      selectedToolCalls: selected.reduce((sum, entry) => sum + entry.toolCallCount, 0),
+      selectedEstimatedBytes,
+      selectedKeys: [...selectedKeys],
+      knownIds: known.map((id) => ({
+        ...id,
+        found: allKeys.has(id.key),
+        selected: selectedKeys.has(id.key),
+        verified: null,
+      })),
+    },
+    limits: {
+      batchSize,
+      concurrency,
+      maxSessionBytes,
+      maxTotalBytes,
+      maxResidentSessionPayloadBytes: maxSessionBytes * concurrency,
+    },
+    gates: {
+      confirmation: { required: APPLY_CONFIRMATION, satisfied: confirmationSatisfied },
+      production: { url: apiUrl, productionLike, allowed: productionAllowed },
+      capacity: { checked: true, allowed: capacityAllowed, reason: capacityReason },
+      backup,
+    },
+    checkpoint: {
+      path,
+      loadedCompleted: Object.keys(checkpoint.completed).length,
+      completed: 0,
+      failed: 0,
+      skipped: 0,
+      resumedSkipped: 0,
+    },
+    applied: {
+      attempted: 0,
+      pushed: 0,
+      failed: 0,
+      skipped: 0,
+      verifiedKnownIds: 0,
+      maxMaterializedSessionBytes: 0,
+      maxMaterializedBatchRecords: 0,
+    },
+    duplicates: duplicateEntries.map((entry) => ({
+      key: entry.key,
+      kept: entry.duplicateOf,
+      duplicate: entry.sourcePath,
+    })),
+    errors: [...inventoryErrors],
+    warnings: [],
+  };
+
+  for (const knownId of result.selection.knownIds) {
+    if (!knownId.found) result.errors.push(`known id not found in inventory: ${knownId.key}`);
+    else if (!knownId.selected) result.errors.push(`known id is outside the selected backfill range: ${knownId.key}`);
+  }
+  if (apply && !result.gates.confirmation.satisfied) {
+    result.errors.push(`apply requires --confirm-apply ${APPLY_CONFIRMATION}`);
+  }
+  if (apply && !result.gates.production.allowed) {
+    result.errors.push(`production-like API URL ${apiUrl} requires --allow-production`);
+  }
+  if (apply && !result.gates.capacity.allowed && result.gates.capacity.reason) {
+    result.errors.push(result.gates.capacity.reason);
+  }
+  if (apply && backup.reason) result.errors.push(backup.reason);
+  return result;
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      await fn(items[index]);
+    }
+  });
+  await Promise.all(workers);
+}
+
+export async function runSessionBackfill(opts: BackfillRunOptions = {}): Promise<BackfillRunResult> {
+  const now = opts.now ?? (() => new Date());
+  const batchSize = positiveInt(opts.batchSize, DEFAULT_BATCH_SIZE, "--batch-size");
+  const concurrency = positiveInt(opts.concurrency, DEFAULT_CONCURRENCY, "--concurrency");
+  const maxSessionBytes = positiveInt(opts.maxSessionBytes, DEFAULT_MAX_SESSION_BYTES, "--max-session-bytes");
+  const maxTotalBytes = opts.maxTotalBytes == null ? null : positiveInt(opts.maxTotalBytes, DEFAULT_MAX_SESSION_BYTES, "--max-total-bytes");
+  const parsers = selectParsers(opts);
+  const checkpointFile = checkpointPath(opts.checkpointPath);
+  const checkpoint = readCheckpoint(checkpointFile, now);
+  const inventory = inventoryParsers(parsers, batchSize);
+  const selected = selectEntries(inventory.entries, opts);
+  const result = createResult(
+    opts,
+    inventory.entries,
+    selected,
+    inventory.files,
+    inventory.errors,
+    checkpoint,
+    checkpointFile,
+    batchSize,
+    concurrency,
+    maxSessionBytes,
+    maxTotalBytes,
+  );
+
+  if (!opts.apply || result.errors.length > 0) return result;
+
+  const store = await resolveApplyStore(opts);
+  if (store.mode !== "cloud") {
+    result.errors.push("apply requires self_hosted/cloud API mode; local mode is inventory-only");
+    return result;
+  }
+
+  const pending = selected.filter((entry) => {
+    if (checkpoint.completed[entry.key]) {
+      result.checkpoint.resumedSkipped++;
+      result.applied.skipped++;
+      return false;
+    }
+    return true;
+  });
+
+  await runWithConcurrency(pending, concurrency, async (entry) => {
+    result.applied.attempted++;
+    try {
+      const materialized = materializeEntry(parsers, entry, batchSize);
+      result.applied.maxMaterializedSessionBytes = Math.max(
+        result.applied.maxMaterializedSessionBytes,
+        materialized.estimatedBytes,
+      );
+      result.applied.maxMaterializedBatchRecords = Math.max(
+        result.applied.maxMaterializedBatchRecords,
+        materialized.maxBatchRecords,
+      );
+      if (materialized.estimatedBytes > maxSessionBytes) {
+        throw new Error(`${entry.key}: materialized payload ${materialized.estimatedBytes} exceeds max session bytes ${maxSessionBytes}`);
+      }
+      await store.importContent({
+        ...materialized.input,
+        backup: result.gates.backup.verified ?? undefined,
+      });
+      checkpoint.completed[entry.key] = checkpointEntry(entry, now);
+      delete checkpoint.failed[entry.key];
+      delete checkpoint.skipped[entry.key];
+      result.applied.pushed++;
+      result.checkpoint.completed++;
+      writeCheckpoint(checkpointFile, checkpoint, now);
+    } catch (error) {
+      const message = (error as Error).message;
+      checkpoint.failed[entry.key] = checkpointEntry(entry, now, message);
+      result.errors.push(`${entry.key}: ${message}`);
+      result.applied.failed++;
+      result.checkpoint.failed++;
+      writeCheckpoint(checkpointFile, checkpoint, now);
+    }
+  });
+
+  for (const known of result.selection.knownIds) {
+    if (!known.selected) continue;
+    const session = await store.get(known.sourceId, { source: known.source });
+    known.verified = Boolean(session);
+    if (session) {
+      result.applied.verifiedKnownIds++;
+    } else {
+      result.errors.push(`known id did not verify after apply: ${known.key}`);
+    }
+  }
+
+  return result;
+}
+
+export { APPLY_CONFIRMATION };

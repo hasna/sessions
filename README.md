@@ -223,6 +223,39 @@ sessions daemon --interval 60 --backup-command 'sessions transfer export --outpu
 sessions sync --watch --interval 60 --max-iterations 10
 ```
 
+For one-time historical content backfills, use the explicit backfill workflow
+instead of an unbounded live sync. It defaults to inventory/dry-run JSON and
+reports selected sessions, duplicate source IDs, message/tool-call counts, byte
+estimates, parser memory bounds, and checkpoint state.
+
+```bash
+sessions backfill --source codewith --pilot 25 --json
+sessions backfill \
+  --source codewith \
+  --range-start codewith:01aaa \
+  --range-end codewith:01azz \
+  --known-id codewith:01abc \
+  --checkpoint ~/.hasna/sessions/backfill/codewith-range.json \
+  --json
+```
+
+Live apply is fail-closed: it requires a self-hosted API store, an explicit
+capacity ceiling, a successful backup hook, durable checkpointing, and the
+literal confirmation token. Production-like `hasna.xyz` API URLs also require
+`--allow-production`.
+
+```bash
+sessions backfill \
+  --apply \
+  --confirm-apply BACKFILL_APPLY \
+  --source codewith \
+  --pilot 25 \
+  --max-total-bytes 1073741824 \
+  --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups' \
+  --checkpoint ~/.hasna/sessions/backfill/codewith-pilot.json \
+  --json
+```
+
 Run the service-side Postgres schema with `sessions-serve migrate` using the
 owner DSN. The current server-side storage mode value is
 `HASNA_SESSIONS_STORAGE_MODE=cloud`, but this README uses "self-hosted" for the
