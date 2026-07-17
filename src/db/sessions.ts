@@ -14,6 +14,7 @@ import {
   type ToolCall,
   type ToolCallInsert,
   type ParsedSession,
+  type StagedParsedSession,
 } from "../types/index.js";
 
 function uuid(): string {
@@ -574,6 +575,83 @@ export function saveParsedSession(parsed: ParsedSession): Session {
 
     return getSession(session.id);
   });
+}
+
+export interface SaveStagedParsedSessionResult {
+  session: Session;
+  maxBatchRecords: number;
+}
+
+/**
+ * Persist a disk-staged session by replacing its visible children inside one
+ * transaction while reading bounded batches from the staging store.
+ */
+export function saveStagedParsedSession(
+  staged: StagedParsedSession,
+  opts: { batchSize?: number } = {}
+): SaveStagedParsedSessionResult {
+  const db = getDatabase();
+  const batchSize = opts.batchSize ?? 128;
+  let maxBatchRecords = 0;
+
+  const session = db.transaction(() => {
+    const stored = upsertSession({
+      ...staged.session,
+      message_count: staged.messageCount,
+      tool_call_count: staged.toolCallCount,
+      total_input_tokens: staged.session.total_input_tokens ?? staged.totalInputTokens,
+      total_output_tokens: staged.session.total_output_tokens ?? staged.totalOutputTokens,
+      total_cache_read_tokens: staged.session.total_cache_read_tokens ?? staged.totalCacheReadTokens,
+      total_cache_write_tokens: staged.session.total_cache_write_tokens ?? staged.totalCacheWriteTokens,
+      total_thinking_tokens: staged.session.total_thinking_tokens ?? staged.totalThinkingTokens,
+    });
+
+    db.prepare("DELETE FROM tool_calls_fts WHERE rowid IN (SELECT rowid FROM tool_calls_fts_refs WHERE session_id = ?)").run(stored.id);
+    db.prepare("DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages_fts_refs WHERE session_id = ?)").run(stored.id);
+    db.prepare("DELETE FROM tool_calls_fts_refs WHERE session_id = ?").run(stored.id);
+    db.prepare("DELETE FROM messages_fts_refs WHERE session_id = ?").run(stored.id);
+    db.prepare("DELETE FROM tool_calls WHERE session_id = ?").run(stored.id);
+    db.prepare("DELETE FROM messages WHERE session_id = ?").run(stored.id);
+
+    const insertMessageStmt = db.prepare(INSERT_MESSAGE_SQL);
+    const insertToolCallStmt = db.prepare(INSERT_TOOL_CALL_SQL);
+    const insertMessageFtsRefStmt = db.prepare(INSERT_MESSAGE_FTS_REF_SQL);
+    const insertToolCallFtsRefStmt = db.prepare(INSERT_TOOL_CALL_FTS_REF_SQL);
+    const insertMessageFtsStmt = db.prepare(
+      `INSERT INTO messages_fts(rowid, message_id, session_id, content)
+       VALUES (?, ?, ?, ?)`
+    );
+    const insertToolCallFtsStmt = db.prepare(
+      `INSERT INTO tool_calls_fts(rowid, tool_call_id, session_id, tool_name, tool_input, tool_output)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+
+    staged.forEachMessageBatch(batchSize, (batch) => {
+      maxBatchRecords = Math.max(maxBatchRecords, batch.length);
+      for (const msg of batch) {
+        const values = messageInsertValues(stored.id, msg);
+        insertMessageStmt.run(...values);
+        const ref = insertMessageFtsRefStmt.run(stored.id, values[0]) as { lastInsertRowid?: number | bigint };
+        if (ref.lastInsertRowid == null) throw new Error("failed to allocate messages_fts rowid");
+        insertMessageFtsStmt.run(ref.lastInsertRowid, values[0], stored.id, values[5]);
+      }
+    });
+
+    staged.forEachToolCallBatch(batchSize, (batch) => {
+      maxBatchRecords = Math.max(maxBatchRecords, batch.length);
+      for (const tc of batch) {
+        const values = toolCallInsertValues(stored.id, tc);
+        insertToolCallStmt.run(...values);
+        const ref = insertToolCallFtsRefStmt.run(stored.id, values[0]) as { lastInsertRowid?: number | bigint };
+        if (ref.lastInsertRowid == null) throw new Error("failed to allocate tool_calls_fts rowid");
+        insertToolCallFtsStmt.run(ref.lastInsertRowid, values[0], stored.id, values[3], values[4], values[5]);
+      }
+    });
+
+    return getSession(stored.id);
+  });
+
+  return { session, maxBatchRecords };
 }
 
 function sum(messages: MessageInsert[], key: keyof MessageInsert): number {

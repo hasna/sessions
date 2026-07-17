@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaudeParser } from "../src/lib/ingest/claude.js";
@@ -9,7 +9,7 @@ import { GeminiParser } from "../src/lib/ingest/gemini.js";
 import { flattenContent } from "../src/lib/ingest/types.js";
 import { getParser, listParsers } from "../src/lib/ingest/index.js";
 import { getDatabase, resetDatabase, closeDatabase } from "../src/db/database.js";
-import { saveParsedSession, getMessages, getToolCalls } from "../src/db/sessions.js";
+import { saveParsedSession, saveStagedParsedSession, getMessages, getToolCalls } from "../src/db/sessions.js";
 
 let root: string;
 
@@ -363,6 +363,67 @@ describe("CodexParser", () => {
     const [ps] = new CodexParser().parseFile(file);
     expect(ps.session.title).toBe("finish the launch checklist and publish the release notes");
   });
+
+  it("stages and persists generated large rollout files with bounded normalized batches", () => {
+    process.env.SESSIONS_DB_PATH = ":memory:";
+    resetDatabase();
+    getDatabase();
+    const file = join(root, "codex", "sessions", "2026", "05", "02", "rollout-2026-05-02T13-00-00-large.jsonl");
+    const lines = [CODEX_LINES.split("\n")[0]];
+    const largeChunk = "x".repeat(7_000);
+    for (let i = 0; i < 320; i++) {
+      lines.push(
+        JSON.stringify({
+          timestamp: "2026-05-02T13:00:01Z",
+          type: "response_item",
+          payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `chunk ${i} ${largeChunk}` }] },
+        })
+      );
+    }
+    writeFileSync(file, `${lines.join("\n")}\n`);
+
+    const result = new CodexParser().parseFileResult(file, { preferStaging: true });
+    try {
+      expect(statSync(file).size).toBeGreaterThan(2_000_000);
+      expect(result.incompleteTrailingRecord).toBe(false);
+      expect(result.maxBufferedLineBytes).toBeLessThan(8_192);
+      expect(result.maxNormalizedBatchRecords).toBe(1);
+      expect(result.sessions).toHaveLength(0);
+      expect(result.stagedSessions).toHaveLength(1);
+      expect(result.stagedSessions?.[0].messageCount).toBe(320);
+
+      const saved = saveStagedParsedSession(result.stagedSessions![0], { batchSize: 128 });
+      expect(saved.maxBatchRecords).toBeLessThanOrEqual(128);
+      expect(saved.session.message_count).toBe(320);
+      expect(getMessages(saved.session.id)).toHaveLength(320);
+    } finally {
+      for (const staged of result.stagedSessions ?? []) {
+        staged.cleanup();
+      }
+      closeDatabase();
+      delete process.env.SESSIONS_DB_PATH;
+    }
+  });
+
+  it("reports incomplete trailing rollout records without throwing", () => {
+    const file = join(root, "codex", "sessions", "2026", "05", "02", "rollout-2026-05-02T14-00-00-partial.jsonl");
+    writeFileSync(
+      file,
+      [
+        CODEX_LINES.split("\n")[0],
+        JSON.stringify({
+          timestamp: "2026-05-02T14:00:01Z",
+          type: "response_item",
+          payload: { type: "message", role: "user", content: [{ type: "input_text", text: "complete" }] },
+        }),
+        '{"timestamp":"2026-05-02T14:00:02Z","type":"response_item","payload":',
+      ].join("\n")
+    );
+
+    const result = new CodexParser().parseFileResult(file);
+    expect(result.incompleteTrailingRecord).toBe(true);
+    expect(result.sessions[0].messages.map((m) => m.content)).toEqual(["complete"]);
+  });
 });
 
 describe("CodewithParser", () => {
@@ -410,6 +471,7 @@ describe("CodewithParser", () => {
     expect(codex.session.source_path).toBe(codexFile);
     expect(codewith.session.source_path).toBe(codewithFile);
   });
+
 });
 
 describe("GeminiParser", () => {
