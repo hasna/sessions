@@ -15,7 +15,7 @@ bun install -g @hasna/sessions
 ## What it does
 
 `sessions` reads the session files written by your coding agents
-(`~/.claude/projects`, `~/.codex/sessions`, `~/.gemini`), normalizes them into a
+(`~/.claude/projects`, `~/.codex/sessions`, `~/.codewith/sessions`, `~/.gemini`), normalizes them into a
 single SQLite database, and makes them full-text searchable — across providers,
 projects, and time.
 
@@ -25,6 +25,7 @@ projects, and time.
 # Index sessions into the searchable DB (incremental; skips unchanged files)
 sessions ingest                # all providers
 sessions ingest --source codex # one provider
+sessions ingest --source codewith
 sessions ingest --force        # re-index everything
 sessions sync --json           # ingest locally; pushes content when self_hosted API env is set
 sessions sync --dry-run --json # plan a self_hosted /v1 content push
@@ -231,7 +232,7 @@ server, and clients talk to its `/v1` API.
 ## Adapter notes
 
 Indexed ingestion currently uses stable local files for Claude Code, local Codex
-JSONL, and Gemini. Cursor/cloud Codex/cloud Claude sources should be added
+JSONL, local Codewith JSONL, and Gemini. Cursor/cloud Codex/cloud Claude sources should be added
 through the existing `SessionParser`/`SessionAdapter` interfaces when they expose
 a durable local export or API; avoid scraping transient cloud/cache formats.
 

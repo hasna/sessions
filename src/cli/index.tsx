@@ -1469,7 +1469,7 @@ program
   .option("--no-ingest", "Skip the local ingest before pushing")
   .option("-n, --dry-run", "Plan content sync without creating backups or pushing to the API")
   .option("--watch", "Run content sync repeatedly as a bounded-poll daemon")
-  .option("-s, --source <source>", "Only sync one provider: claude, codex, gemini")
+  .option("-s, --source <source>", "Only sync one provider: claude, codex, codewith, gemini")
   .option("-p, --project <value>", "Only sync sessions for this project path/name")
   .option("-m, --machine <name>", "Only sync sessions from this machine")
   .option("-l, --limit <n>", "Maximum local sessions to scan per cycle")
@@ -1486,7 +1486,7 @@ program
   .description("Watch local session changes and periodically push session content to the self_hosted /v1 API")
   .option("--no-ingest", "Skip the local ingest before each sync cycle")
   .option("-n, --dry-run", "Plan each sync cycle without creating backups or pushing to the API")
-  .option("-s, --source <source>", "Only sync one provider: claude, codex, gemini")
+  .option("-s, --source <source>", "Only sync one provider: claude, codex, codewith, gemini")
   .option("-p, --project <value>", "Only sync sessions for this project path/name")
   .option("-m, --machine <name>", "Only sync sessions from this machine")
   .option("-l, --limit <n>", "Maximum local sessions to scan per cycle", "500")
@@ -1518,7 +1518,7 @@ program
   .command("ingest-watch")
   .alias("watch-ingest")
   .description("Continuously index new/changed sessions as they happen (Ctrl-C to stop)")
-  .option("-s, --source <source...>", "Only watch one or more providers: claude, codex, gemini")
+  .option("-s, --source <source...>", "Only watch one or more providers: claude, codex, codewith, gemini")
   .option("--no-initial", "Skip the startup ingest and only ingest future changes/poll ticks")
   .option("--debounce <ms>", "Debounce window after a change before ingesting", "2000")
   .option("--poll <ms>", "Safety-net poll interval; set 0 to disable", "10000")
@@ -1937,14 +1937,14 @@ function addIngestCommand(name: string, description: string) {
   program
     .command(name)
     .description(description)
-    .option("-s, --source <source>", "Only ingest one provider: claude, codex, or gemini")
+    .option("-s, --source <source>", "Only ingest one provider: claude, codex, codewith, or gemini")
     .option("-f, --force", "Re-ingest even files that are unchanged since last run")
     .option("-v, --verbose", "Print each file as it is ingested")
     .option("--json", "Output the result as JSON")
     .action(runIngestCommand);
 }
 
-addIngestCommand("ingest", "Index AI coding sessions (claude, codex, gemini) into the searchable database");
+addIngestCommand("ingest", "Index AI coding sessions (claude, codex, codewith, gemini) into the searchable database");
 addIngestCommand("reindex", "Alias for ingest; refresh the searchable session index");
 
 // Use parseAsync + a single top-level catch so async command actions that throw

@@ -1,7 +1,7 @@
 import type { ParsedSession, SessionSource } from "../../types/index.js";
 
 export interface SessionParser {
-  /** Provider identifier (claude, codex, gemini, …). */
+  /** Provider identifier (claude, codex, codewith, gemini, …). */
   readonly source: SessionSource;
   /** Root directories where this provider stores session files. */
   sessionRoots(): string[];
