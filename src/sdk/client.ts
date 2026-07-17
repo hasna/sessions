@@ -166,11 +166,11 @@ export class SessionsApi {
       });
     }
 
-    /** Get a session by id or id prefix */
-    async getSession(id: string, init?: RequestInit): Promise<SessionResponse> {
+    /** Get a session by internal id, source-qualified id, or unique prefix */
+    async getSession(id: string, query?: { "source"?: string }, init?: RequestInit): Promise<SessionResponse> {
       return this.request("GET", `/v1/sessions/${encodeURIComponent(String(id))}`, {
         body: undefined,
-        query: undefined,
+        query,
         init,
       });
     }
@@ -185,28 +185,28 @@ export class SessionsApi {
     }
 
     /** Set a session title */
-    async renameSession(id: string, body: { "title": string }, init?: RequestInit): Promise<SessionResponse> {
+    async renameSession(id: string, body: { "title": string }, query?: { "source"?: string }, init?: RequestInit): Promise<SessionResponse> {
       return this.request("PATCH", `/v1/sessions/${encodeURIComponent(String(id))}`, {
         body,
-        query: undefined,
+        query,
         init,
       });
     }
 
     /** List messages for a session */
-    async listSessionMessages(id: string, init?: RequestInit): Promise<MessageListResponse> {
+    async listSessionMessages(id: string, query?: { "source"?: string }, init?: RequestInit): Promise<MessageListResponse> {
       return this.request("GET", `/v1/sessions/${encodeURIComponent(String(id))}/messages`, {
         body: undefined,
-        query: undefined,
+        query,
         init,
       });
     }
 
     /** List tool calls for a session */
-    async listSessionToolCalls(id: string, init?: RequestInit): Promise<ToolCallListResponse> {
+    async listSessionToolCalls(id: string, query?: { "source"?: string }, init?: RequestInit): Promise<ToolCallListResponse> {
       return this.request("GET", `/v1/sessions/${encodeURIComponent(String(id))}/tool-calls`, {
         body: undefined,
-        query: undefined,
+        query,
         init,
       });
     }

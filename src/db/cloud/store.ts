@@ -12,10 +12,11 @@ import type {
   Session,
   SessionContentBackup,
   SessionContentImport,
+  SessionLookupOptions,
   ToolCall,
   ToolCallInsert,
 } from "../../types/index.js";
-import { SESSION_SOURCES } from "../../types/index.js";
+import { SESSION_SOURCES, SessionAmbiguousError } from "../../types/index.js";
 import { getCloudClient } from "./client.js";
 import { encodePath } from "../../lib/paths.js";
 import { contentShrinkError } from "../../lib/content-import-safety.js";
@@ -250,17 +251,83 @@ export async function getSession(
   return row ? rowToSession(row) : null;
 }
 
+function isTypedQueryClient(value: unknown): value is TypedQueryClient {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "get" in value &&
+    "many" in value
+  );
+}
+
+function parseQualifiedSessionIdentifier(
+  idOrPrefix: string,
+  opts: SessionLookupOptions = {},
+): { source: string | null; identifier: string } {
+  if (opts.source) return { source: opts.source, identifier: idOrPrefix };
+  const colon = idOrPrefix.indexOf(":");
+  if (colon > 0) {
+    const source = idOrPrefix.slice(0, colon);
+    if ((SESSION_SOURCES as readonly string[]).includes(source)) {
+      return { source, identifier: idOrPrefix.slice(colon + 1) };
+    }
+  }
+  return { source: null, identifier: idOrPrefix };
+}
+
+function uniqueCloudSessionOrThrow(identifier: string, rows: SessionRow[]): Session | null {
+  const unique = new Map<string, SessionRow>();
+  for (const row of rows) unique.set(row.id, row);
+  const deduped = [...unique.values()];
+  if (deduped.length === 0) return null;
+  if (deduped.length === 1) return rowToSession(deduped[0]);
+  throw new SessionAmbiguousError(
+    identifier,
+    deduped.map((row) => ({ id: row.id, source: row.source, source_id: row.source_id })),
+  );
+}
+
 export async function getSessionByPrefix(
   idOrPrefix: string,
-  client: TypedQueryClient = getCloudClient(),
+  optionsOrClient: SessionLookupOptions | TypedQueryClient = {},
+  maybeClient?: TypedQueryClient,
 ): Promise<Session | null> {
-  const exact = await getSession(idOrPrefix, client);
+  const opts = isTypedQueryClient(optionsOrClient) ? {} : optionsOrClient;
+  const client = isTypedQueryClient(optionsOrClient)
+    ? optionsOrClient
+    : (maybeClient ?? getCloudClient());
+  const lookup = parseQualifiedSessionIdentifier(idOrPrefix, opts);
+  if (!lookup.source) {
+    const exactId = await getSession(idOrPrefix, client);
+    if (exactId) return exactId;
+  }
+
+  if (lookup.source) {
+    const exactSource = await client.many<SessionRow>(
+      `SELECT * FROM sessions WHERE source = $1 AND source_id = $2 ORDER BY id LIMIT 6`,
+      [lookup.source, lookup.identifier],
+    );
+    const exact = uniqueCloudSessionOrThrow(idOrPrefix, exactSource);
+    if (exact) return exact;
+    const rows = await client.many<SessionRow>(
+      `SELECT * FROM sessions WHERE source = $1 AND source_id LIKE $2 ORDER BY source_id, id LIMIT 6`,
+      [lookup.source, `${lookup.identifier}%`],
+    );
+    return uniqueCloudSessionOrThrow(idOrPrefix, rows);
+  }
+
+  const exactNative = await client.many<SessionRow>(
+    `SELECT * FROM sessions WHERE source_id = $1 ORDER BY source, id LIMIT 6`,
+    [idOrPrefix],
+  );
+  const exact = uniqueCloudSessionOrThrow(idOrPrefix, exactNative);
   if (exact) return exact;
-  const row = await client.get<SessionRow>(
-    `SELECT * FROM sessions WHERE id LIKE $1 ORDER BY COALESCE(started_at, ingested_at) DESC LIMIT 1`,
+
+  const rows = await client.many<SessionRow>(
+    `SELECT * FROM sessions WHERE id LIKE $1 OR source_id LIKE $1 ORDER BY id LIMIT 6`,
     [`${idOrPrefix}%`],
   );
-  return row ? rowToSession(row) : null;
+  return uniqueCloudSessionOrThrow(idOrPrefix, rows);
 }
 
 export interface SessionSearchHit {
@@ -733,9 +800,14 @@ export async function deleteSession(
 export async function updateSessionTitle(
   idOrPrefix: string,
   title: string,
-  client: TypedQueryClient = getCloudClient(),
+  optionsOrClient: SessionLookupOptions | TypedQueryClient = {},
+  maybeClient?: TypedQueryClient,
 ): Promise<Session | null> {
-  const target = await getSessionByPrefix(idOrPrefix, client);
+  const opts = isTypedQueryClient(optionsOrClient) ? {} : optionsOrClient;
+  const client = isTypedQueryClient(optionsOrClient)
+    ? optionsOrClient
+    : (maybeClient ?? getCloudClient());
+  const target = await getSessionByPrefix(idOrPrefix, opts, client);
   if (!target) return null;
   const row = await client.get<SessionRow>(
     `UPDATE sessions SET title = $1, updated_at = $2 WHERE id = $3 RETURNING *`,
@@ -970,9 +1042,14 @@ export interface CloudSessionGraph {
 /** The entity neighborhood of one session (resolved by id or prefix) in the shared cloud. */
 export async function graphSession(
   idOrPrefix: string,
-  client: TypedQueryClient = getCloudClient(),
+  optionsOrClient: SessionLookupOptions | TypedQueryClient = {},
+  maybeClient?: TypedQueryClient,
 ): Promise<CloudSessionGraph | null> {
-  const session = await getSessionByPrefix(idOrPrefix, client);
+  const opts = isTypedQueryClient(optionsOrClient) ? {} : optionsOrClient;
+  const client = isTypedQueryClient(optionsOrClient)
+    ? optionsOrClient
+    : (maybeClient ?? getCloudClient());
+  const session = await getSessionByPrefix(idOrPrefix, opts, client);
   if (!session) return null;
   const tools = await client.many<{ tool_name: string }>(
     `SELECT DISTINCT tool_name FROM tool_calls WHERE session_id = $1 ORDER BY tool_name`,

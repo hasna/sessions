@@ -148,6 +148,51 @@ describe("/v1 authenticated API (local mode)", () => {
     }
   });
 
+  it("returns explicit ambiguity for duplicate native ids and resolves source-qualified lookups", async () => {
+    const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const rw = keyFor(["sessions:read", "sessions:write"]);
+      const headers = { "x-api-key": rw, "content-type": "application/json" };
+
+      for (const source of ["codex", "codewith"]) {
+        const created = await fetch(`${base}/v1/sessions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            source,
+            source_id: "serve-native-duplicate",
+            title: `${source} duplicate`,
+          }),
+        });
+        expect(created.status).toBe(201);
+      }
+
+      const ambiguous = await fetch(`${base}/v1/sessions/serve-native-duplicate`, {
+        headers: { "x-api-key": rw },
+      });
+      expect(ambiguous.status).toBe(409);
+      const ambiguousBody = await ambiguous.json();
+      expect(ambiguousBody.code).toBe("session_ambiguous");
+      expect(ambiguousBody.candidates).toHaveLength(2);
+
+      const codewith = await fetch(
+        `${base}/v1/sessions/${encodeURIComponent("codewith:serve-native-duplicate")}`,
+        { headers: { "x-api-key": rw } },
+      );
+      expect(codewith.status).toBe(200);
+      expect((await codewith.json()).session.source).toBe("codewith");
+
+      const codex = await fetch(`${base}/v1/sessions/serve-native-duplicate?source=codex`, {
+        headers: { "x-api-key": rw },
+      });
+      expect(codex.status).toBe(200);
+      expect((await codex.json()).session.source).toBe("codex");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   it("serves rename (PATCH), content/tool search, and graph on /v1 (regression for stale-server 404/405)", async () => {
     const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
     try {

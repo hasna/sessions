@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { QueryResultRow } from "pg";
 import type { PoolQueryClient, TypedQueryClient } from "../../generated/storage-kit/index.js";
 import type { SessionContentImport } from "../../types/index.js";
-import { importSessionContent, upsertSession } from "./store.js";
+import { SessionAmbiguousError } from "../../types/index.js";
+import { getSessionByPrefix, importSessionContent, upsertSession } from "./store.js";
 
 function splitSqlList(list: string): string[] {
   return list
@@ -45,6 +46,109 @@ function sessionRowFromParams(params: readonly unknown[]): QueryResultRow {
     metadata: params[29],
   };
 }
+
+function sessionRow(overrides: Partial<QueryResultRow>): QueryResultRow {
+  return {
+    id: "row-id",
+    source: "claude",
+    source_id: "row-source-id",
+    source_path: null,
+    title: null,
+    project_path: null,
+    project_name: null,
+    model: null,
+    model_provider: null,
+    git_branch: null,
+    git_sha: null,
+    git_origin_url: null,
+    cli_version: null,
+    is_subagent: false,
+    parent_session_id: null,
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    total_cache_read_tokens: 0,
+    total_cache_write_tokens: 0,
+    total_thinking_tokens: 0,
+    message_count: 0,
+    tool_call_count: 0,
+    started_at: null,
+    ended_at: null,
+    duration_seconds: null,
+    ingested_at: new Date(0).toISOString(),
+    updated_at: new Date(0).toISOString(),
+    source_modified_at: null,
+    machine: null,
+    metadata: "{}",
+    ...overrides,
+  };
+}
+
+describe("cloud getSessionByPrefix lookup semantics", () => {
+  test("prefers exact internal ids over provider-native id collisions", async () => {
+    const internal = sessionRow({
+      id: "same-string",
+      source: "claude",
+      source_id: "claude-native",
+      title: "internal",
+    });
+    const client: TypedQueryClient = {
+      async query() {
+        return { rows: [], rowCount: 0 };
+      },
+      async many() {
+        throw new Error("many() should not be used after exact internal id match");
+      },
+      async one() {
+        throw new Error("one() not used in this test");
+      },
+      async get<T extends QueryResultRow>(sql: string): Promise<T | null> {
+        if (sql.includes("WHERE id = $1")) return internal as T;
+        return null;
+      },
+      async execute() {},
+    };
+
+    await expect(getSessionByPrefix("same-string", client)).resolves.toMatchObject({
+      id: "same-string",
+      source_id: "claude-native",
+    });
+  });
+
+  test("throws on unqualified duplicate provider-native ids and resolves qualified ids", async () => {
+    const codex = sessionRow({ id: "codex-row", source: "codex", source_id: "native-dup" });
+    const codewith = sessionRow({ id: "codewith-row", source: "codewith", source_id: "native-dup" });
+    const client: TypedQueryClient = {
+      async query() {
+        return { rows: [], rowCount: 0 };
+      },
+      async many<T extends QueryResultRow>(sql: string, params?: readonly unknown[]): Promise<T[]> {
+        if (sql.includes("source = $1 AND source_id = $2")) {
+          return (params?.[0] === "codewith" ? [codewith] : [codex]) as T[];
+        }
+        if (sql.includes("source_id = $1")) return [codex, codewith] as T[];
+        if (sql.includes("LIKE")) return [];
+        throw new Error(`unexpected many SQL: ${sql}`);
+      },
+      async one() {
+        throw new Error("one() not used in this test");
+      },
+      async get() {
+        return null;
+      },
+      async execute() {},
+    };
+
+    await expect(getSessionByPrefix("native-dup", client)).rejects.toThrow(SessionAmbiguousError);
+    await expect(getSessionByPrefix("codewith:native-dup", client)).resolves.toMatchObject({
+      id: "codewith-row",
+      source: "codewith",
+    });
+    await expect(getSessionByPrefix("native-dup", { source: "codex" }, client)).resolves.toMatchObject({
+      id: "codex-row",
+      source: "codex",
+    });
+  });
+});
 
 describe("cloud upsertSession SQL", () => {
   test("binds one value per sessions column including metadata", async () => {

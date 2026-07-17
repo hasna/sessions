@@ -17,7 +17,7 @@ import {
   deleteSession,
   saveParsedSession,
 } from "../src/db/sessions.js";
-import type { ParsedSession } from "../src/types/index.js";
+import { SessionAmbiguousError, type ParsedSession } from "../src/types/index.js";
 
 beforeEach(() => {
   process.env.SESSIONS_DB_PATH = ":memory:";
@@ -263,6 +263,40 @@ describe("upsertSession", () => {
     expect(getSessionByPrefix("abcdef-1234")?.id).toBe(s.id);
     expect(getSessionByPrefix("abcdef")?.id).toBe(s.id); // unique prefix
     expect(getSessionByPrefix("zzz")).toBeNull();
+  });
+
+  it("gives exact internal ids precedence over matching provider-native ids", () => {
+    const internal = upsertSession({
+      id: "same-string",
+      source: "claude",
+      source_id: "claude-native",
+      title: "internal",
+    });
+    upsertSession({ source: "codewith", source_id: "same-string", title: "native" });
+
+    expect(getSessionByPrefix("same-string")?.id).toBe(internal.id);
+  });
+
+  it("requires source qualification for duplicate provider-native ids", () => {
+    const codex = upsertSession({ source: "codex", source_id: "native-duplicate", title: "Codex" });
+    const codewith = upsertSession({
+      source: "codewith",
+      source_id: "native-duplicate",
+      title: "Codewith",
+    });
+
+    expect(() => getSessionByPrefix("native-duplicate")).toThrow(SessionAmbiguousError);
+    expect(getSessionByPrefix("codewith:native-duplicate")?.id).toBe(codewith.id);
+    expect(getSessionByPrefix("native-duplicate", { source: "codex" })?.id).toBe(codex.id);
+  });
+
+  it("treats exact and prefix collisions as ambiguous instead of picking a row", () => {
+    const codex = upsertSession({ source: "codex", source_id: "collision-a", title: "Codex" });
+    const codewith = upsertSession({ source: "codewith", source_id: "collision-b", title: "Codewith" });
+
+    expect(() => getSessionByPrefix("collision")).toThrow(SessionAmbiguousError);
+    expect(getSessionByPrefix("collision-a")?.id).toBe(codex.id);
+    expect(getSessionByPrefix("codewith:collision")?.id).toBe(codewith.id);
   });
 });
 

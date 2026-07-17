@@ -3,6 +3,10 @@
 export const SESSION_SOURCES = ["claude", "codex", "codewith", "gemini"] as const;
 export type SessionSource = (typeof SESSION_SOURCES)[number];
 
+export function isSessionSource(value: string): value is SessionSource {
+  return (SESSION_SOURCES as readonly string[]).includes(value);
+}
+
 export const MESSAGE_ROLES = [
   "user",
   "assistant",
@@ -49,6 +53,15 @@ export interface Session {
   source_modified_at: string | null;
   machine: string | null;
   metadata: Record<string, unknown>;
+}
+
+export interface SessionLookupOptions {
+  /**
+   * Resolve the identifier as a provider-native source id or source-id prefix
+   * within this source. Source-qualified identifiers such as `codewith:<id>`
+   * are normalized to this shape by lookup implementations.
+   */
+  source?: SessionSource | string;
 }
 
 export interface SessionInsert {
@@ -208,5 +221,31 @@ export class SessionNotFoundError extends Error {
   constructor(id: string) {
     super(`Session not found: ${id}`);
     this.name = "SessionNotFoundError";
+  }
+}
+
+export interface SessionLookupCandidate {
+  id: string;
+  source: string;
+  source_id: string;
+}
+
+export class SessionAmbiguousError extends Error {
+  readonly identifier: string;
+  readonly candidates: SessionLookupCandidate[];
+
+  constructor(identifier: string, candidates: SessionLookupCandidate[]) {
+    const suffix = candidates
+      .slice(0, 5)
+      .map((candidate) => `${candidate.source}:${candidate.source_id}`)
+      .join(", ");
+    super(
+      `Ambiguous session identifier '${identifier}' matched ${candidates.length} sessions` +
+        (suffix ? ` (${suffix})` : "") +
+        "; qualify it as <source>:<source_id> or pass an explicit source.",
+    );
+    this.name = "SessionAmbiguousError";
+    this.identifier = identifier;
+    this.candidates = candidates;
   }
 }

@@ -119,6 +119,26 @@ describe("sessions CLI store-backed flows", () => {
     expect(byProject.session.source_id).toBe("session-001");
   });
 
+  it("resolves duplicate native ids with source-qualified CLI identifiers", () => {
+    ingest();
+    const created = parseJsonOutput(
+      runCli(["create", "--source", "codewith", "--source-id", "session-001", "--json"]),
+    );
+    expect(created.source).toBe("codewith");
+
+    const ambiguous = runCli(["show", "session-001", "--json"]);
+    expect(ambiguous.exitCode).not.toBe(0);
+    expect(Buffer.from(ambiguous.stderr).toString("utf-8")).toContain(
+      "Ambiguous session identifier",
+    );
+
+    const qualified = parseJsonOutput(runCli(["show", "codewith:session-001", "--json"]));
+    expect(qualified.session.source).toBe("codewith");
+
+    const explicit = parseJsonOutput(runCli(["show", "session-001", "--source", "claude", "--json"]));
+    expect(explicit.session.source).toBe("claude");
+  });
+
   it("supports history filters and transcript search through the store", () => {
     ingest();
     const historyPayload = parseJsonOutput(runCli(["history", "--today", "--json"]));

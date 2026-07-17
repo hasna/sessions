@@ -323,18 +323,19 @@ server.tool(
 
 server.tool(
   "get_session",
-  "Get a session's full details, messages, and tool calls by id or unique id prefix.",
+  "Get a session's full details, messages, and tool calls by internal id, source-qualified id, or unique prefix.",
   {
     id: z.string().describe("Session id or unique prefix"),
+    source: z.string().optional().describe("Resolve id as a provider-native source id within this source"),
     message_limit: z.number().optional().describe("Cap messages returned (default all)"),
   },
-  async (a: { id: string; message_limit?: number }) => {
+  async (a: { id: string; source?: string; message_limit?: number }) => {
     try {
       const store = sessionStore();
       // Everything routes through the Store (LocalStore | ApiStore). In
       // self_hosted mode, message/tool transcripts come from authenticated /v1
       // content endpoints populated by `sessions sync`.
-      const session = await store.get(a.id);
+      const session = await store.get(a.id, { source: a.source });
       if (!session) return fail(`Session not found (or ambiguous prefix): ${a.id}`);
       let messages = await store.messages(session.id);
       if (a.message_limit) messages = messages.slice(0, a.message_limit);
@@ -426,6 +427,7 @@ server.tool(
     related_type: z.enum(["project", "tool", "model", "provider", "repo"]).optional(),
     related_name: z.string().optional().describe("With related_type: sessions linked to this entity"),
     session_id: z.string().optional().describe("A session's entity neighborhood"),
+    session_source: z.string().optional().describe("Resolve session_id as a provider-native source id within this source"),
     limit: z.number().optional(),
   },
   async (a: {
@@ -433,11 +435,12 @@ server.tool(
     related_type?: "project" | "tool" | "model" | "provider" | "repo";
     related_name?: string;
     session_id?: string;
+    session_source?: string;
     limit?: number;
   }) => {
     try {
       const store = sessionStore();
-      if (a.session_id) return ok(await store.graphSession(a.session_id));
+      if (a.session_id) return ok(await store.graphSession(a.session_id, { source: a.session_source }));
       if (a.related_type && a.related_name) return ok(await store.graphRelated(a.related_type, a.related_name, a.limit ?? 50));
       return ok(await store.graphEntities(a.type));
     } catch (e) {
@@ -520,10 +523,11 @@ server.tool(
   "Resolve a session by id/prefix, latest project session, or the most recent session, and return the underlying Claude resume command.",
   {
     identifier: z.string().optional(),
+    source: z.string().optional().describe("Resolve identifier as a provider-native source id within this source"),
     project: z.string().optional(),
     latest: z.boolean().optional(),
   },
-  async (args: { identifier?: string; project?: string; latest?: boolean }) => {
+  async (args: { identifier?: string; source?: string; project?: string; latest?: boolean }) => {
     try {
       const store = sessionStore();
       let session: Session | null = null;
@@ -532,7 +536,7 @@ server.tool(
       } else if (args.latest || !args.identifier) {
         session = (await store.recent(1))[0] ?? null;
       } else {
-        session = await store.get(args.identifier);
+        session = await store.get(args.identifier, { source: args.source });
       }
 
       if (!session) {
@@ -549,12 +553,16 @@ server.tool(
 server.tool(
   "sessions_rename",
   "Set a session's title in the active store (local index, or the shared self_hosted /v1 registry).",
-  { identifier: z.string(), title: z.string() },
-  async (args: { identifier: string; title: string }) => {
+  {
+    identifier: z.string(),
+    source: z.string().optional().describe("Resolve identifier as a provider-native source id within this source"),
+    title: z.string(),
+  },
+  async (args: { identifier: string; source?: string; title: string }) => {
     try {
       const title = args.title.trim();
       if (!title) return fail("title cannot be empty");
-      const session = await sessionStore().rename(args.identifier, title);
+      const session = await sessionStore().rename(args.identifier, title, { source: args.source });
       if (!session) return fail(`session not found (or ambiguous prefix): ${args.identifier}`);
       return textJson(session);
     } catch (e) {
