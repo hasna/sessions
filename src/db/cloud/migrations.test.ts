@@ -3,6 +3,8 @@ import type { QueryResultRow } from "pg";
 import { MigrationLedger, type AppliedMigration, type TypedQueryClient } from "../../generated/storage-kit/index.js";
 import { loadMigrations } from "./migrations.js";
 
+const APPROVED_BASE_0001_CHECKSUM = "sha256:05b4985082a384ac34d50ea7c3ca7f02063f57a8f8754539747517dc55a5ae24";
+
 function applied(row: { id: string; checksum: string }): AppliedMigration {
   return {
     id: row.id,
@@ -20,9 +22,17 @@ describe("cloud migration ledger", () => {
     expect(codewith).toBeDefined();
     expect(initial?.sql).toMatch(/CHECK\s*\(source IN \('claude', 'codex', 'gemini'\)\)/);
     expect(initial?.sql).not.toContain("codewith");
+    expect(initial?.checksum).toBe(APPROVED_BASE_0001_CHECKSUM);
     expect(codewith?.sql).toContain("codewith");
 
-    const alreadyApplied = migrations.filter((migration) => migration.id !== "0004_codewith_session_source").map(applied);
+    const alreadyApplied = migrations
+      .filter((migration) => migration.id !== "0004_codewith_session_source")
+      .map((migration) =>
+        applied({
+          ...migration,
+          checksum: migration.id === "0001_init" ? APPROVED_BASE_0001_CHECKSUM : migration.checksum,
+        }),
+      );
     let migrationWrites = 0;
     const client: TypedQueryClient = {
       async query() {
