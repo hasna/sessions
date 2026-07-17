@@ -131,7 +131,14 @@ export class OpenAiRolloutParser implements SessionParser {
       });
     };
 
-    const { incompleteTrailingRecord, maxBufferedLineBytes } = readJsonlRecords(filePath, parseRecord);
+    let readResult: { incompleteTrailingRecord: boolean; maxBufferedLineBytes: number };
+    try {
+      readResult = readJsonlRecords(filePath, parseRecord);
+    } catch (error) {
+      sink.cleanup();
+      throw error;
+    }
+    const { incompleteTrailingRecord, maxBufferedLineBytes } = readResult;
 
     if (sink.messageCount === 0 && sink.toolCallCount === 0) {
       sink.cleanup();
