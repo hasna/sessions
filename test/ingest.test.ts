@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ingestSource, ingestAll } from "../src/lib/ingest/index.js";
 import { getDatabase, resetDatabase, closeDatabase } from "../src/db/database.js";
-import { listSessions } from "../src/db/sessions.js";
+import { getSessionBySource, listSessions } from "../src/db/sessions.js";
 import { getIngestionStats } from "../src/db/ingestion.js";
 
 let root: string;
@@ -27,6 +27,29 @@ const CLAUDE_LINES = [
     sessionId: "c-ingest-1",
   }),
 ].join("\n");
+
+const sharedRolloutLines = (cwd: string) =>
+  [
+    JSON.stringify({
+      timestamp: "2026-05-02T09:00:00Z",
+      type: "session_meta",
+      payload: {
+        id: "shared-openai-rollout-id",
+        cwd,
+        cli_version: "test",
+        model_provider: "openai",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-02T09:00:01Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: `index ${cwd}` }],
+      },
+    }),
+  ].join("\n");
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "sessions-ingest-"));
@@ -86,6 +109,37 @@ describe("ingestSource", () => {
     const stats = getIngestionStats().find((s) => s.source === "claude");
     expect(stats?.session_count).toBe(1);
     expect(stats?.message_count).toBe(2);
+  });
+
+  it("persists Codewith rollouts with source-qualified ids distinct from matching Codex ids", () => {
+    const codexDir = join(root, "codex", "sessions", "2026", "05", "02");
+    const codewithDir = join(root, "codewith", "sessions", "2026", "05", "02");
+    mkdirSync(codexDir, { recursive: true });
+    mkdirSync(codewithDir, { recursive: true });
+    writeFileSync(
+      join(codexDir, "rollout-2026-05-02T09-00-00-shared-openai-rollout-id.jsonl"),
+      sharedRolloutLines("/Users/h/Workspace/codex-app")
+    );
+    writeFileSync(
+      join(codewithDir, "rollout-2026-05-02T10-00-00-shared-openai-rollout-id.jsonl"),
+      sharedRolloutLines("/Users/h/Workspace/codewith-app")
+    );
+
+    expect(ingestSource("codex")).toMatchObject({ source: "codex", sessions: 1, errors: 0 });
+    expect(ingestSource("codewith")).toMatchObject({ source: "codewith", sessions: 1, errors: 0 });
+
+    const codex = getSessionBySource("codex", "shared-openai-rollout-id");
+    const codewith = getSessionBySource("codewith", "shared-openai-rollout-id");
+    expect(codex?.project_name).toBe("codex-app");
+    expect(codewith?.project_name).toBe("codewith-app");
+    expect(codex?.id).not.toBe(codewith?.id);
+    expect(listSessions({ source: "codex" }).map((session) => session.source_id)).toContain("shared-openai-rollout-id");
+    expect(listSessions({ source: "codewith" }).map((session) => session.source_id)).toEqual([
+      "shared-openai-rollout-id",
+    ]);
+
+    const codewithStats = getIngestionStats().find((s) => s.source === "codewith");
+    expect(codewithStats?.session_count).toBe(1);
   });
 
   it("throws for an unknown source", () => {

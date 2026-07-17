@@ -3,14 +3,16 @@
 // (@hasna/contracts/sdk). Keep it in lock-step with app.ts.
 
 import { getPackageInfo } from "../lib/package.js";
+import { SESSION_SOURCES } from "../types/index.js";
 
 const tokenTotalSchema = { type: "integer", format: "int64" } as const;
+const sessionSourceSchema = { type: "string", enum: [...SESSION_SOURCES] } as const;
 
 const sessionSchema = {
   type: "object",
   properties: {
     id: { type: "string" },
-    source: { type: "string", enum: ["claude", "codex", "gemini"] },
+    source: sessionSourceSchema,
     source_id: { type: "string" },
     source_path: { type: "string", nullable: true },
     title: { type: "string", nullable: true },
@@ -159,7 +161,7 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           type: "object",
           properties: {
             id: { type: "string" },
-            source: { type: "string", enum: ["claude", "codex", "gemini"] },
+            source: sessionSourceSchema,
             source_id: { type: "string" },
             source_path: { type: "string", nullable: true },
             title: { type: "string", nullable: true },
