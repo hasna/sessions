@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaudeParser } from "../src/lib/ingest/claude.js";
@@ -409,6 +409,47 @@ describe("CodewithParser", () => {
     expect(codewith.session.source).toBe("codewith");
     expect(codex.session.source_path).toBe(codexFile);
     expect(codewith.session.source_path).toBe(codewithFile);
+  });
+
+  it("parses generated large rollout files without buffering the whole file as one string", () => {
+    const file = join(root, "codex", "sessions", "2026", "05", "02", "rollout-2026-05-02T13-00-00-large.jsonl");
+    const lines = [CODEX_LINES.split("\n")[0]];
+    for (let i = 0; i < 20_000; i++) {
+      lines.push(
+        JSON.stringify({
+          timestamp: "2026-05-02T13:00:01Z",
+          type: "response_item",
+          payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `chunk ${i}` }] },
+        })
+      );
+    }
+    writeFileSync(file, `${lines.join("\n")}\n`);
+
+    const result = new CodexParser().parseFileResult(file);
+    expect(statSync(file).size).toBeGreaterThan(2_000_000);
+    expect(result.incompleteTrailingRecord).toBe(false);
+    expect(result.maxBufferedLineBytes).toBeLessThan(512);
+    expect(result.sessions[0].messages).toHaveLength(20_000);
+  });
+
+  it("reports incomplete trailing rollout records without throwing", () => {
+    const file = join(root, "codex", "sessions", "2026", "05", "02", "rollout-2026-05-02T14-00-00-partial.jsonl");
+    writeFileSync(
+      file,
+      [
+        CODEX_LINES.split("\n")[0],
+        JSON.stringify({
+          timestamp: "2026-05-02T14:00:01Z",
+          type: "response_item",
+          payload: { type: "message", role: "user", content: [{ type: "input_text", text: "complete" }] },
+        }),
+        '{"timestamp":"2026-05-02T14:00:02Z","type":"response_item","payload":',
+      ].join("\n")
+    );
+
+    const result = new CodexParser().parseFileResult(file);
+    expect(result.incompleteTrailingRecord).toBe(true);
+    expect(result.sessions[0].messages.map((m) => m.content)).toEqual(["complete"]);
   });
 });
 

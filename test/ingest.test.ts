@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ingestSource, ingestAll } from "../src/lib/ingest/index.js";
+import { getParser, ingestSource, ingestAll } from "../src/lib/ingest/index.js";
 import { getDatabase, resetDatabase, closeDatabase } from "../src/db/database.js";
-import { listSessions } from "../src/db/sessions.js";
-import { getIngestionStats } from "../src/db/ingestion.js";
+import { getMessages, listSessions } from "../src/db/sessions.js";
+import { getFileState, getIngestionStats } from "../src/db/ingestion.js";
 
 let root: string;
 
@@ -27,6 +27,20 @@ const CLAUDE_LINES = [
     sessionId: "c-ingest-1",
   }),
 ].join("\n");
+
+const CODEX_SESSION_META = JSON.stringify({
+  timestamp: "2026-05-02T09:00:00Z",
+  type: "session_meta",
+  payload: { id: "codex-ingest-1", cwd: "/Users/h/Workspace/api" },
+});
+
+function codexUserLine(timestamp: string, text: string): string {
+  return JSON.stringify({
+    timestamp,
+    type: "response_item",
+    payload: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+  });
+}
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "sessions-ingest-"));
@@ -98,6 +112,74 @@ describe("ingestSource", () => {
     writeFileSync(join(lockDir, "owner.json"), JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
 
     expect(() => ingestSource("claude")).toThrow(/another sessions ingest is already running/);
+  });
+
+  it("defers changed rollout files and retries without duplicating content", () => {
+    const xdir = join(root, "codex", "sessions", "2026", "05", "02");
+    mkdirSync(xdir, { recursive: true });
+    const file = join(xdir, "rollout-2026-05-02T09-00-00-codex-ingest-1.jsonl");
+    writeFileSync(file, [CODEX_SESSION_META, codexUserLine("2026-05-02T09:00:01Z", "first")].join("\n"));
+
+    const parser = getParser("codex") as NonNullable<ReturnType<typeof getParser>> & {
+      parseFileResult: NonNullable<ReturnType<typeof getParser>["parseFileResult"]>;
+    };
+    const original = parser.parseFileResult.bind(parser);
+    parser.parseFileResult = (path: string) => {
+      const parsed = original(path);
+      appendFileSync(file, `\n${codexUserLine("2026-05-02T09:00:02Z", "second")}`);
+      return parsed;
+    };
+
+    try {
+      const changed = ingestSource("codex");
+      expect(changed).toMatchObject({ source: "codex", scanned: 1, ingested: 0, sessions: 0, errors: 0 });
+      expect(getFileState("codex", file)?.status).toBe("pending");
+      expect(listSessions({ source: "codex" })).toHaveLength(0);
+    } finally {
+      parser.parseFileResult = original;
+    }
+
+    const retried = ingestSource("codex");
+    expect(retried).toMatchObject({ source: "codex", scanned: 1, ingested: 1, sessions: 1, errors: 0 });
+    const sessions = listSessions({ source: "codex" });
+    expect(sessions).toHaveLength(1);
+    expect(getMessages(sessions[0].id).map((m) => m.content)).toEqual(["first", "second"]);
+
+    const third = ingestSource("codex");
+    expect(third).toMatchObject({ source: "codex", scanned: 1, ingested: 0, skipped: 1, sessions: 0, errors: 0 });
+    expect(listSessions({ source: "codex" })).toHaveLength(1);
+  });
+
+  it("defers rollout files with an incomplete trailing record", () => {
+    const xdir = join(root, "codex", "sessions", "2026", "05", "02");
+    mkdirSync(xdir, { recursive: true });
+    const file = join(xdir, "rollout-2026-05-02T09-00-00-codex-partial.jsonl");
+    writeFileSync(
+      file,
+      [
+        CODEX_SESSION_META,
+        codexUserLine("2026-05-02T09:00:01Z", "complete"),
+        '{"timestamp":"2026-05-02T09:00:02Z","type":"response_item","payload":',
+      ].join("\n")
+    );
+
+    const partial = ingestSource("codex");
+    expect(partial).toMatchObject({ source: "codex", scanned: 1, ingested: 0, sessions: 0, errors: 0 });
+    expect(getFileState("codex", file)?.status).toBe("pending");
+    expect(listSessions({ source: "codex" })).toHaveLength(0);
+
+    writeFileSync(
+      file,
+      [
+        CODEX_SESSION_META,
+        codexUserLine("2026-05-02T09:00:01Z", "complete"),
+        codexUserLine("2026-05-02T09:00:02Z", "now complete"),
+      ].join("\n")
+    );
+    const retried = ingestSource("codex");
+    expect(retried.ingested).toBe(1);
+    const [session] = listSessions({ source: "codex" });
+    expect(getMessages(session.id).map((m) => m.content)).toEqual(["complete", "now complete"]);
   });
 });
 

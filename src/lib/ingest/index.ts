@@ -45,6 +45,11 @@ interface IngestLockInfo {
   started_at: string;
 }
 
+interface FileSnapshot {
+  mtime: string;
+  size: number;
+}
+
 function ingestLockPath(): string {
   return join(getSessionsDir(), INGEST_LOCK_DIR);
 }
@@ -112,6 +117,19 @@ function withIngestLock<T>(fn: () => T): T {
   }
 }
 
+function snapshotFile(file: string): FileSnapshot | null {
+  try {
+    const st = statSync(file);
+    return { mtime: st.mtime.toISOString(), size: st.size };
+  } catch {
+    return null;
+  }
+}
+
+function sameSnapshot(a: FileSnapshot, b: FileSnapshot): boolean {
+  return a.mtime === b.mtime && a.size === b.size;
+}
+
 function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestResult {
   const parser = getParser(source);
   if (!parser) throw new Error(`No parser registered for source: ${source}`);
@@ -122,37 +140,49 @@ function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestR
 
   for (const file of files) {
     result.scanned++;
-    let mtime: string | null = null;
-    let size: number | null = null;
-    try {
-      const st = statSync(file);
-      mtime = st.mtime.toISOString();
-      size = st.size;
-    } catch {
+    const before = snapshotFile(file);
+    if (!before) {
       // File vanished between listing and stat — skip.
       continue;
     }
 
     if (!opts.force) {
       const state = getFileState(source, file);
-      if (state && state.status === "ok" && state.file_mtime === mtime) {
+      if (state && state.status === "ok" && state.file_mtime === before.mtime && state.file_size === before.size) {
         result.skipped++;
         continue;
       }
     }
 
     try {
-      const parsed = parser.parseFile(file);
-      for (const ps of parsed) {
+      const parsed = parser.parseFileResult?.(file) ?? { sessions: parser.parseFile(file) };
+      const after = snapshotFile(file);
+      if (!after) {
+        setFileState(source, file, before.mtime, before.size, "pending", "file vanished after parsing");
+        opts.onProgress?.(`[${source}] deferred ${file}: file vanished after parsing`);
+        continue;
+      }
+      if (parsed.incompleteTrailingRecord) {
+        setFileState(source, file, after.mtime, after.size, "pending", "incomplete trailing JSONL record");
+        opts.onProgress?.(`[${source}] deferred ${file}: incomplete trailing JSONL record`);
+        continue;
+      }
+      if (!sameSnapshot(before, after)) {
+        setFileState(source, file, after.mtime, after.size, "pending", "file changed during parsing");
+        opts.onProgress?.(`[${source}] deferred ${file}: file changed during parsing`);
+        continue;
+      }
+
+      for (const ps of parsed.sessions) {
         saveParsedSession(ps);
         result.sessions++;
       }
-      setFileState(source, file, mtime, size, "ok");
+      setFileState(source, file, after.mtime, after.size, "ok");
       result.ingested++;
-      opts.onProgress?.(`[${source}] ingested ${file} (${parsed.length} session${parsed.length === 1 ? "" : "s"})`);
+      opts.onProgress?.(`[${source}] ingested ${file} (${parsed.sessions.length} session${parsed.sessions.length === 1 ? "" : "s"})`);
     } catch (err) {
       result.errors++;
-      setFileState(source, file, mtime, size, "error", (err as Error).message);
+      setFileState(source, file, before.mtime, before.size, "error", (err as Error).message);
       opts.onProgress?.(`[${source}] ERROR ${file}: ${(err as Error).message}`);
     }
   }

@@ -1,6 +1,7 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { SessionParser } from "./types.js";
+import { StringDecoder } from "node:string_decoder";
+import type { ParseFileResult, SessionParser } from "./types.js";
 import { flattenContent } from "./types.js";
 import { titleFromUserContent } from "../session-text.js";
 import type {
@@ -11,6 +12,8 @@ import type {
   SessionSource,
   ToolCallInsert,
 } from "../../types/index.js";
+
+const READ_BUFFER_BYTES = 64 * 1024;
 
 function mapRole(role: unknown): MessageRole {
   if (role === "user") return "user";
@@ -43,9 +46,11 @@ export class OpenAiRolloutParser implements SessionParser {
   }
 
   parseFile(filePath: string): ParsedSession[] {
-    if (!existsSync(filePath)) return [];
-    const lines = readFileSync(filePath, "utf-8").split("\n").filter((l) => l.trim());
-    if (lines.length === 0) return [];
+    return this.parseFileResult(filePath).sessions;
+  }
+
+  parseFileResult(filePath: string): ParseFileResult {
+    if (!existsSync(filePath)) return { sessions: [] };
 
     const messages: MessageInsert[] = [];
     const toolCalls: ToolCallInsert[] = [];
@@ -62,13 +67,7 @@ export class OpenAiRolloutParser implements SessionParser {
     let title: string | undefined;
     let seq = 0;
 
-    for (const line of lines) {
-      let o: Record<string, unknown>;
-      try {
-        o = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
+    const parseRecord = (o: Record<string, unknown>) => {
       const ts = typeof o.timestamp === "string" ? o.timestamp : null;
       const payload = (o.payload as Record<string, unknown>) ?? {};
 
@@ -83,10 +82,10 @@ export class OpenAiRolloutParser implements SessionParser {
           if (typeof git.commit_hash === "string") gitSha = git.commit_hash;
           if (typeof git.repository_url === "string") gitUrl = git.repository_url;
         }
-        continue;
+        return;
       }
 
-      if (o.type !== "response_item") continue;
+      if (o.type !== "response_item") return;
       if (ts) {
         if (!firstTs) firstTs = ts;
         lastTs = ts;
@@ -104,14 +103,14 @@ export class OpenAiRolloutParser implements SessionParser {
         };
         toolCalls.push(tc);
         if (callId) toolByCallId.set(callId, tc);
-        continue;
+        return;
       }
 
       if (ptype === "function_call_output") {
         const callId = typeof payload.call_id === "string" ? payload.call_id : undefined;
         const tc = callId ? toolByCallId.get(callId) : undefined;
         if (tc) tc.tool_output = flattenContent(payload.output);
-        continue;
+        return;
       }
 
       const role = ptype === "reasoning" ? "thinking" : mapRole(payload.role);
@@ -119,7 +118,7 @@ export class OpenAiRolloutParser implements SessionParser {
         ptype === "reasoning"
           ? flattenContent(payload.summary ?? payload.content)
           : flattenContent(payload.content);
-      if (!content) continue;
+      if (!content) return;
 
       if (!title && role === "user") {
         title = titleFromUserContent(content) ?? undefined;
@@ -132,9 +131,13 @@ export class OpenAiRolloutParser implements SessionParser {
         sequence_num: seq++,
         timestamp: ts,
       });
-    }
+    };
 
-    if (messages.length === 0 && toolCalls.length === 0) return [];
+    const { incompleteTrailingRecord, maxBufferedLineBytes } = readJsonlRecords(filePath, parseRecord);
+
+    if (messages.length === 0 && toolCalls.length === 0) {
+      return { sessions: [], incompleteTrailingRecord, maxBufferedLineBytes };
+    }
 
     const fileBase = basename(filePath).replace(/\.jsonl$/, "");
     sourceId = sourceId ?? fileBase;
@@ -163,6 +166,59 @@ export class OpenAiRolloutParser implements SessionParser {
       source_modified_at: mtime,
     };
 
-    return [{ session, messages, toolCalls }];
+    return {
+      sessions: [{ session, messages, toolCalls }],
+      incompleteTrailingRecord,
+      maxBufferedLineBytes,
+    };
   }
+}
+
+function readJsonlRecords(
+  filePath: string,
+  onRecord: (record: Record<string, unknown>) => void
+): { incompleteTrailingRecord: boolean; maxBufferedLineBytes: number } {
+  const fd = openSync(filePath, "r");
+  const decoder = new StringDecoder("utf8");
+  const buffer = Buffer.allocUnsafe(READ_BUFFER_BYTES);
+  let pending = "";
+  let incompleteTrailingRecord = false;
+  let maxBufferedLineBytes = 0;
+
+  const parseLine = (line: string, trailing: boolean) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    maxBufferedLineBytes = Math.max(maxBufferedLineBytes, Buffer.byteLength(line));
+    try {
+      onRecord(JSON.parse(trimmed) as Record<string, unknown>);
+    } catch {
+      if (trailing) incompleteTrailingRecord = true;
+    }
+  };
+
+  try {
+    for (;;) {
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+
+      pending += decoder.write(buffer.subarray(0, bytesRead));
+      let newlineIndex = pending.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = pending.slice(0, newlineIndex).replace(/\r$/, "");
+        parseLine(line, false);
+        pending = pending.slice(newlineIndex + 1);
+        newlineIndex = pending.indexOf("\n");
+      }
+      if (pending) {
+        maxBufferedLineBytes = Math.max(maxBufferedLineBytes, Buffer.byteLength(pending));
+      }
+    }
+
+    pending += decoder.end();
+    parseLine(pending.replace(/\r$/, ""), true);
+  } finally {
+    closeSync(fd);
+  }
+
+  return { incompleteTrailingRecord, maxBufferedLineBytes };
 }
