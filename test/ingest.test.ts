@@ -150,6 +150,40 @@ describe("ingestSource", () => {
     expect(listSessions({ source: "codex" })).toHaveLength(1);
   });
 
+  it("keeps the existing stored rollout snapshot when a forced re-ingest changes during parsing", () => {
+    const xdir = join(root, "codex", "sessions", "2026", "05", "02");
+    mkdirSync(xdir, { recursive: true });
+    const file = join(xdir, "rollout-2026-05-02T09-00-00-codex-existing.jsonl");
+    writeFileSync(file, [CODEX_SESSION_META, codexUserLine("2026-05-02T09:00:01Z", "first")].join("\n"));
+
+    expect(ingestSource("codex").ingested).toBe(1);
+    const [existing] = listSessions({ source: "codex" });
+    expect(getMessages(existing.id).map((m) => m.content)).toEqual(["first"]);
+
+    const parser = getParser("codex") as NonNullable<ReturnType<typeof getParser>> & {
+      parseFileResult: NonNullable<ReturnType<typeof getParser>["parseFileResult"]>;
+    };
+    const original = parser.parseFileResult.bind(parser);
+    parser.parseFileResult = (path, opts) => {
+      const parsed = original(path, opts);
+      appendFileSync(file, `\n${codexUserLine("2026-05-02T09:00:02Z", "second")}`);
+      return parsed;
+    };
+
+    try {
+      const changed = ingestSource("codex", { force: true });
+      expect(changed).toMatchObject({ source: "codex", scanned: 1, ingested: 0, sessions: 0, errors: 0 });
+      expect(getFileState("codex", file)?.status).toBe("pending");
+      expect(getMessages(existing.id).map((m) => m.content)).toEqual(["first"]);
+    } finally {
+      parser.parseFileResult = original;
+    }
+
+    const retried = ingestSource("codex");
+    expect(retried.ingested).toBe(1);
+    expect(getMessages(existing.id).map((m) => m.content)).toEqual(["first", "second"]);
+  });
+
   it("defers rollout files with an incomplete trailing record", () => {
     const xdir = join(root, "codex", "sessions", "2026", "05", "02");
     mkdirSync(xdir, { recursive: true });
@@ -180,6 +214,29 @@ describe("ingestSource", () => {
     expect(retried.ingested).toBe(1);
     const [session] = listSessions({ source: "codex" });
     expect(getMessages(session.id).map((m) => m.content)).toEqual(["complete", "now complete"]);
+  });
+
+  it("keeps the existing stored rollout snapshot when a forced re-ingest has an incomplete trailing record", () => {
+    const xdir = join(root, "codex", "sessions", "2026", "05", "02");
+    mkdirSync(xdir, { recursive: true });
+    const file = join(xdir, "rollout-2026-05-02T09-00-00-codex-existing-partial.jsonl");
+    writeFileSync(file, [CODEX_SESSION_META, codexUserLine("2026-05-02T09:00:01Z", "stable")].join("\n"));
+
+    expect(ingestSource("codex").ingested).toBe(1);
+    const [existing] = listSessions({ source: "codex" });
+    writeFileSync(
+      file,
+      [
+        CODEX_SESSION_META,
+        codexUserLine("2026-05-02T09:00:01Z", "stable"),
+        '{"timestamp":"2026-05-02T09:00:02Z","type":"response_item","payload":',
+      ].join("\n")
+    );
+
+    const partial = ingestSource("codex", { force: true });
+    expect(partial).toMatchObject({ source: "codex", scanned: 1, ingested: 0, sessions: 0, errors: 0 });
+    expect(getFileState("codex", file)?.status).toBe("pending");
+    expect(getMessages(existing.id).map((m) => m.content)).toEqual(["stable"]);
   });
 });
 

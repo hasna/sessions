@@ -1,11 +1,22 @@
-import type { ParsedSession, SessionSource } from "../../types/index.js";
+import type { ParsedSession, SessionSource, StagedParsedSession } from "../../types/index.js";
+
+export interface ParseFileOptions {
+  /**
+   * Prefer a bounded staging result when the parser supports it. `parseFile()`
+   * remains array-based for generic callers.
+   */
+  preferStaging?: boolean;
+}
 
 export interface ParseFileResult {
   sessions: ParsedSession[];
+  stagedSessions?: StagedParsedSession[];
   /** True when the file ended with a syntactically incomplete JSON object. */
   incompleteTrailingRecord?: boolean;
   /** Largest raw JSONL line buffered while parsing, excluding normalized output. */
   maxBufferedLineBytes?: number;
+  /** Largest normalized record batch held before handing data to storage. */
+  maxNormalizedBatchRecords?: number;
 }
 
 export interface SessionParser {
@@ -18,7 +29,7 @@ export interface SessionParser {
   /** Parse a session file into normalized sessions. Most providers yield one per file; some (gemini logs.json) yield many. Returns [] if none. */
   parseFile(filePath: string): ParsedSession[];
   /** Parse a session file and return parser state useful to safe ingestion. */
-  parseFileResult?(filePath: string): ParseFileResult;
+  parseFileResult?(filePath: string, opts?: ParseFileOptions): ParseFileResult;
 }
 
 /** Flatten a Claude/Codex content value (string or array of blocks) into plain text. */

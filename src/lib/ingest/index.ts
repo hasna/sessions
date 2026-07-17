@@ -5,7 +5,7 @@ import { ClaudeParser } from "./claude.js";
 import { CodexParser } from "./codex.js";
 import { CodewithParser } from "./codewith.js";
 import { GeminiParser } from "./gemini.js";
-import { saveParsedSession } from "../../db/sessions.js";
+import { saveParsedSession, saveStagedParsedSession } from "../../db/sessions.js";
 import { getFileState, setFileState, updateIngestionStats } from "../../db/ingestion.js";
 import { registerMachine, recomputeMachineCounts } from "../../db/machines.js";
 import { getSessionsDir } from "../paths.js";
@@ -155,31 +155,44 @@ function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestR
     }
 
     try {
-      const parsed = parser.parseFileResult?.(file) ?? { sessions: parser.parseFile(file) };
+      const parsed = parser.parseFileResult?.(file, { preferStaging: true }) ?? { sessions: parser.parseFile(file) };
       const after = snapshotFile(file);
-      if (!after) {
-        setFileState(source, file, before.mtime, before.size, "pending", "file vanished after parsing");
-        opts.onProgress?.(`[${source}] deferred ${file}: file vanished after parsing`);
-        continue;
-      }
-      if (parsed.incompleteTrailingRecord) {
-        setFileState(source, file, after.mtime, after.size, "pending", "incomplete trailing JSONL record");
-        opts.onProgress?.(`[${source}] deferred ${file}: incomplete trailing JSONL record`);
-        continue;
-      }
-      if (!sameSnapshot(before, after)) {
-        setFileState(source, file, after.mtime, after.size, "pending", "file changed during parsing");
-        opts.onProgress?.(`[${source}] deferred ${file}: file changed during parsing`);
-        continue;
-      }
+      try {
+        if (!after) {
+          setFileState(source, file, before.mtime, before.size, "pending", "file vanished after parsing");
+          opts.onProgress?.(`[${source}] deferred ${file}: file vanished after parsing`);
+          continue;
+        }
+        if (parsed.incompleteTrailingRecord) {
+          setFileState(source, file, after.mtime, after.size, "pending", "incomplete trailing JSONL record");
+          opts.onProgress?.(`[${source}] deferred ${file}: incomplete trailing JSONL record`);
+          continue;
+        }
+        if (!sameSnapshot(before, after)) {
+          setFileState(source, file, after.mtime, after.size, "pending", "file changed during parsing");
+          opts.onProgress?.(`[${source}] deferred ${file}: file changed during parsing`);
+          continue;
+        }
 
-      for (const ps of parsed.sessions) {
-        saveParsedSession(ps);
-        result.sessions++;
+        let fileSessions = 0;
+        for (const ps of parsed.sessions) {
+          saveParsedSession(ps);
+          result.sessions++;
+          fileSessions++;
+        }
+        for (const staged of parsed.stagedSessions ?? []) {
+          saveStagedParsedSession(staged);
+          result.sessions++;
+          fileSessions++;
+        }
+        setFileState(source, file, after.mtime, after.size, "ok");
+        result.ingested++;
+        opts.onProgress?.(`[${source}] ingested ${file} (${fileSessions} session${fileSessions === 1 ? "" : "s"})`);
+      } finally {
+        for (const staged of parsed.stagedSessions ?? []) {
+          staged.cleanup();
+        }
       }
-      setFileState(source, file, after.mtime, after.size, "ok");
-      result.ingested++;
-      opts.onProgress?.(`[${source}] ingested ${file} (${parsed.sessions.length} session${parsed.sessions.length === 1 ? "" : "s"})`);
     } catch (err) {
       result.errors++;
       setFileState(source, file, before.mtime, before.size, "error", (err as Error).message);

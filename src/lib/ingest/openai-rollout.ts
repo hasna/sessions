@@ -1,7 +1,9 @@
-import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, readSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { tmpdir } from "node:os";
 import { StringDecoder } from "node:string_decoder";
-import type { ParseFileResult, SessionParser } from "./types.js";
+import { Database as BunDatabase } from "bun:sqlite";
+import type { ParseFileOptions, ParseFileResult, SessionParser } from "./types.js";
 import { flattenContent } from "./types.js";
 import { titleFromUserContent } from "../session-text.js";
 import type {
@@ -10,6 +12,7 @@ import type {
   ParsedSession,
   SessionInsert,
   SessionSource,
+  StagedParsedSession,
   ToolCallInsert,
 } from "../../types/index.js";
 
@@ -49,12 +52,10 @@ export class OpenAiRolloutParser implements SessionParser {
     return this.parseFileResult(filePath).sessions;
   }
 
-  parseFileResult(filePath: string): ParseFileResult {
+  parseFileResult(filePath: string, opts: ParseFileOptions = {}): ParseFileResult {
     if (!existsSync(filePath)) return { sessions: [] };
 
-    const messages: MessageInsert[] = [];
-    const toolCalls: ToolCallInsert[] = [];
-    const toolByCallId = new Map<string, ToolCallInsert>();
+    const sink: RolloutSink = opts.preferStaging ? new StagedRolloutSink() : new MemoryRolloutSink();
     let sourceId: string | undefined;
     let cwd: string | undefined;
     let cliVersion: string | undefined;
@@ -95,21 +96,18 @@ export class OpenAiRolloutParser implements SessionParser {
 
       if (ptype === "function_call" && typeof payload.name === "string") {
         const callId = typeof payload.call_id === "string" ? payload.call_id : undefined;
-        const tc: ToolCallInsert = {
+        sink.addToolCall(callId, {
           session_id: "",
           tool_name: payload.name,
           tool_input: payload.arguments != null ? String(payload.arguments) : null,
           timestamp: ts,
-        };
-        toolCalls.push(tc);
-        if (callId) toolByCallId.set(callId, tc);
+        });
         return;
       }
 
       if (ptype === "function_call_output") {
         const callId = typeof payload.call_id === "string" ? payload.call_id : undefined;
-        const tc = callId ? toolByCallId.get(callId) : undefined;
-        if (tc) tc.tool_output = flattenContent(payload.output);
+        if (callId) sink.updateToolOutput(callId, flattenContent(payload.output));
         return;
       }
 
@@ -124,7 +122,7 @@ export class OpenAiRolloutParser implements SessionParser {
         title = titleFromUserContent(content) ?? undefined;
       }
 
-      messages.push({
+      sink.addMessage({
         session_id: "",
         role,
         content,
@@ -135,8 +133,14 @@ export class OpenAiRolloutParser implements SessionParser {
 
     const { incompleteTrailingRecord, maxBufferedLineBytes } = readJsonlRecords(filePath, parseRecord);
 
-    if (messages.length === 0 && toolCalls.length === 0) {
-      return { sessions: [], incompleteTrailingRecord, maxBufferedLineBytes };
+    if (sink.messageCount === 0 && sink.toolCallCount === 0) {
+      sink.cleanup();
+      return {
+        sessions: [],
+        incompleteTrailingRecord,
+        maxBufferedLineBytes,
+        maxNormalizedBatchRecords: sink.maxNormalizedBatchRecords,
+      };
     }
 
     const fileBase = basename(filePath).replace(/\.jsonl$/, "");
@@ -166,11 +170,163 @@ export class OpenAiRolloutParser implements SessionParser {
       source_modified_at: mtime,
     };
 
+    const parsed = sink.toParseFileResult(session);
     return {
-      sessions: [{ session, messages, toolCalls }],
+      ...parsed,
       incompleteTrailingRecord,
       maxBufferedLineBytes,
+      maxNormalizedBatchRecords: sink.maxNormalizedBatchRecords,
     };
+  }
+}
+
+interface RolloutSink {
+  readonly messageCount: number;
+  readonly toolCallCount: number;
+  readonly maxNormalizedBatchRecords: number;
+  addMessage(message: MessageInsert): void;
+  addToolCall(callId: string | undefined, toolCall: ToolCallInsert): void;
+  updateToolOutput(callId: string, output: string): void;
+  toParseFileResult(session: SessionInsert): Pick<ParseFileResult, "sessions" | "stagedSessions">;
+  cleanup(): void;
+}
+
+class MemoryRolloutSink implements RolloutSink {
+  private readonly messages: MessageInsert[] = [];
+  private readonly toolCalls: ToolCallInsert[] = [];
+  private readonly toolByCallId = new Map<string, ToolCallInsert>();
+
+  get messageCount(): number {
+    return this.messages.length;
+  }
+
+  get toolCallCount(): number {
+    return this.toolCalls.length;
+  }
+
+  get maxNormalizedBatchRecords(): number {
+    return Math.max(this.messages.length, this.toolCalls.length);
+  }
+
+  addMessage(message: MessageInsert): void {
+    this.messages.push(message);
+  }
+
+  addToolCall(callId: string | undefined, toolCall: ToolCallInsert): void {
+    this.toolCalls.push(toolCall);
+    if (callId) this.toolByCallId.set(callId, toolCall);
+  }
+
+  updateToolOutput(callId: string, output: string): void {
+    const toolCall = this.toolByCallId.get(callId);
+    if (toolCall) toolCall.tool_output = output;
+  }
+
+  toParseFileResult(session: SessionInsert): Pick<ParseFileResult, "sessions" | "stagedSessions"> {
+    return { sessions: [{ session, messages: this.messages, toolCalls: this.toolCalls }] };
+  }
+
+  cleanup(): void {}
+}
+
+class StagedRolloutSink implements RolloutSink {
+  private readonly dir = mkdtempSync(join(tmpdir(), "sessions-rollout-stage-"));
+  private readonly db = new BunDatabase(join(this.dir, "stage.sqlite"));
+  private nextMessageIndex = 0;
+  private nextToolCallIndex = 0;
+  private maxBatch = 0;
+  totalInputTokens = 0;
+  totalOutputTokens = 0;
+  totalCacheReadTokens = 0;
+  totalCacheWriteTokens = 0;
+  totalThinkingTokens = 0;
+
+  constructor() {
+    this.db.exec(`
+      CREATE TABLE messages (idx INTEGER PRIMARY KEY, json TEXT NOT NULL);
+      CREATE TABLE tool_calls (idx INTEGER PRIMARY KEY, call_id TEXT, json TEXT NOT NULL);
+      CREATE INDEX tool_calls_call_id ON tool_calls(call_id);
+    `);
+  }
+
+  get messageCount(): number {
+    return this.nextMessageIndex;
+  }
+
+  get toolCallCount(): number {
+    return this.nextToolCallIndex;
+  }
+
+  get maxNormalizedBatchRecords(): number {
+    return this.maxBatch;
+  }
+
+  addMessage(message: MessageInsert): void {
+    this.totalInputTokens += message.input_tokens ?? 0;
+    this.totalOutputTokens += message.output_tokens ?? 0;
+    this.totalCacheReadTokens += message.cache_read_tokens ?? 0;
+    this.totalCacheWriteTokens += message.cache_write_tokens ?? 0;
+    this.totalThinkingTokens += message.thinking_tokens ?? 0;
+    this.db.prepare("INSERT INTO messages (idx, json) VALUES (?, ?)").run(
+      this.nextMessageIndex++,
+      JSON.stringify(message)
+    );
+    this.maxBatch = Math.max(this.maxBatch, 1);
+  }
+
+  addToolCall(callId: string | undefined, toolCall: ToolCallInsert): void {
+    this.db.prepare("INSERT INTO tool_calls (idx, call_id, json) VALUES (?, ?, ?)").run(
+      this.nextToolCallIndex++,
+      callId ?? null,
+      JSON.stringify(toolCall)
+    );
+    this.maxBatch = Math.max(this.maxBatch, 1);
+  }
+
+  updateToolOutput(callId: string, output: string): void {
+    const row = this.db
+      .prepare("SELECT idx, json FROM tool_calls WHERE call_id = ? ORDER BY idx DESC LIMIT 1")
+      .get(callId) as { idx: number; json: string } | undefined;
+    if (!row) return;
+    const toolCall = JSON.parse(row.json) as ToolCallInsert;
+    toolCall.tool_output = output;
+    this.db.prepare("UPDATE tool_calls SET json = ? WHERE idx = ?").run(JSON.stringify(toolCall), row.idx);
+  }
+
+  toParseFileResult(session: SessionInsert): Pick<ParseFileResult, "sessions" | "stagedSessions"> {
+    const staged: StagedParsedSession = {
+      session,
+      messageCount: this.messageCount,
+      toolCallCount: this.toolCallCount,
+      totalInputTokens: this.totalInputTokens,
+      totalOutputTokens: this.totalOutputTokens,
+      totalCacheReadTokens: this.totalCacheReadTokens,
+      totalCacheWriteTokens: this.totalCacheWriteTokens,
+      totalThinkingTokens: this.totalThinkingTokens,
+      maxNormalizedBatchRecords: this.maxNormalizedBatchRecords,
+      forEachMessageBatch: (batchSize, callback) => this.forEachBatch<MessageInsert>("messages", batchSize, callback),
+      forEachToolCallBatch: (batchSize, callback) => this.forEachBatch<ToolCallInsert>("tool_calls", batchSize, callback),
+      cleanup: () => this.cleanup(),
+    };
+    return { sessions: [], stagedSessions: [staged] };
+  }
+
+  cleanup(): void {
+    this.db.close();
+    rmSync(this.dir, { recursive: true, force: true });
+  }
+
+  private forEachBatch<T>(table: "messages" | "tool_calls", batchSize: number, callback: (batch: T[]) => void): void {
+    let lastIndex = -1;
+    for (;;) {
+      const rows = this.db
+        .prepare(`SELECT idx, json FROM ${table} WHERE idx > ? ORDER BY idx LIMIT ?`)
+        .all(lastIndex, batchSize) as Array<{ idx: number; json: string }>;
+      if (rows.length === 0) return;
+      this.maxBatch = Math.max(this.maxBatch, rows.length);
+      callback(rows.map((row) => JSON.parse(row.json) as T));
+      lastIndex = rows[rows.length - 1].idx;
+    }
   }
 }
 
