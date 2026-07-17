@@ -169,6 +169,22 @@ export interface ParsedSession {
   toolCalls: ToolCallInsert[];
 }
 
+export interface StagedParsedSession {
+  session: SessionInsert;
+  messageCount: number;
+  toolCallCount: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
+  totalThinkingTokens: number;
+  /** Largest normalized record batch held by the parser while staging. */
+  maxNormalizedBatchRecords: number;
+  forEachMessageBatch(batchSize: number, callback: (batch: MessageInsert[]) => void): void;
+  forEachToolCallBatch(batchSize: number, callback: (batch: ToolCallInsert[]) => void): void;
+  cleanup(): void;
+}
+
 export interface SessionContentBackup {
   /** Caller-created backup artifact path or URI, if available. */
   artifact?: string | null;
