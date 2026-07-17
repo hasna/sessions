@@ -217,10 +217,10 @@ server.tool(
 
 server.tool(
   "search_sessions",
-  "Full-text search across indexed AI coding sessions (claude/codex/gemini). Returns matching sessions with snippets.",
+  "Full-text search across indexed AI coding sessions (claude/codex/codewith/gemini). Returns matching sessions with snippets.",
   {
     query: z.string().describe("Search query"),
-    source: z.string().optional().describe("Filter by provider: claude, codex, gemini"),
+    source: z.string().optional().describe("Filter by provider: claude, codex, codewith, gemini"),
     project_path: z.string().optional().describe("Filter by project name or path"),
     machine: z.string().optional().describe("Filter by machine (laptop-a, workstation-b, ...)"),
     limit: z.number().optional().describe("Max results (default 20)"),
@@ -256,7 +256,7 @@ server.tool(
   "High-level recall for coding threads. Combines FTS, optional semantic search, tool calls, graph context, touched files, evidence snippets, and resume metadata.",
   {
     query: z.string().describe("Natural-language recall query, e.g. 'find the thread where we implemented stripe webhook'"),
-    source: z.string().optional().describe("Filter by provider: claude, codex, gemini"),
+    source: z.string().optional().describe("Filter by provider: claude, codex, codewith, gemini"),
     project_path: z.string().optional().describe("Filter by project name or path"),
     machine: z.string().optional().describe("Filter by machine"),
     limit: z.number().optional().describe("Max results (default 10)"),
@@ -354,7 +354,7 @@ server.tool(
   "ingest",
   "Index session files into the database (mtime-gated). Run before searching to pick up new sessions.",
   {
-    source: z.string().optional().describe("Only this provider: claude, codex, gemini"),
+    source: z.string().optional().describe("Only this provider: claude, codex, codewith, gemini"),
     force: z.boolean().optional().describe("Re-ingest unchanged files"),
   },
   async (a: { source?: string; force?: boolean }) => {

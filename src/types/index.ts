@@ -1,6 +1,6 @@
 // ── Constants ──────────────────────────────────────────────────────────
 
-export const SESSION_SOURCES = ["claude", "codex", "gemini"] as const;
+export const SESSION_SOURCES = ["claude", "codex", "codewith", "gemini"] as const;
 export type SessionSource = (typeof SESSION_SOURCES)[number];
 
 export const MESSAGE_ROLES = [

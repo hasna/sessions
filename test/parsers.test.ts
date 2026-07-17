@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaudeParser } from "../src/lib/ingest/claude.js";
 import { CodexParser } from "../src/lib/ingest/codex.js";
+import { CodewithParser } from "../src/lib/ingest/codewith.js";
 import { GeminiParser } from "../src/lib/ingest/gemini.js";
 import { flattenContent } from "../src/lib/ingest/types.js";
 import { getParser, listParsers } from "../src/lib/ingest/index.js";
@@ -77,6 +78,33 @@ const CODEX_LINES = [
   }),
 ].join("\n");
 
+const CODEWITH_LINES = [
+  JSON.stringify({
+    timestamp: "2026-05-02T12:00:00Z",
+    type: "session_meta",
+    payload: {
+      id: "sess-codex-1",
+      cwd: "/Users/h/Workspace/codewith-app",
+      cli_version: "0.12.0-codewith",
+      model_provider: "openai",
+      auth_profile: "personal",
+      authProfile: "work",
+      credential_metadata: { vault: "should-not-emit" },
+      git: { branch: "feature/codewith", commit_hash: "def456", repository_url: "https://github.com/h/codewith-app" },
+    },
+  }),
+  JSON.stringify({
+    timestamp: "2026-05-02T12:00:01Z",
+    type: "response_item",
+    payload: { type: "message", role: "user", content: [{ type: "input_text", text: "index the Codewith rollout" }] },
+  }),
+  JSON.stringify({
+    timestamp: "2026-05-02T12:00:02Z",
+    type: "response_item",
+    payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Indexed." }] },
+  }),
+].join("\n");
+
 const GEMINI_LOGS = JSON.stringify([
   { sessionId: "g1", messageId: 0, type: "user", message: "hello gemini", timestamp: "2026-05-03T08:00:00Z" },
   { sessionId: "g1", messageId: 1, type: "user", message: "second prompt", timestamp: "2026-05-03T08:01:00Z" },
@@ -85,6 +113,7 @@ const GEMINI_LOGS = JSON.stringify([
 
 let claudeFile: string;
 let codexFile: string;
+let codewithFile: string;
 let geminiFile: string;
 
 beforeEach(() => {
@@ -103,6 +132,13 @@ beforeEach(() => {
   writeFileSync(codexFile, CODEX_LINES);
   process.env.CODEX_PATH = join(root, "codex");
 
+  // Codewith has the same rollout format as Codex, but separate storage and provenance.
+  const cwdir = join(root, "codewith", "sessions", "2026", "05", "02");
+  mkdirSync(cwdir, { recursive: true });
+  codewithFile = join(cwdir, "rollout-2026-05-02T12-00-00-sess-codex-1.jsonl");
+  writeFileSync(codewithFile, CODEWITH_LINES);
+  process.env.CODEWITH_PATH = join(root, "codewith");
+
   // Gemini layout: <GEMINI_PATH>/tmp/<hash>/logs.json
   const gdir = join(root, "gemini", "tmp", "abc123hash");
   mkdirSync(gdir, { recursive: true });
@@ -115,6 +151,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
   delete process.env.CLAUDE_PATH;
   delete process.env.CODEX_PATH;
+  delete process.env.CODEWITH_PATH;
   delete process.env.GEMINI_PATH;
 });
 
@@ -328,6 +365,53 @@ describe("CodexParser", () => {
   });
 });
 
+describe("CodewithParser", () => {
+  it("defaults to ~/.codewith/sessions when CODEWITH_PATH is unset", () => {
+    delete process.env.CODEWITH_PATH;
+    expect(new CodewithParser().sessionRoots()).toEqual([join(homedir(), ".codewith", "sessions")]);
+  });
+
+  it("treats CODEWITH_PATH as the Codewith home and scans its sessions directory", () => {
+    process.env.CODEWITH_PATH = join(root, "codewith");
+    expect(new CodewithParser().sessionRoots()).toEqual([join(root, "codewith", "sessions")]);
+  });
+
+  it("parses rollout files with codewith provenance and excludes auth-profile fields", () => {
+    const [ps] = new CodewithParser().parseFile(codewithFile);
+    expect(ps.session.source).toBe("codewith");
+    expect(ps.session.source_id).toBe("sess-codex-1");
+    expect(ps.session.project_name).toBe("codewith-app");
+    expect(ps.session.cli_version).toBe("0.12.0-codewith");
+    expect(ps.session.git_branch).toBe("feature/codewith");
+    expect(ps.session.title).toBe("index the Codewith rollout");
+    const serialized = JSON.stringify(ps);
+    expect(serialized).not.toContain("auth_profile");
+    expect(serialized).not.toContain("authProfile");
+    expect(serialized).not.toContain("credential_metadata");
+  });
+
+  it("discovers only CODEWITH_PATH rollout files without using CODEX_PATH", () => {
+    process.env.CODEWITH_PATH = join(root, "codewith");
+    const codexFiles = new CodexParser().listSessionFiles();
+    const codewithFiles = new CodewithParser().listSessionFiles();
+    expect(codexFiles).toContain(codexFile);
+    expect(codexFiles).not.toContain(codewithFile);
+    expect(codewithFiles).toContain(codewithFile);
+    expect(codewithFiles).not.toContain(codexFile);
+  });
+
+  it("keeps matching Codex and Codewith native source IDs under distinct provenance", () => {
+    const [codex] = new CodexParser().parseFile(codexFile);
+    const [codewith] = new CodewithParser().parseFile(codewithFile);
+
+    expect(codex.session.source_id).toBe(codewith.session.source_id);
+    expect(codex.session.source).toBe("codex");
+    expect(codewith.session.source).toBe("codewith");
+    expect(codex.session.source_path).toBe(codexFile);
+    expect(codewith.session.source_path).toBe(codewithFile);
+  });
+});
+
 describe("GeminiParser", () => {
   it("splits a logs.json into one ParsedSession per sessionId", () => {
     const sessions = new GeminiParser().parseFile(geminiFile);
@@ -340,10 +424,11 @@ describe("GeminiParser", () => {
 });
 
 describe("registry", () => {
-  it("registers all three built-in parsers", () => {
+  it("registers all built-in parsers", () => {
     const names = listParsers().map((p) => p.source).sort();
-    expect(names).toEqual(["claude", "codex", "gemini"]);
+    expect(names).toEqual(["claude", "codewith", "codex", "gemini"]);
     expect(getParser("claude")?.source).toBe("claude");
+    expect(getParser("codewith")?.source).toBe("codewith");
   });
 });
 

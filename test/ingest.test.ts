@@ -36,6 +36,7 @@ beforeEach(() => {
   process.env.CLAUDE_PATH = join(root, "claude");
   // Point codex/gemini at empty dirs so ingestAll finds nothing for them.
   process.env.CODEX_PATH = join(root, "codex");
+  process.env.CODEWITH_PATH = join(root, "codewith");
   process.env.GEMINI_PATH = join(root, "gemini");
 
   process.env.HASNA_SESSIONS_DIR = join(root, "sessions");
@@ -49,6 +50,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
   delete process.env.CLAUDE_PATH;
   delete process.env.CODEX_PATH;
+  delete process.env.CODEWITH_PATH;
   delete process.env.GEMINI_PATH;
   delete process.env.HASNA_SESSIONS_DIR;
   delete process.env.SESSIONS_DB_PATH;
@@ -105,6 +107,7 @@ describe("ingestAll", () => {
     const bySource = Object.fromEntries(results.map((r) => [r.source, r]));
     expect(bySource.claude.sessions).toBe(1);
     expect(bySource.codex.scanned).toBe(0);
+    expect(bySource.codewith.scanned).toBe(0);
     expect(bySource.gemini.scanned).toBe(0);
   });
 });

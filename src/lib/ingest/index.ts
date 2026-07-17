@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { registerParser, getParser, listParsers } from "./registry.js";
 import { ClaudeParser } from "./claude.js";
 import { CodexParser } from "./codex.js";
+import { CodewithParser } from "./codewith.js";
 import { GeminiParser } from "./gemini.js";
 import { saveParsedSession } from "../../db/sessions.js";
 import { getFileState, setFileState, updateIngestionStats } from "../../db/ingestion.js";
@@ -12,12 +13,13 @@ import { getSessionsDir } from "../paths.js";
 // Register the built-in parsers on import.
 registerParser(new ClaudeParser());
 registerParser(new CodexParser());
+registerParser(new CodewithParser());
 registerParser(new GeminiParser());
 
 export { registerParser, getParser, listParsers };
 export type { SessionParser } from "./types.js";
 export { flattenContent } from "./types.js";
-export { ClaudeParser, CodexParser, GeminiParser };
+export { ClaudeParser, CodexParser, CodewithParser, GeminiParser };
 
 export interface IngestResult {
   source: string;
