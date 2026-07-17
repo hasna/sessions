@@ -143,6 +143,14 @@ describe("/v1 authenticated API (local mode)", () => {
       const spec = await openapi.json();
       expect(spec.components.schemas.Session.properties.source.enum).toContain("codewith");
       expect(spec.components.schemas.SessionCreate.properties.source.enum).toContain("codewith");
+      expect(spec.components.schemas.SessionAmbiguousResponse.properties.code.enum).toEqual([
+        "session_ambiguous",
+      ]);
+      expect(spec.components.schemas.SessionAmbiguousResponse.properties.candidates.items.required).toEqual([
+        "id",
+        "source",
+        "source_id",
+      ]);
     } finally {
       server.stop(true);
     }
@@ -188,6 +196,48 @@ describe("/v1 authenticated API (local mode)", () => {
       });
       expect(codex.status).toBe(200);
       expect((await codex.json()).session.source).toBe("codex");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("rejects empty source-qualified ids with 400 and does not rename the sole session", async () => {
+    const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const rw = keyFor(["sessions:read", "sessions:write"]);
+      const headers = { "x-api-key": rw, "content-type": "application/json" };
+
+      const created = await fetch(`${base}/v1/sessions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          source: "codewith",
+          source_id: "sole-session",
+          title: "Original title",
+        }),
+      });
+      expect(created.status).toBe(201);
+      const sessionId = (await created.json()).session.id as string;
+
+      const emptyQualifiedPath = encodeURIComponent("codewith:");
+      const read = await fetch(`${base}/v1/sessions/${emptyQualifiedPath}`, {
+        headers: { "x-api-key": rw },
+      });
+      expect(read.status).toBe(400);
+      expect((await read.json()).code).toBe("session_invalid_identifier");
+
+      const rename = await fetch(`${base}/v1/sessions/${emptyQualifiedPath}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ title: "Should not apply" }),
+      });
+      expect(rename.status).toBe(400);
+      expect((await rename.json()).code).toBe("session_invalid_identifier");
+
+      const after = await fetch(`${base}/v1/sessions/${sessionId}`, { headers: { "x-api-key": rw } });
+      expect(after.status).toBe(200);
+      expect((await after.json()).session.title).toBe("Original title");
     } finally {
       server.stop(true);
     }

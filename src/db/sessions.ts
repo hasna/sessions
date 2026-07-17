@@ -5,6 +5,7 @@ import { encodePath } from "../lib/paths.js";
 import {
   SESSION_SOURCES,
   SessionAmbiguousError,
+  SessionInvalidIdentifierError,
   SessionNotFoundError,
   type SessionLookupOptions,
   type Session,
@@ -141,6 +142,19 @@ function uniqueSessionOrThrow(
   throw new SessionAmbiguousError(displayIdentifier, candidatesFromRows(deduped));
 }
 
+function escapedLikePrefix(value: string): string {
+  return `${value.replace(/[\\%_]/g, "\\$&")}%`;
+}
+
+function rejectEmptySourceQualifiedIdentifier(displayIdentifier: string, identifier: string): void {
+  if (identifier.length === 0) {
+    throw new SessionInvalidIdentifierError(
+      displayIdentifier,
+      "source-qualified identifiers must include a non-empty source id",
+    );
+  }
+}
+
 /** Upsert a session keyed by (source, source_id). Returns the stored row. */
 export function upsertSession(input: SessionInsert): Session {
   const db = getDatabase();
@@ -265,14 +279,18 @@ export function getSessionByPrefix(
   }
 
   if (lookup.source) {
+    rejectEmptySourceQualifiedIdentifier(idOrPrefix, lookup.identifier);
     const exactSource = db
       .prepare("SELECT * FROM sessions WHERE source = ? AND source_id = ?")
       .all(lookup.source, lookup.identifier) as Record<string, unknown>[];
     const exact = uniqueSessionOrThrow(idOrPrefix, exactSource);
     if (exact) return exact;
+    const prefix = escapedLikePrefix(lookup.identifier);
     const rows = db
-      .prepare("SELECT * FROM sessions WHERE source = ? AND source_id LIKE ? ORDER BY source_id, id LIMIT 6")
-      .all(lookup.source, `${lookup.identifier}%`) as Record<string, unknown>[];
+      .prepare(
+        "SELECT * FROM sessions WHERE source = ? AND source_id LIKE ? ESCAPE '\\' ORDER BY source_id, id LIMIT 6",
+      )
+      .all(lookup.source, prefix) as Record<string, unknown>[];
     return uniqueSessionOrThrow(idOrPrefix, rows);
   }
 
@@ -282,9 +300,12 @@ export function getSessionByPrefix(
   const exact = uniqueSessionOrThrow(idOrPrefix, exactNative);
   if (exact) return exact;
 
+  const prefix = escapedLikePrefix(idOrPrefix);
   const rows = db
-    .prepare("SELECT * FROM sessions WHERE id LIKE ? OR source_id LIKE ? ORDER BY id LIMIT 6")
-    .all(`${idOrPrefix}%`, `${idOrPrefix}%`) as Record<string, unknown>[];
+    .prepare(
+      "SELECT * FROM sessions WHERE id LIKE ? ESCAPE '\\' OR source_id LIKE ? ESCAPE '\\' ORDER BY id LIMIT 6",
+    )
+    .all(prefix, prefix) as Record<string, unknown>[];
   return uniqueSessionOrThrow(idOrPrefix, rows);
 }
 

@@ -350,6 +350,27 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           properties: { ok: { type: "boolean" }, error: { type: "string" } },
           required: ["ok", "error"],
         },
+        SessionAmbiguousResponse: {
+          type: "object",
+          properties: {
+            ok: { type: "boolean", enum: [false] },
+            error: { type: "string" },
+            code: { type: "string", enum: ["session_ambiguous"] },
+            candidates: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  source: { type: "string" },
+                  source_id: { type: "string" },
+                },
+                required: ["id", "source", "source_id"],
+              },
+            },
+          },
+          required: ["ok", "error", "code", "candidates"],
+        },
       },
     },
     security: [{ ApiKeyAuth: [] }],
@@ -428,7 +449,8 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           parameters: [pathParam("id"), queryParam("source", "string")],
           responses: {
             ...json200("SessionResponse", "Session"),
-            "409": jsonRef("ErrorResponse", "Ambiguous identifier"),
+            "400": jsonRef("ErrorResponse", "Invalid identifier"),
+            "409": jsonRef("SessionAmbiguousResponse", "Ambiguous identifier"),
             "404": jsonRef("ErrorResponse", "Not found"),
           },
         },
@@ -460,7 +482,7 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           responses: {
             ...json200("SessionResponse", "Renamed"),
             "400": jsonRef("ErrorResponse", "Invalid input"),
-            "409": jsonRef("ErrorResponse", "Ambiguous identifier"),
+            "409": jsonRef("SessionAmbiguousResponse", "Ambiguous identifier"),
             "404": jsonRef("ErrorResponse", "Not found"),
           },
         },
@@ -472,7 +494,8 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           parameters: [pathParam("id"), queryParam("source", "string")],
           responses: {
             ...json200("MessageListResponse", "Messages"),
-            "409": jsonRef("ErrorResponse", "Ambiguous identifier"),
+            "400": jsonRef("ErrorResponse", "Invalid identifier"),
+            "409": jsonRef("SessionAmbiguousResponse", "Ambiguous identifier"),
             "404": jsonRef("ErrorResponse", "Not found"),
           },
         },
@@ -484,7 +507,8 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           parameters: [pathParam("id"), queryParam("source", "string")],
           responses: {
             ...json200("ToolCallListResponse", "Tool calls"),
-            "409": jsonRef("ErrorResponse", "Ambiguous identifier"),
+            "400": jsonRef("ErrorResponse", "Invalid identifier"),
+            "409": jsonRef("SessionAmbiguousResponse", "Ambiguous identifier"),
             "404": jsonRef("ErrorResponse", "Not found"),
           },
         },

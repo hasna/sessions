@@ -17,7 +17,11 @@ import {
   deleteSession,
   saveParsedSession,
 } from "../src/db/sessions.js";
-import { SessionAmbiguousError, type ParsedSession } from "../src/types/index.js";
+import {
+  SessionAmbiguousError,
+  SessionInvalidIdentifierError,
+  type ParsedSession,
+} from "../src/types/index.js";
 
 beforeEach(() => {
   process.env.SESSIONS_DB_PATH = ":memory:";
@@ -31,6 +35,11 @@ afterEach(() => {
 });
 
 describe("schema migration", () => {
+  it("creates a leading source_id index for unqualified lookup", () => {
+    const rows = getDatabase().prepare("PRAGMA index_list(sessions)").all() as { name: string }[];
+    expect(rows.map((row) => row.name)).toContain("idx_sessions_source_id");
+  });
+
   it("adds the machine column to a pre-existing DB created before it existed", () => {
     // Simulate an old sessions table without the `machine` column.
     const db = new SqliteAdapter(":memory:");
@@ -297,6 +306,52 @@ describe("upsertSession", () => {
     expect(() => getSessionByPrefix("collision")).toThrow(SessionAmbiguousError);
     expect(getSessionByPrefix("collision-a")?.id).toBe(codex.id);
     expect(getSessionByPrefix("codewith:collision")?.id).toBe(codewith.id);
+  });
+
+  it("treats _ and % as literal prefix characters instead of LIKE wildcards", () => {
+    upsertSession({ source: "codex", source_id: "abc1", title: "underscore false positive" });
+    upsertSession({ source: "codewith", source_id: "pct1", title: "percent false positive" });
+
+    expect(getSessionByPrefix("abc_")).toBeNull();
+    expect(getSessionByPrefix("codewith:abc_")).toBeNull();
+    expect(getSessionByPrefix("pct%")).toBeNull();
+    expect(getSessionByPrefix("codewith:pct%")).toBeNull();
+  });
+
+  it("keeps literal _ and % prefixes resolvable and ambiguous when multiple rows match", () => {
+    const exactUnderscore = upsertSession({
+      source: "codex",
+      source_id: "abc_1",
+      title: "literal underscore exact",
+    });
+    upsertSession({ source: "codewith", source_id: "abc_1", title: "literal underscore duplicate" });
+    upsertSession({ source: "codewith", source_id: "abc_2", title: "literal underscore prefix" });
+    const exactPercent = upsertSession({
+      source: "codex",
+      source_id: "pct%1",
+      title: "literal percent exact",
+    });
+    upsertSession({ source: "codewith", source_id: "pct%1", title: "literal percent duplicate" });
+    upsertSession({ source: "codewith", source_id: "pct%2", title: "literal percent prefix" });
+
+    expect(() => getSessionByPrefix("abc_1")).toThrow(SessionAmbiguousError);
+    expect(getSessionByPrefix("abc_1", { source: "codex" })?.id).toBe(exactUnderscore.id);
+    expect(() => getSessionByPrefix("abc_")).toThrow(SessionAmbiguousError);
+    expect(() => getSessionByPrefix("codewith:abc_")).toThrow(SessionAmbiguousError);
+    expect(() => getSessionByPrefix("pct%1")).toThrow(SessionAmbiguousError);
+    expect(getSessionByPrefix("pct%1", { source: "codex" })?.id).toBe(exactPercent.id);
+    expect(() => getSessionByPrefix("pct%")).toThrow(SessionAmbiguousError);
+    expect(() => getSessionByPrefix("codewith:pct%")).toThrow(SessionAmbiguousError);
+  });
+
+  it("rejects empty source-qualified identifiers before broad prefix lookup", () => {
+    const only = upsertSession({ source: "codewith", source_id: "sole-session", title: "sole" });
+
+    expect(() => getSessionByPrefix("codewith:")).toThrow(SessionInvalidIdentifierError);
+    expect(() => getSessionByPrefix("", { source: "codewith" })).toThrow(
+      SessionInvalidIdentifierError,
+    );
+    expect(getSessionByPrefix(only.id)?.id).toBe(only.id);
   });
 });
 

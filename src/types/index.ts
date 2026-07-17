@@ -265,3 +265,14 @@ export class SessionAmbiguousError extends Error {
     this.candidates = candidates;
   }
 }
+
+export class SessionInvalidIdentifierError extends Error {
+  readonly identifier: string;
+  readonly code = "session_invalid_identifier";
+
+  constructor(identifier: string, reason: string) {
+    super(`Invalid session identifier '${identifier}': ${reason}`);
+    this.name = "SessionInvalidIdentifierError";
+    this.identifier = identifier;
+  }
+}

@@ -5,7 +5,11 @@ import { getVerifier } from "./auth.js";
 import { buildOpenApiDocument } from "./openapi.js";
 import { checkHealth } from "../generated/storage-kit/index.js";
 import { checkCloudReady } from "../db/cloud/migrate.js";
-import { SessionAmbiguousError, type SessionLookupOptions } from "../types/index.js";
+import {
+  SessionAmbiguousError,
+  SessionInvalidIdentifierError,
+  type SessionLookupOptions,
+} from "../types/index.js";
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
@@ -61,16 +65,21 @@ function lookupOptionsFromUrl(url: URL): SessionLookupOptions {
 }
 
 function ambiguityResponse(error: unknown): Response | null {
-  if (!(error instanceof SessionAmbiguousError)) return null;
-  return json(
-    {
-      ok: false,
-      error: error.message,
-      code: "session_ambiguous",
-      candidates: error.candidates,
-    },
-    409,
-  );
+  if (error instanceof SessionInvalidIdentifierError) {
+    return json({ ok: false, error: error.message, code: error.code }, 400);
+  }
+  if (error instanceof SessionAmbiguousError) {
+    return json(
+      {
+        ok: false,
+        error: error.message,
+        code: "session_ambiguous",
+        candidates: error.candidates,
+      },
+      409,
+    );
+  }
+  return null;
 }
 
 function parseByteSize(value: string): number | undefined {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { QueryResultRow } from "pg";
 import type { PoolQueryClient, TypedQueryClient } from "../../generated/storage-kit/index.js";
 import type { SessionContentImport } from "../../types/index.js";
-import { SessionAmbiguousError } from "../../types/index.js";
+import { SessionAmbiguousError, SessionInvalidIdentifierError } from "../../types/index.js";
 import { getSessionByPrefix, importSessionContent, upsertSession } from "./store.js";
 
 function splitSqlList(list: string): string[] {
@@ -83,6 +83,21 @@ function sessionRow(overrides: Partial<QueryResultRow>): QueryResultRow {
   };
 }
 
+function literalPrefixFromSqlLikePattern(pattern: string): string {
+  if (!pattern.endsWith("%")) throw new Error(`expected trailing wildcard: ${pattern}`);
+  let literal = "";
+  for (let i = 0; i < pattern.length - 1; i++) {
+    const char = pattern[i];
+    if (char === "\\") {
+      i++;
+      literal += pattern[i] ?? "";
+    } else {
+      literal += char;
+    }
+  }
+  return literal;
+}
+
 describe("cloud getSessionByPrefix lookup semantics", () => {
   test("prefers exact internal ids over provider-native id collisions", async () => {
     const internal = sessionRow({
@@ -147,6 +162,123 @@ describe("cloud getSessionByPrefix lookup semantics", () => {
       id: "codex-row",
       source: "codex",
     });
+  });
+
+  test("treats _ and % in cloud prefix lookups as literals", async () => {
+    const rows = [
+      sessionRow({ id: "codex-abc1", source: "codex", source_id: "abc1" }),
+      sessionRow({ id: "codewith-pct1", source: "codewith", source_id: "pct1" }),
+    ];
+    const seenPatterns: string[] = [];
+    const client: TypedQueryClient = {
+      async query() {
+        return { rows: [], rowCount: 0 };
+      },
+      async many<T extends QueryResultRow>(sql: string, params?: readonly unknown[]): Promise<T[]> {
+        if (sql.includes("source = $1 AND source_id = $2")) {
+          return rows.filter((row) => row.source === params?.[0] && row.source_id === params?.[1]) as T[];
+        }
+        if (sql.includes("source_id = $1") && !sql.includes("LIKE")) {
+          return rows.filter((row) => row.source_id === params?.[0]) as T[];
+        }
+        if (sql.includes("LIKE")) {
+          expect(sql).toContain("ESCAPE '\\'");
+          const pattern = params?.[sql.includes("source = $1") ? 1 : 0] as string;
+          seenPatterns.push(pattern);
+          const literal = literalPrefixFromSqlLikePattern(pattern);
+          return rows
+            .filter((row) => {
+              if (sql.includes("source = $1") && row.source !== params?.[0]) return false;
+              return row.source_id.startsWith(literal) || row.id.startsWith(literal);
+            }) as T[];
+        }
+        throw new Error(`unexpected many SQL: ${sql}`);
+      },
+      async one() {
+        throw new Error("one() not used in this test");
+      },
+      async get() {
+        return null;
+      },
+      async execute() {},
+    };
+
+    await expect(getSessionByPrefix("abc_", client)).resolves.toBeNull();
+    await expect(getSessionByPrefix("codewith:abc_", client)).resolves.toBeNull();
+    await expect(getSessionByPrefix("pct%", client)).resolves.toBeNull();
+    await expect(getSessionByPrefix("codewith:pct%", client)).resolves.toBeNull();
+    expect(seenPatterns).toContain("abc\\_%");
+    expect(seenPatterns).toContain("pct\\%%");
+  });
+
+  test("keeps literal _ and % cloud prefixes ambiguous when multiple rows match", async () => {
+    const rows = [
+      sessionRow({ id: "codewith-abc-under-1", source: "codewith", source_id: "abc_1" }),
+      sessionRow({ id: "codewith-abc-under-2", source: "codewith", source_id: "abc_2" }),
+      sessionRow({ id: "codewith-pct-1", source: "codewith", source_id: "pct%1" }),
+      sessionRow({ id: "codewith-pct-2", source: "codewith", source_id: "pct%2" }),
+    ];
+    const client: TypedQueryClient = {
+      async query() {
+        return { rows: [], rowCount: 0 };
+      },
+      async many<T extends QueryResultRow>(sql: string, params?: readonly unknown[]): Promise<T[]> {
+        if (sql.includes("source = $1 AND source_id = $2")) return [] as T[];
+        if (sql.includes("source_id = $1") && !sql.includes("LIKE")) return [] as T[];
+        if (sql.includes("LIKE")) {
+          expect(sql).toContain("ESCAPE '\\'");
+          const pattern = params?.[sql.includes("source = $1") ? 1 : 0] as string;
+          const literal = literalPrefixFromSqlLikePattern(pattern);
+          return rows
+            .filter((row) => {
+              if (sql.includes("source = $1") && row.source !== params?.[0]) return false;
+              return row.source_id.startsWith(literal) || row.id.startsWith(literal);
+            }) as T[];
+        }
+        throw new Error(`unexpected many SQL: ${sql}`);
+      },
+      async one() {
+        throw new Error("one() not used in this test");
+      },
+      async get() {
+        return null;
+      },
+      async execute() {},
+    };
+
+    await expect(getSessionByPrefix("abc_", client)).rejects.toThrow(SessionAmbiguousError);
+    await expect(getSessionByPrefix("codewith:abc_", client)).rejects.toThrow(SessionAmbiguousError);
+    await expect(getSessionByPrefix("pct%", client)).rejects.toThrow(SessionAmbiguousError);
+    await expect(getSessionByPrefix("codewith:pct%", client)).rejects.toThrow(SessionAmbiguousError);
+  });
+
+  test("rejects empty source-qualified cloud identifiers before prefix queries", async () => {
+    let reads = 0;
+    const client: TypedQueryClient = {
+      async query() {
+        return { rows: [], rowCount: 0 };
+      },
+      async many() {
+        reads++;
+        throw new Error("many() should not be used for an empty source-qualified identifier");
+      },
+      async one() {
+        throw new Error("one() not used in this test");
+      },
+      async get() {
+        reads++;
+        return null;
+      },
+      async execute() {},
+    };
+
+    await expect(getSessionByPrefix("codewith:", client)).rejects.toThrow(
+      SessionInvalidIdentifierError,
+    );
+    await expect(getSessionByPrefix("", { source: "codewith" }, client)).rejects.toThrow(
+      SessionInvalidIdentifierError,
+    );
+    expect(reads).toBe(0);
   });
 });
 

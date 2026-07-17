@@ -139,6 +139,31 @@ describe("sessions CLI store-backed flows", () => {
     expect(explicit.session.source).toBe("claude");
   });
 
+  it("rejects empty source-qualified CLI rename targets without renaming the sole session", () => {
+    const created = parseJsonOutput(
+      runCli([
+        "create",
+        "--source",
+        "codewith",
+        "--source-id",
+        "sole-session",
+        "--title",
+        "Original title",
+        "--json",
+      ]),
+    );
+    expect(created.source).toBe("codewith");
+
+    const rename = runCli(["rename", "codewith:", "Should not apply", "--json"]);
+    expect(rename.exitCode).not.toBe(0);
+    expect(Buffer.from(rename.stderr).toString("utf-8")).toContain(
+      "source-qualified identifiers must include a non-empty source id",
+    );
+
+    const after = parseJsonOutput(runCli(["show", "sole-session", "--json"]));
+    expect(after.session.title).toBe("Original title");
+  });
+
   it("supports history filters and transcript search through the store", () => {
     ingest();
     const historyPayload = parseJsonOutput(runCli(["history", "--today", "--json"]));

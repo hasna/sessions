@@ -18,15 +18,22 @@ describe("cloud migration ledger", () => {
     const migrations = loadMigrations();
     const initial = migrations.find((migration) => migration.id === "0001_init");
     const codewith = migrations.find((migration) => migration.id === "0004_codewith_session_source");
+    const sourceIdIndex = migrations.find((migration) => migration.id === "0005_session_source_id_lookup_index");
     expect(initial).toBeDefined();
     expect(codewith).toBeDefined();
+    expect(sourceIdIndex).toBeDefined();
     expect(initial?.sql).toMatch(/CHECK\s*\(source IN \('claude', 'codex', 'gemini'\)\)/);
     expect(initial?.sql).not.toContain("codewith");
     expect(initial?.checksum).toBe(APPROVED_BASE_0001_CHECKSUM);
     expect(codewith?.sql).toContain("codewith");
+    expect(sourceIdIndex?.sql).toContain("idx_sessions_source_id");
 
     const alreadyApplied = migrations
-      .filter((migration) => migration.id !== "0004_codewith_session_source")
+      .filter(
+        (migration) =>
+          migration.id !== "0004_codewith_session_source" &&
+          migration.id !== "0005_session_source_id_lookup_index",
+      )
       .map((migration) =>
         applied({
           ...migration,
@@ -68,6 +75,7 @@ describe("cloud migration ledger", () => {
       ["0002_api_keys", "already_applied"],
       ["0003_session_token_bigints", "already_applied"],
       ["0004_codewith_session_source", "pending"],
+      ["0005_session_source_id_lookup_index", "pending"],
     ]);
   });
 });

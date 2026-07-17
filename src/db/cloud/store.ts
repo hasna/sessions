@@ -16,7 +16,11 @@ import type {
   ToolCall,
   ToolCallInsert,
 } from "../../types/index.js";
-import { SESSION_SOURCES, SessionAmbiguousError } from "../../types/index.js";
+import {
+  SESSION_SOURCES,
+  SessionAmbiguousError,
+  SessionInvalidIdentifierError,
+} from "../../types/index.js";
 import { getCloudClient } from "./client.js";
 import { encodePath } from "../../lib/paths.js";
 import { contentShrinkError } from "../../lib/content-import-safety.js";
@@ -287,6 +291,19 @@ function uniqueCloudSessionOrThrow(identifier: string, rows: SessionRow[]): Sess
   );
 }
 
+function escapedLikePrefix(value: string): string {
+  return `${value.replace(/[\\%_]/g, "\\$&")}%`;
+}
+
+function rejectEmptySourceQualifiedIdentifier(displayIdentifier: string, identifier: string): void {
+  if (identifier.length === 0) {
+    throw new SessionInvalidIdentifierError(
+      displayIdentifier,
+      "source-qualified identifiers must include a non-empty source id",
+    );
+  }
+}
+
 export async function getSessionByPrefix(
   idOrPrefix: string,
   optionsOrClient: SessionLookupOptions | TypedQueryClient = {},
@@ -303,15 +320,17 @@ export async function getSessionByPrefix(
   }
 
   if (lookup.source) {
+    rejectEmptySourceQualifiedIdentifier(idOrPrefix, lookup.identifier);
     const exactSource = await client.many<SessionRow>(
       `SELECT * FROM sessions WHERE source = $1 AND source_id = $2 ORDER BY id LIMIT 6`,
       [lookup.source, lookup.identifier],
     );
     const exact = uniqueCloudSessionOrThrow(idOrPrefix, exactSource);
     if (exact) return exact;
+    const prefix = escapedLikePrefix(lookup.identifier);
     const rows = await client.many<SessionRow>(
-      `SELECT * FROM sessions WHERE source = $1 AND source_id LIKE $2 ORDER BY source_id, id LIMIT 6`,
-      [lookup.source, `${lookup.identifier}%`],
+      `SELECT * FROM sessions WHERE source = $1 AND source_id LIKE $2 ESCAPE '\\' ORDER BY source_id, id LIMIT 6`,
+      [lookup.source, prefix],
     );
     return uniqueCloudSessionOrThrow(idOrPrefix, rows);
   }
@@ -323,9 +342,10 @@ export async function getSessionByPrefix(
   const exact = uniqueCloudSessionOrThrow(idOrPrefix, exactNative);
   if (exact) return exact;
 
+  const prefix = escapedLikePrefix(idOrPrefix);
   const rows = await client.many<SessionRow>(
-    `SELECT * FROM sessions WHERE id LIKE $1 OR source_id LIKE $1 ORDER BY id LIMIT 6`,
-    [`${idOrPrefix}%`],
+    `SELECT * FROM sessions WHERE id LIKE $1 ESCAPE '\\' OR source_id LIKE $1 ESCAPE '\\' ORDER BY id LIMIT 6`,
+    [prefix],
   );
   return uniqueCloudSessionOrThrow(idOrPrefix, rows);
 }
