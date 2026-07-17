@@ -1,7 +1,55 @@
+import { mkdirSync, statSync, statfsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { SqliteAdapter } from "./sqlite-adapter.js";
 import { getSessionsDbPath } from "../lib/paths.js";
 
 export type Database = SqliteAdapter;
+
+const SESSION_SOURCE_CHECK = "source IN ('claude', 'codex', 'codewith', 'gemini')";
+const SQLITE_MIGRATION_MIN_FREE_BYTES = 64 * 1024 * 1024;
+const SQLITE_MIGRATION_BACKUP_DIR = "migration-backups";
+
+const SESSION_COLUMNS: { name: string; fallback: string }[] = [
+  { name: "id", fallback: "lower(hex(randomblob(16)))" },
+  { name: "source", fallback: "'claude'" },
+  { name: "source_id", fallback: "id" },
+  { name: "source_path", fallback: "NULL" },
+  { name: "title", fallback: "NULL" },
+  { name: "project_path", fallback: "NULL" },
+  { name: "project_name", fallback: "NULL" },
+  { name: "model", fallback: "NULL" },
+  { name: "model_provider", fallback: "NULL" },
+  { name: "git_branch", fallback: "NULL" },
+  { name: "git_sha", fallback: "NULL" },
+  { name: "git_origin_url", fallback: "NULL" },
+  { name: "cli_version", fallback: "NULL" },
+  { name: "is_subagent", fallback: "0" },
+  { name: "parent_session_id", fallback: "NULL" },
+  { name: "total_input_tokens", fallback: "0" },
+  { name: "total_output_tokens", fallback: "0" },
+  { name: "total_cache_read_tokens", fallback: "0" },
+  { name: "total_cache_write_tokens", fallback: "0" },
+  { name: "total_thinking_tokens", fallback: "0" },
+  { name: "message_count", fallback: "0" },
+  { name: "tool_call_count", fallback: "0" },
+  { name: "started_at", fallback: "NULL" },
+  { name: "ended_at", fallback: "NULL" },
+  { name: "duration_seconds", fallback: "NULL" },
+  { name: "ingested_at", fallback: "datetime('now')" },
+  { name: "updated_at", fallback: "datetime('now')" },
+  { name: "source_modified_at", fallback: "NULL" },
+  { name: "machine", fallback: "NULL" },
+  { name: "metadata", fallback: "'{}'" },
+];
+
+const SESSION_INDEX_SQL = [
+  `CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_project_path ON sessions(project_path)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_model ON sessions(model)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_parent_session_id ON sessions(parent_session_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine)`,
+];
 
 /**
  * SQLite schema for the local session index (LocalStore). The self_hosted
@@ -11,7 +59,7 @@ export type Database = SqliteAdapter;
 const SCHEMA: string[] = [
   `CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
-    source TEXT NOT NULL CHECK(source IN ('claude', 'codex', 'gemini')),
+    source TEXT NOT NULL CHECK(${SESSION_SOURCE_CHECK}),
     source_id TEXT NOT NULL,
     source_path TEXT,
     title TEXT,
@@ -206,7 +254,8 @@ function runMigrations(db: SqliteAdapter): void {
   } catch {
     // Column already exists — nothing to do.
   }
-  db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine)");
+  migrateSessionSourceConstraint(db);
+  ensureSessionIndexes(db);
   for (const trigger of [
     "sessions_ai",
     "sessions_ad",
@@ -221,6 +270,205 @@ function runMigrations(db: SqliteAdapter): void {
     db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
   }
   ensureFtsRowidRefs(db);
+}
+
+function ensureSessionIndexes(db: SqliteAdapter): void {
+  for (const sql of SESSION_INDEX_SQL) db.exec(sql);
+}
+
+function quoteSqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function quoteIdent(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function sourceCheckAllowsCodewith(sql: string | null): boolean {
+  return Boolean(sql?.includes("codewith"));
+}
+
+function tableSql(db: SqliteAdapter, table: string): string | null {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table) as { sql?: string | null } | undefined;
+  return row?.sql ?? null;
+}
+
+function existingColumns(db: SqliteAdapter, table: string): Set<string> {
+  const rows = db.prepare(`PRAGMA table_info(${quoteIdent(table)})`).all() as { name: string }[];
+  return new Set(rows.map((row) => row.name));
+}
+
+function databasePath(db: SqliteAdapter): string | null {
+  const rows = db.prepare("PRAGMA database_list").all() as { name: string; file: string }[];
+  const main = rows.find((row) => row.name === "main");
+  return main?.file ? main.file : null;
+}
+
+function databasePageBytes(db: SqliteAdapter): number {
+  const pageSize = db.prepare("PRAGMA page_size").get() as { page_size?: number } | undefined;
+  const pageCount = db.prepare("PRAGMA page_count").get() as { page_count?: number } | undefined;
+  return Number(pageSize?.page_size ?? 0) * Number(pageCount?.page_count ?? 0);
+}
+
+function availableBytes(path: string): number | null {
+  try {
+    const stat = statfsSync(path);
+    return Number(stat.bavail) * Number(stat.bsize);
+  } catch {
+    return null;
+  }
+}
+
+function preflightSourceConstraintMigration(db: SqliteAdapter): void {
+  const invalidSources = db
+    .prepare(
+      `SELECT source, COUNT(*) AS count FROM sessions
+       WHERE source NOT IN ('claude', 'codex', 'codewith', 'gemini')
+       GROUP BY source ORDER BY source`,
+    )
+    .all() as { source: string; count: number }[];
+  if (invalidSources.length > 0) {
+    const summary = invalidSources
+      .map((row) => `${row.source || "(empty)"}:${Number(row.count)}`)
+      .join(", ");
+    throw new Error(`cannot migrate sessions.source constraint with unknown sources present: ${summary}`);
+  }
+
+  const dbPath = databasePath(db);
+  if (!dbPath) return;
+
+  const dbBytes = Math.max(databasePageBytes(db), statSync(dbPath).size);
+  const requiredBytes = dbBytes * 2 + SQLITE_MIGRATION_MIN_FREE_BYTES;
+  const freeBytes = availableBytes(dirname(dbPath));
+  if (freeBytes !== null && freeBytes < requiredBytes) {
+    throw new Error(
+      `not enough free disk for sessions.source migration backup/rebuild: need ${requiredBytes} bytes, available ${freeBytes} bytes`,
+    );
+  }
+
+  const backupDir = join(dirname(dbPath), SQLITE_MIGRATION_BACKUP_DIR);
+  mkdirSync(backupDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = join(backupDir, `sessions-pre-codewith-source-${stamp}.db`);
+  db.exec(`VACUUM INTO ${quoteSqlString(backupPath)}`);
+  const backupSize = statSync(backupPath).size;
+  if (backupSize <= 0) {
+    throw new Error(`sessions.source migration backup was empty: ${backupPath}`);
+  }
+}
+
+function countTables(db: SqliteAdapter): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const table of [
+    "sessions",
+    "messages",
+    "tool_calls",
+    "sessions_fts",
+    "messages_fts",
+    "tool_calls_fts",
+    "messages_fts_refs",
+    "tool_calls_fts_refs",
+  ]) {
+    counts[table] = tableCount(db, table);
+  }
+  return counts;
+}
+
+function assertCountsUnchanged(before: Record<string, number>, after: Record<string, number>): void {
+  for (const [table, count] of Object.entries(before)) {
+    if (after[table] !== count) {
+      throw new Error(`sessions.source migration changed ${table} row count: before ${count}, after ${after[table]}`);
+    }
+  }
+}
+
+function assertForeignKeysValid(db: SqliteAdapter): void {
+  const rows = db.prepare("PRAGMA foreign_key_check").all();
+  if (rows.length > 0) {
+    throw new Error(`sessions.source migration left foreign-key violations: ${JSON.stringify(rows)}`);
+  }
+}
+
+function createSessionsReplacementTable(db: SqliteAdapter): void {
+  db.exec(
+    `CREATE TABLE sessions_new (
+      id TEXT PRIMARY KEY,
+      source TEXT NOT NULL CHECK(${SESSION_SOURCE_CHECK}),
+      source_id TEXT NOT NULL,
+      source_path TEXT,
+      title TEXT,
+      project_path TEXT,
+      project_name TEXT,
+      model TEXT,
+      model_provider TEXT,
+      git_branch TEXT,
+      git_sha TEXT,
+      git_origin_url TEXT,
+      cli_version TEXT,
+      is_subagent INTEGER NOT NULL DEFAULT 0,
+      parent_session_id TEXT,
+      total_input_tokens INTEGER NOT NULL DEFAULT 0,
+      total_output_tokens INTEGER NOT NULL DEFAULT 0,
+      total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      total_cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      total_thinking_tokens INTEGER NOT NULL DEFAULT 0,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      tool_call_count INTEGER NOT NULL DEFAULT 0,
+      started_at TEXT,
+      ended_at TEXT,
+      duration_seconds REAL,
+      ingested_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      source_modified_at TEXT,
+      machine TEXT,
+      metadata TEXT DEFAULT '{}',
+      UNIQUE(source, source_id)
+    )`,
+  );
+}
+
+function migrateSessionSourceConstraint(db: SqliteAdapter): void {
+  if (sourceCheckAllowsCodewith(tableSql(db, "sessions"))) return;
+
+  preflightSourceConstraintMigration(db);
+  const before = countTables(db);
+  const columns = existingColumns(db, "sessions");
+  const targetColumns = SESSION_COLUMNS.map((column) => quoteIdent(column.name)).join(", ");
+  const sourceColumns = SESSION_COLUMNS.map((column) =>
+    columns.has(column.name) && column.fallback !== "NULL"
+      ? `COALESCE(${quoteIdent(column.name)}, ${column.fallback})`
+      : columns.has(column.name)
+        ? quoteIdent(column.name)
+        : column.fallback,
+  ).join(", ");
+
+  db.exec("PRAGMA foreign_keys=OFF");
+  try {
+    db.transaction(() => {
+      db.exec("DROP TABLE IF EXISTS sessions_new");
+      createSessionsReplacementTable(db);
+      db.exec(`INSERT INTO sessions_new (${targetColumns}) SELECT ${sourceColumns} FROM sessions`);
+      if (process.env.HASNA_SESSIONS_FAIL_CODEWITH_SOURCE_MIGRATION === "1") {
+        throw new Error("forced sessions.source migration failure");
+      }
+      db.exec("DROP TABLE sessions");
+      db.exec("ALTER TABLE sessions_new RENAME TO sessions");
+      ensureSessionIndexes(db);
+    });
+  } finally {
+    try {
+      db.exec("DROP TABLE IF EXISTS sessions_new");
+    } catch {
+      // Best-effort cleanup after rollback.
+    }
+    db.exec("PRAGMA foreign_keys=ON");
+  }
+
+  const after = countTables(db);
+  assertCountsUnchanged(before, after);
+  assertForeignKeysValid(db);
 }
 
 function tableCount(db: SqliteAdapter, table: string): number {

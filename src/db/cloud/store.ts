@@ -15,6 +15,7 @@ import type {
   ToolCall,
   ToolCallInsert,
 } from "../../types/index.js";
+import { SESSION_SOURCES } from "../../types/index.js";
 import { getCloudClient } from "./client.js";
 import { encodePath } from "../../lib/paths.js";
 import { contentShrinkError } from "../../lib/content-import-safety.js";
@@ -401,9 +402,9 @@ export async function upsertSession(
   client: TypedQueryClient = getCloudClient(),
 ): Promise<Session> {
   input = sanitizeSessionInsert(input);
-  const validSources = new Set(["claude", "codex", "gemini"]);
+  const validSources = new Set<string>(SESSION_SOURCES);
   if (!validSources.has(input.source)) {
-    throw new Error(`invalid source '${input.source}' (expected claude|codex|gemini)`);
+    throw new Error(`invalid source '${input.source}' (expected ${SESSION_SOURCES.join("|")})`);
   }
   if (!input.source_id || typeof input.source_id !== "string") {
     throw new Error("source_id is required");

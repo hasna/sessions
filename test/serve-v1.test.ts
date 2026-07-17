@@ -112,6 +112,42 @@ describe("/v1 authenticated API (local mode)", () => {
     }
   });
 
+  it("accepts source=codewith through /v1 and advertises it in OpenAPI", async () => {
+    const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const rw = keyFor(["sessions:read", "sessions:write"]);
+      const headers = { "x-api-key": rw, "content-type": "application/json" };
+
+      const created = await fetch(`${base}/v1/sessions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          source: "codewith",
+          source_id: "serve-codewith-1",
+          title: "Serve Codewith",
+        }),
+      });
+      expect(created.status).toBe(201);
+      expect((await created.json()).session.source).toBe("codewith");
+
+      const unknown = await fetch(`${base}/v1/sessions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ source: "unknown", source_id: "bad" }),
+      });
+      expect(unknown.status).toBe(400);
+
+      const openapi = await fetch(`${base}/openapi.json`);
+      expect(openapi.status).toBe(200);
+      const spec = await openapi.json();
+      expect(spec.components.schemas.Session.properties.source.enum).toContain("codewith");
+      expect(spec.components.schemas.SessionCreate.properties.source.enum).toContain("codewith");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   it("serves rename (PATCH), content/tool search, and graph on /v1 (regression for stale-server 404/405)", async () => {
     const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
     try {
