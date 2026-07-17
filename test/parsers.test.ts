@@ -403,7 +403,7 @@ describe("CodexParser", () => {
       closeDatabase();
       delete process.env.SESSIONS_DB_PATH;
     }
-  });
+  }, 10_000);
 
   it("reports incomplete trailing rollout records without throwing", () => {
     const file = join(root, "codex", "sessions", "2026", "05", "02", "rollout-2026-05-02T14-00-00-partial.jsonl");

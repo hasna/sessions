@@ -3,7 +3,11 @@ import { getMachineName } from "../lib/machine.js";
 import { appendProjectFilter } from "../lib/project-filter.js";
 import { encodePath } from "../lib/paths.js";
 import {
+  SESSION_SOURCES,
+  SessionAmbiguousError,
+  SessionInvalidIdentifierError,
   SessionNotFoundError,
+  type SessionLookupOptions,
   type Session,
   type SessionInsert,
   type Message,
@@ -101,6 +105,54 @@ function rowToToolCall(row: Record<string, unknown>): ToolCall {
     timestamp: (row.timestamp as string) ?? null,
     metadata: parseMeta(row.metadata),
   };
+}
+
+function parseQualifiedSessionIdentifier(
+  idOrPrefix: string,
+  opts: SessionLookupOptions = {},
+): { source: string | null; identifier: string } {
+  if (opts.source) return { source: opts.source, identifier: idOrPrefix };
+  const colon = idOrPrefix.indexOf(":");
+  if (colon > 0) {
+    const source = idOrPrefix.slice(0, colon);
+    if ((SESSION_SOURCES as readonly string[]).includes(source)) {
+      return { source, identifier: idOrPrefix.slice(colon + 1) };
+    }
+  }
+  return { source: null, identifier: idOrPrefix };
+}
+
+function candidatesFromRows(rows: Record<string, unknown>[]) {
+  return rows.map((row) => ({
+    id: row.id as string,
+    source: row.source as string,
+    source_id: row.source_id as string,
+  }));
+}
+
+function uniqueSessionOrThrow(
+  displayIdentifier: string,
+  rows: Record<string, unknown>[],
+): Session | null {
+  const unique = new Map<string, Record<string, unknown>>();
+  for (const row of rows) unique.set(row.id as string, row);
+  const deduped = [...unique.values()];
+  if (deduped.length === 0) return null;
+  if (deduped.length === 1) return rowToSession(deduped[0]);
+  throw new SessionAmbiguousError(displayIdentifier, candidatesFromRows(deduped));
+}
+
+function escapedLikePrefix(value: string): string {
+  return `${value.replace(/[\\%_]/g, "\\$&")}%`;
+}
+
+function rejectEmptySourceQualifiedIdentifier(displayIdentifier: string, identifier: string): void {
+  if (identifier.length === 0) {
+    throw new SessionInvalidIdentifierError(
+      displayIdentifier,
+      "source-qualified identifiers must include a non-empty source id",
+    );
+  }
 }
 
 /** Upsert a session keyed by (source, source_id). Returns the stored row. */
@@ -212,18 +264,49 @@ export function getSessionBySource(source: string, sourceId: string): Session | 
   return row ? rowToSession(row) : null;
 }
 
-/** Resolve a session by full id or a unique id/source_id prefix (null if none or ambiguous). */
-export function getSessionByPrefix(idOrPrefix: string): Session | null {
+/** Resolve a session by full id or a unique id/source_id prefix. Throws on ambiguous matches. */
+export function getSessionByPrefix(
+  idOrPrefix: string,
+  opts: SessionLookupOptions = {},
+): Session | null {
   const db = getDatabase();
-  const exact = db.prepare("SELECT * FROM sessions WHERE id = ? OR source_id = ?").get(idOrPrefix, idOrPrefix) as
-    | Record<string, unknown>
-    | undefined;
-  if (exact) return rowToSession(exact);
+  const lookup = parseQualifiedSessionIdentifier(idOrPrefix, opts);
+  if (!lookup.source) {
+    const exactId = db.prepare("SELECT * FROM sessions WHERE id = ?").get(idOrPrefix) as
+      | Record<string, unknown>
+      | undefined;
+    if (exactId) return rowToSession(exactId);
+  }
+
+  if (lookup.source) {
+    rejectEmptySourceQualifiedIdentifier(idOrPrefix, lookup.identifier);
+    const exactSource = db
+      .prepare("SELECT * FROM sessions WHERE source = ? AND source_id = ?")
+      .all(lookup.source, lookup.identifier) as Record<string, unknown>[];
+    const exact = uniqueSessionOrThrow(idOrPrefix, exactSource);
+    if (exact) return exact;
+    const prefix = escapedLikePrefix(lookup.identifier);
+    const rows = db
+      .prepare(
+        "SELECT * FROM sessions WHERE source = ? AND source_id LIKE ? ESCAPE '\\' ORDER BY source_id, id LIMIT 6",
+      )
+      .all(lookup.source, prefix) as Record<string, unknown>[];
+    return uniqueSessionOrThrow(idOrPrefix, rows);
+  }
+
+  const exactNative = db
+    .prepare("SELECT * FROM sessions WHERE source_id = ? ORDER BY source, id LIMIT 6")
+    .all(idOrPrefix) as Record<string, unknown>[];
+  const exact = uniqueSessionOrThrow(idOrPrefix, exactNative);
+  if (exact) return exact;
+
+  const prefix = escapedLikePrefix(idOrPrefix);
   const rows = db
-    .prepare("SELECT * FROM sessions WHERE id LIKE ? OR source_id LIKE ? LIMIT 2")
-    .all(`${idOrPrefix}%`, `${idOrPrefix}%`) as Record<string, unknown>[];
-  if (rows.length === 1) return rowToSession(rows[0]);
-  return null;
+    .prepare(
+      "SELECT * FROM sessions WHERE id LIKE ? ESCAPE '\\' OR source_id LIKE ? ESCAPE '\\' ORDER BY id LIMIT 6",
+    )
+    .all(prefix, prefix) as Record<string, unknown>[];
+  return uniqueSessionOrThrow(idOrPrefix, rows);
 }
 
 /**
@@ -231,9 +314,13 @@ export function getSessionByPrefix(idOrPrefix: string): Session | null {
  * unique id/source_id prefix. Updates both the `sessions` row and the FTS index.
  * Returns the updated Session, or null when no unique match exists.
  */
-export function updateSessionTitle(idOrPrefix: string, title: string): Session | null {
+export function updateSessionTitle(
+  idOrPrefix: string,
+  title: string,
+  opts: SessionLookupOptions = {},
+): Session | null {
   const db = getDatabase();
-  const target = getSessionByPrefix(idOrPrefix);
+  const target = getSessionByPrefix(idOrPrefix, opts);
   if (!target) return null;
   db.prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?").run(
     title,

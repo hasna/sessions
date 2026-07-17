@@ -119,6 +119,51 @@ describe("sessions CLI store-backed flows", () => {
     expect(byProject.session.source_id).toBe("session-001");
   });
 
+  it("resolves duplicate native ids with source-qualified CLI identifiers", () => {
+    ingest();
+    const created = parseJsonOutput(
+      runCli(["create", "--source", "codewith", "--source-id", "session-001", "--json"]),
+    );
+    expect(created.source).toBe("codewith");
+
+    const ambiguous = runCli(["show", "session-001", "--json"]);
+    expect(ambiguous.exitCode).not.toBe(0);
+    expect(Buffer.from(ambiguous.stderr).toString("utf-8")).toContain(
+      "Ambiguous session identifier",
+    );
+
+    const qualified = parseJsonOutput(runCli(["show", "codewith:session-001", "--json"]));
+    expect(qualified.session.source).toBe("codewith");
+
+    const explicit = parseJsonOutput(runCli(["show", "session-001", "--source", "claude", "--json"]));
+    expect(explicit.session.source).toBe("claude");
+  });
+
+  it("rejects empty source-qualified CLI rename targets without renaming the sole session", () => {
+    const created = parseJsonOutput(
+      runCli([
+        "create",
+        "--source",
+        "codewith",
+        "--source-id",
+        "sole-session",
+        "--title",
+        "Original title",
+        "--json",
+      ]),
+    );
+    expect(created.source).toBe("codewith");
+
+    const rename = runCli(["rename", "codewith:", "Should not apply", "--json"]);
+    expect(rename.exitCode).not.toBe(0);
+    expect(Buffer.from(rename.stderr).toString("utf-8")).toContain(
+      "source-qualified identifiers must include a non-empty source id",
+    );
+
+    const after = parseJsonOutput(runCli(["show", "sole-session", "--json"]));
+    expect(after.session.title).toBe("Original title");
+  });
+
   it("supports history filters and transcript search through the store", () => {
     ingest();
     const historyPayload = parseJsonOutput(runCli(["history", "--today", "--json"]));

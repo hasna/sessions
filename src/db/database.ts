@@ -44,6 +44,7 @@ const SESSION_COLUMNS: { name: string; fallback: string }[] = [
 
 const SESSION_INDEX_SQL = [
   `CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source_id)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_project_path ON sessions(project_path)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_model ON sessions(model)`,
@@ -181,6 +182,7 @@ const SCHEMA: string[] = [
 
   // Indexes
   `CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source_id)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_project_path ON sessions(project_path)`,
   // NOTE: idx_sessions_machine is created in runMigrations(), after the machine
   // column is guaranteed to exist (it must not run before the ALTER on old DBs).

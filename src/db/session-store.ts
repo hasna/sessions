@@ -15,7 +15,14 @@
 
 import { resolveStorageClient } from "@hasna/contracts/client/storage";
 import type { HasnaStorageClient } from "@hasna/contracts/client/storage";
-import type { Machine, Message, Session, SessionContentImport, ToolCall } from "../types/index.js";
+import type {
+  Machine,
+  Message,
+  Session,
+  SessionContentImport,
+  SessionLookupOptions,
+  ToolCall,
+} from "../types/index.js";
 import type { SessionContentImportResult, UpsertSessionInput } from "./cloud/store.js";
 import type { SearchHit, ToolCallHit } from "../lib/search.js";
 import type { Entity, EntityType, RelatedSession, SessionGraph } from "../lib/graph.js";
@@ -63,7 +70,7 @@ export interface SessionStore {
   readonly mode: "local" | "cloud";
   list(opts: ListOptions): Promise<Session[]>;
   recent(limit: number): Promise<Session[]>;
-  get(idOrPrefix: string): Promise<Session | null>;
+  get(idOrPrefix: string, opts?: SessionLookupOptions): Promise<Session | null>;
   create(input: UpsertSessionInput): Promise<Session>;
   /** Idempotently import/upsert a session with messages and tool calls. */
   importContent(input: SessionContentImport): Promise<SessionContentImportResult>;
@@ -74,7 +81,7 @@ export interface SessionStore {
    * self_hosted mode PATCHes `/v1/sessions/{id}` so the shared cloud registry is
    * what actually changes. Returns the updated session, or null if not found.
    */
-  rename(idOrPrefix: string, title: string): Promise<Session | null>;
+  rename(idOrPrefix: string, title: string, opts?: SessionLookupOptions): Promise<Session | null>;
   /**
    * Rewrite session paths after a project directory move (old -> new): updates
    * project_path / source_path in the active index. Local mode touches the
@@ -104,7 +111,7 @@ export interface SessionStore {
   /** Sessions related to a graph entity. */
   graphRelated(type: EntityType, name: string, limit: number): Promise<RelatedSession[]>;
   /** The entity neighborhood of a single session. */
-  graphSession(idOrPrefix: string): Promise<SessionGraph | null>;
+  graphSession(idOrPrefix: string, opts?: SessionLookupOptions): Promise<SessionGraph | null>;
   /** Generate embeddings for indexed messages (index maintenance). */
   embed(opts: { limit?: number }): Promise<EmbedResult>;
   /** Merge another machine's local sessions DB into this one (local-to-local sync). */
@@ -143,6 +150,11 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
     if (opts.limit !== undefined) q.limit = opts.limit;
     return q;
   };
+  const lookupQuery = (opts: SessionLookupOptions = {}): Record<string, string> => {
+    const q: Record<string, string> = {};
+    if (opts.source) q.source = opts.source;
+    return q;
+  };
   return {
     mode: "cloud",
     async list(opts) {
@@ -153,9 +165,11 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
       const res = await t.get<{ sessions: Session[] }>("/recent", { query: { limit } });
       return res.sessions ?? [];
     },
-    async get(idOrPrefix) {
+    async get(idOrPrefix, opts = {}) {
       try {
-        const res = await t.get<{ session: Session }>(`/sessions/${encodeURIComponent(idOrPrefix)}`);
+        const res = await t.get<{ session: Session }>(`/sessions/${encodeURIComponent(idOrPrefix)}`, {
+          query: lookupQuery(opts),
+        });
         return res.session ?? null;
       } catch (error) {
         if (isNotFound(error)) return null;
@@ -191,11 +205,12 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
         throw error;
       }
     },
-    async rename(idOrPrefix, title) {
+    async rename(idOrPrefix, title, opts = {}) {
       try {
         const res = await t.patch<{ session: Session }>(
           `/sessions/${encodeURIComponent(idOrPrefix)}`,
           { title },
+          { query: lookupQuery(opts) },
         );
         return res.session ?? null;
       } catch (error) {
@@ -226,7 +241,9 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
       return stats;
     },
     async messages(sessionId) {
-      const res = await t.get<{ messages: Message[] }>(`/sessions/${encodeURIComponent(sessionId)}/messages`);
+      const res = await t.get<{ messages: Message[] }>(
+        `/sessions/${encodeURIComponent(sessionId)}/messages`,
+      );
       return res.messages ?? [];
     },
     async toolCalls(sessionId) {
@@ -257,10 +274,10 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
       });
       return res.sessions ?? [];
     },
-    async graphSession(idOrPrefix) {
+    async graphSession(idOrPrefix, opts = {}) {
       try {
         const res = await t.get<{ graph: SessionGraph | null }>("/graph", {
-          query: { session: idOrPrefix },
+          query: { session: idOrPrefix, ...lookupQuery(opts) },
         });
         return res.graph ?? null;
       } catch (error) {
@@ -320,9 +337,9 @@ function localStore(): SessionStore {
       const { getRecentSessions } = await import("./sessions.js");
       return getRecentSessions(limit);
     },
-    async get(idOrPrefix) {
+    async get(idOrPrefix, opts = {}) {
       const { getSessionByPrefix } = await import("./sessions.js");
-      return getSessionByPrefix(idOrPrefix);
+      return getSessionByPrefix(idOrPrefix, opts);
     },
     async create(input) {
       const { upsertSession } = await import("./sessions.js");
@@ -360,9 +377,9 @@ function localStore(): SessionStore {
       deleteSession(id);
       return true;
     },
-    async rename(idOrPrefix, title) {
+    async rename(idOrPrefix, title, opts = {}) {
       const { updateSessionTitle } = await import("./sessions.js");
-      return updateSessionTitle(idOrPrefix, title);
+      return updateSessionTitle(idOrPrefix, title, opts);
     },
     async relocatePaths(oldPath, newPath) {
       const { relocatePathsInDb } = await import("./sessions.js");
@@ -439,10 +456,10 @@ function localStore(): SessionStore {
       const { relatedSessions } = await import("../lib/graph.js");
       return relatedSessions(type, name, limit);
     },
-    async graphSession(idOrPrefix) {
+    async graphSession(idOrPrefix, opts = {}) {
       const { sessionGraph } = await import("../lib/graph.js");
       const { getSessionByPrefix } = await import("./sessions.js");
-      const session = getSessionByPrefix(idOrPrefix);
+      const session = getSessionByPrefix(idOrPrefix, opts);
       if (!session) return null;
       return sessionGraph(session.id);
     },

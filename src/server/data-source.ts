@@ -5,7 +5,14 @@
 // for self-hosters and tests without a Postgres. Both return identical wire
 // shapes so the generated SDK/OpenAPI is one contract.
 
-import type { Machine, Message, Session, SessionContentImport, ToolCall } from "../types/index.js";
+import type {
+  Machine,
+  Message,
+  Session,
+  SessionContentImport,
+  SessionLookupOptions,
+  ToolCall,
+} from "../types/index.js";
 import type { SearchHit, ToolCallHit } from "../lib/search.js";
 import type { Entity, EntityType, RelatedSession, SessionGraph } from "../lib/graph.js";
 import { isCloudMode } from "../db/cloud/client.js";
@@ -37,14 +44,14 @@ export interface DataSource {
   readonly mode: "local" | "cloud";
   list(opts: ListOptions): Promise<Session[]>;
   recent(limit: number): Promise<Session[]>;
-  get(idOrPrefix: string): Promise<Session | null>;
+  get(idOrPrefix: string, opts?: SessionLookupOptions): Promise<Session | null>;
   search(query: string, opts: ListOptions): Promise<SearchHitDto[]>;
   machines(): Promise<Machine[]>;
   stats(): Promise<Stats>;
   create(input: cloud.UpsertSessionInput): Promise<Session>;
   importContent(input: SessionContentImport): Promise<cloud.SessionContentImportResult>;
   remove(id: string): Promise<boolean>;
-  rename(idOrPrefix: string, title: string): Promise<Session | null>;
+  rename(idOrPrefix: string, title: string, opts?: SessionLookupOptions): Promise<Session | null>;
   relocatePaths(oldPath: string, newPath: string): Promise<{ rowsUpdated: number }>;
   messages(sessionId: string): Promise<Message[]>;
   toolCalls(sessionId: string): Promise<ToolCall[]>;
@@ -52,14 +59,14 @@ export interface DataSource {
   searchToolCalls(query: string, opts: ListOptions): Promise<ToolCallHit[]>;
   graphEntities(type?: EntityType): Promise<Entity[]>;
   graphRelated(type: EntityType, name: string, limit: number): Promise<RelatedSession[]>;
-  graphSession(idOrPrefix: string): Promise<SessionGraph | null>;
+  graphSession(idOrPrefix: string, opts?: SessionLookupOptions): Promise<SessionGraph | null>;
 }
 
 const cloudSource: DataSource = {
   mode: "cloud",
   list: (opts) => cloud.listSessions(opts),
   recent: (limit) => cloud.getRecentSessions(limit),
-  get: (idOrPrefix) => cloud.getSessionByPrefix(idOrPrefix),
+  get: (idOrPrefix, opts) => cloud.getSessionByPrefix(idOrPrefix, opts),
   search: async (query, opts) =>
     (await cloud.searchSessions(query, opts)).map((h) => ({ session: h.session, match: h.match })),
   machines: () => cloud.listMachines(),
@@ -67,7 +74,7 @@ const cloudSource: DataSource = {
   create: (input) => cloud.upsertSession(input),
   importContent: (input) => cloud.importSessionContent(input),
   remove: (id) => cloud.deleteSession(id),
-  rename: (idOrPrefix, title) => cloud.updateSessionTitle(idOrPrefix, title),
+  rename: (idOrPrefix, title, opts) => cloud.updateSessionTitle(idOrPrefix, title, opts),
   relocatePaths: (oldPath, newPath) => cloud.relocatePaths(oldPath, newPath),
   messages: (sessionId) => cloud.getMessages(sessionId),
   toolCalls: (sessionId) => cloud.getToolCalls(sessionId),
@@ -76,7 +83,7 @@ const cloudSource: DataSource = {
   graphEntities: (type) => cloud.graphEntities(type as cloud.CloudEntityType | undefined),
   graphRelated: (type, name, limit) =>
     cloud.graphRelated(type as cloud.CloudEntityType, name, limit),
-  graphSession: (idOrPrefix) => cloud.graphSession(idOrPrefix),
+  graphSession: (idOrPrefix, opts) => cloud.graphSession(idOrPrefix, opts),
 };
 
 function localSource(): DataSource {
@@ -90,9 +97,9 @@ function localSource(): DataSource {
       const { getRecentSessions } = await import("../db/sessions.js");
       return getRecentSessions(limit);
     },
-    async get(idOrPrefix) {
+    async get(idOrPrefix, opts = {}) {
       const { getSessionByPrefix } = await import("../db/sessions.js");
-      return getSessionByPrefix(idOrPrefix);
+      return getSessionByPrefix(idOrPrefix, opts);
     },
     async search(query, opts) {
       const { searchSessions } = await import("../lib/search.js");
@@ -176,9 +183,9 @@ function localSource(): DataSource {
       deleteSession(id);
       return true;
     },
-    async rename(idOrPrefix, title) {
+    async rename(idOrPrefix, title, opts = {}) {
       const { updateSessionTitle } = await import("../db/sessions.js");
-      return updateSessionTitle(idOrPrefix, title);
+      return updateSessionTitle(idOrPrefix, title, opts);
     },
     async relocatePaths(oldPath, newPath) {
       const { relocatePathsInDb } = await import("../db/sessions.js");
@@ -208,10 +215,10 @@ function localSource(): DataSource {
       const { relatedSessions } = await import("../lib/graph.js");
       return relatedSessions(type, name, limit);
     },
-    async graphSession(idOrPrefix) {
+    async graphSession(idOrPrefix, opts = {}) {
       const { sessionGraph } = await import("../lib/graph.js");
       const { getSessionByPrefix } = await import("../db/sessions.js");
-      const session = getSessionByPrefix(idOrPrefix);
+      const session = getSessionByPrefix(idOrPrefix, opts);
       if (!session) return null;
       return sessionGraph(session.id);
     },

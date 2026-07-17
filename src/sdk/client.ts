@@ -39,6 +39,8 @@ export interface DeleteResponse { "ok": boolean; "deleted": boolean; "id"?: stri
 
 export interface ErrorResponse { "ok": boolean; "error": string }
 
+export interface SessionAmbiguousResponse { "ok": false; "error": string; "code": "session_ambiguous"; "candidates": Array<{ "id": string; "source": string; "source_id": string }> }
+
 export interface SessionsApiOptions {
   /** Base URL, e.g. process.env.APP_API_URL. */
   baseUrl: string;
@@ -55,6 +57,34 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+type SourceLookupQuery = { "source"?: string };
+
+function isRequestInit(value: SourceLookupQuery | RequestInit | undefined): value is RequestInit {
+  if (value === undefined) return false;
+  return (
+    "headers" in value ||
+    "signal" in value ||
+    "method" in value ||
+    "body" in value ||
+    "cache" in value ||
+    "credentials" in value ||
+    "integrity" in value ||
+    "keepalive" in value ||
+    "mode" in value ||
+    "redirect" in value ||
+    "referrer" in value ||
+    "referrerPolicy" in value ||
+    "window" in value
+  );
+}
+
+function splitSourceLookupArgs(
+  queryOrInit?: SourceLookupQuery | RequestInit,
+  init?: RequestInit,
+): { query?: SourceLookupQuery; init?: RequestInit } {
+  return isRequestInit(queryOrInit) ? { init: queryOrInit } : { query: queryOrInit, init };
 }
 
 export class SessionsApi {
@@ -166,12 +196,15 @@ export class SessionsApi {
       });
     }
 
-    /** Get a session by id or id prefix */
-    async getSession(id: string, init?: RequestInit): Promise<SessionResponse> {
+    /** Get a session by internal id, source-qualified id, or unique prefix */
+    async getSession(id: string, init?: RequestInit): Promise<SessionResponse>;
+    async getSession(id: string, query?: SourceLookupQuery, init?: RequestInit): Promise<SessionResponse>;
+    async getSession(id: string, queryOrInit?: SourceLookupQuery | RequestInit, init?: RequestInit): Promise<SessionResponse> {
+      const args = splitSourceLookupArgs(queryOrInit, init);
       return this.request("GET", `/v1/sessions/${encodeURIComponent(String(id))}`, {
         body: undefined,
-        query: undefined,
-        init,
+        query: args.query,
+        init: args.init,
       });
     }
 
@@ -185,29 +218,38 @@ export class SessionsApi {
     }
 
     /** Set a session title */
-    async renameSession(id: string, body: { "title": string }, init?: RequestInit): Promise<SessionResponse> {
+    async renameSession(id: string, body: { "title": string }, init?: RequestInit): Promise<SessionResponse>;
+    async renameSession(id: string, body: { "title": string }, query?: SourceLookupQuery, init?: RequestInit): Promise<SessionResponse>;
+    async renameSession(id: string, body: { "title": string }, queryOrInit?: SourceLookupQuery | RequestInit, init?: RequestInit): Promise<SessionResponse> {
+      const args = splitSourceLookupArgs(queryOrInit, init);
       return this.request("PATCH", `/v1/sessions/${encodeURIComponent(String(id))}`, {
         body,
-        query: undefined,
-        init,
+        query: args.query,
+        init: args.init,
       });
     }
 
     /** List messages for a session */
-    async listSessionMessages(id: string, init?: RequestInit): Promise<MessageListResponse> {
+    async listSessionMessages(id: string, init?: RequestInit): Promise<MessageListResponse>;
+    async listSessionMessages(id: string, query?: SourceLookupQuery, init?: RequestInit): Promise<MessageListResponse>;
+    async listSessionMessages(id: string, queryOrInit?: SourceLookupQuery | RequestInit, init?: RequestInit): Promise<MessageListResponse> {
+      const args = splitSourceLookupArgs(queryOrInit, init);
       return this.request("GET", `/v1/sessions/${encodeURIComponent(String(id))}/messages`, {
         body: undefined,
-        query: undefined,
-        init,
+        query: args.query,
+        init: args.init,
       });
     }
 
     /** List tool calls for a session */
-    async listSessionToolCalls(id: string, init?: RequestInit): Promise<ToolCallListResponse> {
+    async listSessionToolCalls(id: string, init?: RequestInit): Promise<ToolCallListResponse>;
+    async listSessionToolCalls(id: string, query?: SourceLookupQuery, init?: RequestInit): Promise<ToolCallListResponse>;
+    async listSessionToolCalls(id: string, queryOrInit?: SourceLookupQuery | RequestInit, init?: RequestInit): Promise<ToolCallListResponse> {
+      const args = splitSourceLookupArgs(queryOrInit, init);
       return this.request("GET", `/v1/sessions/${encodeURIComponent(String(id))}/tool-calls`, {
         body: undefined,
-        query: undefined,
-        init,
+        query: args.query,
+        init: args.init,
       });
     }
 

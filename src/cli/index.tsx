@@ -66,6 +66,12 @@ function printJson(value: unknown): void {
   writeStdoutFully(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+function failCli(error: unknown): never {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`Error: ${message}`);
+  process.exit(1);
+}
+
 function writeStdoutFully(text: string): void {
   const buffer = Buffer.from(text, "utf-8");
   let offset = 0;
@@ -803,6 +809,7 @@ program
 program
   .command("rename <id-or-prefix> <title>")
   .description("Set a session's title in the active store (local index, or the self_hosted /v1 API when HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are set)")
+  .option("-s, --source <source>", "Resolve the identifier as a native source id for this source")
   .option("--json", "Output as JSON")
   .action(async (identifier: string, title: string, opts: any) => {
     const trimmed = title.trim();
@@ -811,7 +818,12 @@ program
       process.exit(1);
     }
     const { resolveSessionStore } = await import("../db/session-store.js");
-    const session = await resolveSessionStore().rename(identifier, trimmed);
+    let session: Session | null;
+    try {
+      session = await resolveSessionStore().rename(identifier, trimmed, { source: opts.source });
+    } catch (error) {
+      failCli(error);
+    }
     if (!session) {
       console.error(`Error: session not found (or ambiguous prefix): ${identifier}`);
       process.exit(1);
@@ -827,6 +839,7 @@ program
   .command("resume [id-or-prefix]")
   .description("Resume a session by id/prefix, latest project session, or the most recent session (resolved via the active store)")
   .option("-p, --project <value>", "Resume the most recent session for a project")
+  .option("-s, --source <source>", "Resolve the identifier as a native source id for this source")
   .option("--last", "Resume the most recently active session")
   .option("--pick", "Interactively pick a session from the most recent results")
   .option("--print-command", "Print the underlying resume command without executing it")
@@ -844,7 +857,7 @@ program
       } else if (opts.last || !identifier) {
         session = (await store.recent(1))[0] ?? null;
       } else {
-        session = await store.get(identifier);
+        session = await store.get(identifier, { source: opts.source });
       }
 
       if (!session) {
@@ -1614,12 +1627,18 @@ program
 program
   .command("show <id>")
   .description("Show a session's details and message previews (id or unique prefix)")
+  .option("-s, --source <source>", "Resolve the id as a native source id for this source")
   .option("-m, --messages <n>", "How many messages to preview", "12")
   .option("--json", "Output as JSON")
-  .action(async (id: string, opts: { messages?: string; json?: boolean }) => {
+  .action(async (id: string, opts: { source?: string; messages?: string; json?: boolean }) => {
     const { resolveSessionStore } = await import("../db/session-store.js");
     const store = resolveSessionStore();
-    const s = await store.get(id);
+    let s: Session | null;
+    try {
+      s = await store.get(id, { source: opts.source });
+    } catch (error) {
+      failCli(error);
+    }
     if (!s) {
       console.error(`Session not found (or ambiguous prefix): ${id}`);
       process.exit(1);
@@ -1720,9 +1739,10 @@ program
   .option("-t, --type <type>", "List one entity type: project, tool, model, provider, repo")
   .option("-r, --related <type:name>", "Sessions related to an entity, e.g. tool:Bash or project:infra")
   .option("--session <id>", "Show a single session's entity neighborhood")
+  .option("-s, --source <source>", "Resolve --session as a native source id for this source")
   .option("-l, --limit <n>", "Max results", "50")
   .option("--json", "Output as JSON")
-  .action(async (opts: { type?: string; related?: string; session?: string; limit?: string; json?: boolean }) => {
+  .action(async (opts: { type?: string; related?: string; session?: string; source?: string; limit?: string; json?: boolean }) => {
     const { resolveSessionStore } = await import("../db/session-store.js");
     const store = resolveSessionStore();
     type EntityType = "project" | "tool" | "model" | "provider" | "repo";
@@ -1730,7 +1750,12 @@ program
     const limit = parseInt(opts.limit ?? "50", 10) || 50;
 
     if (opts.session) {
-      const g = await store.graphSession(opts.session);
+      let g;
+      try {
+        g = await store.graphSession(opts.session, { source: opts.source });
+      } catch (error) {
+        failCli(error);
+      }
       if (!g) {
         console.error(`Session not found: ${opts.session}`);
         process.exit(1);

@@ -350,6 +350,27 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           properties: { ok: { type: "boolean" }, error: { type: "string" } },
           required: ["ok", "error"],
         },
+        SessionAmbiguousResponse: {
+          type: "object",
+          properties: {
+            ok: { type: "boolean", enum: [false] },
+            error: { type: "string" },
+            code: { type: "string", enum: ["session_ambiguous"] },
+            candidates: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  source: { type: "string" },
+                  source_id: { type: "string" },
+                },
+                required: ["id", "source", "source_id"],
+              },
+            },
+          },
+          required: ["ok", "error", "code", "candidates"],
+        },
       },
     },
     security: [{ ApiKeyAuth: [] }],
@@ -424,10 +445,12 @@ export function buildOpenApiDocument(): Record<string, unknown> {
       "/v1/sessions/{id}": {
         get: {
           operationId: "getSession",
-          summary: "Get a session by id or id prefix",
-          parameters: [pathParam("id")],
+          summary: "Get a session by internal id, source-qualified id, or unique prefix",
+          parameters: [pathParam("id"), queryParam("source", "string")],
           responses: {
             ...json200("SessionResponse", "Session"),
+            "400": jsonRef("ErrorResponse", "Invalid identifier"),
+            "409": jsonRef("SessionAmbiguousResponse", "Ambiguous identifier"),
             "404": jsonRef("ErrorResponse", "Not found"),
           },
         },
@@ -443,7 +466,7 @@ export function buildOpenApiDocument(): Record<string, unknown> {
         patch: {
           operationId: "renameSession",
           summary: "Set a session title",
-          parameters: [pathParam("id")],
+          parameters: [pathParam("id"), queryParam("source", "string")],
           requestBody: {
             required: true,
             content: {
@@ -459,6 +482,7 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           responses: {
             ...json200("SessionResponse", "Renamed"),
             "400": jsonRef("ErrorResponse", "Invalid input"),
+            "409": jsonRef("SessionAmbiguousResponse", "Ambiguous identifier"),
             "404": jsonRef("ErrorResponse", "Not found"),
           },
         },
@@ -467,9 +491,11 @@ export function buildOpenApiDocument(): Record<string, unknown> {
         get: {
           operationId: "listSessionMessages",
           summary: "List messages for a session",
-          parameters: [pathParam("id")],
+          parameters: [pathParam("id"), queryParam("source", "string")],
           responses: {
             ...json200("MessageListResponse", "Messages"),
+            "400": jsonRef("ErrorResponse", "Invalid identifier"),
+            "409": jsonRef("SessionAmbiguousResponse", "Ambiguous identifier"),
             "404": jsonRef("ErrorResponse", "Not found"),
           },
         },
@@ -478,9 +504,11 @@ export function buildOpenApiDocument(): Record<string, unknown> {
         get: {
           operationId: "listSessionToolCalls",
           summary: "List tool calls for a session",
-          parameters: [pathParam("id")],
+          parameters: [pathParam("id"), queryParam("source", "string")],
           responses: {
             ...json200("ToolCallListResponse", "Tool calls"),
+            "400": jsonRef("ErrorResponse", "Invalid identifier"),
+            "409": jsonRef("SessionAmbiguousResponse", "Ambiguous identifier"),
             "404": jsonRef("ErrorResponse", "Not found"),
           },
         },

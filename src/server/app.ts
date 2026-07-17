@@ -5,6 +5,11 @@ import { getVerifier } from "./auth.js";
 import { buildOpenApiDocument } from "./openapi.js";
 import { checkHealth } from "../generated/storage-kit/index.js";
 import { checkCloudReady } from "../db/cloud/migrate.js";
+import {
+  SessionAmbiguousError,
+  SessionInvalidIdentifierError,
+  type SessionLookupOptions,
+} from "../types/index.js";
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
@@ -52,6 +57,29 @@ function listOptionsFromUrl(url: URL, defaultLimit: number): ListOptions {
   if (project) opts.project_path = project;
   if (machine) opts.machine = machine;
   return opts;
+}
+
+function lookupOptionsFromUrl(url: URL): SessionLookupOptions {
+  const source = url.searchParams.get("source");
+  return source ? { source } : {};
+}
+
+function ambiguityResponse(error: unknown): Response | null {
+  if (error instanceof SessionInvalidIdentifierError) {
+    return json({ ok: false, error: error.message, code: error.code }, 400);
+  }
+  if (error instanceof SessionAmbiguousError) {
+    return json(
+      {
+        ok: false,
+        error: error.message,
+        code: "session_ambiguous",
+        candidates: error.candidates,
+      },
+      409,
+    );
+  }
+  return null;
 }
 
 function parseByteSize(value: string): number | undefined {
@@ -183,11 +211,19 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
     const parts = rest.split("/");
     const id = decodeURIComponent(parts[0] ?? "");
     if (!id) return json({ ok: false, error: "missing session id" }, 400);
+    const lookupOpts = lookupOptionsFromUrl(url);
     if (parts.length === 2 && parts[1] === "messages") {
       if (method !== "GET") {
         return json({ ok: false, error: "Method not allowed", allowedMethods: ["GET"] }, 405);
       }
-      const session = await source.get(id);
+      let session;
+      try {
+        session = await source.get(id, lookupOpts);
+      } catch (error) {
+        const response = ambiguityResponse(error);
+        if (response) return response;
+        throw error;
+      }
       if (!session) return json({ ok: false, error: `session not found: ${id}` }, 404);
       const messages = await source.messages(session.id);
       return json({ ok: true, count: messages.length, messages });
@@ -196,7 +232,14 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
       if (method !== "GET") {
         return json({ ok: false, error: "Method not allowed", allowedMethods: ["GET"] }, 405);
       }
-      const session = await source.get(id);
+      let session;
+      try {
+        session = await source.get(id, lookupOpts);
+      } catch (error) {
+        const response = ambiguityResponse(error);
+        if (response) return response;
+        throw error;
+      }
       if (!session) return json({ ok: false, error: `session not found: ${id}` }, 404);
       const toolCalls = await source.toolCalls(session.id);
       return json({ ok: true, count: toolCalls.length, toolCalls });
@@ -205,7 +248,14 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
       return json({ ok: false, error: "Not found", endpoints: ENDPOINTS }, 404);
     }
     if (method === "GET") {
-      const session = await source.get(id);
+      let session;
+      try {
+        session = await source.get(id, lookupOpts);
+      } catch (error) {
+        const response = ambiguityResponse(error);
+        if (response) return response;
+        throw error;
+      }
       if (!session) return json({ ok: false, error: `session not found: ${id}` }, 404);
       return json({ ok: true, session });
     }
@@ -226,7 +276,14 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
       if (!title) {
         return json({ ok: false, error: "title is required and must be a non-empty string" }, 400);
       }
-      const session = await source.rename(id, title);
+      let session;
+      try {
+        session = await source.rename(id, title, lookupOpts);
+      } catch (error) {
+        const response = ambiguityResponse(error);
+        if (response) return response;
+        throw error;
+      }
       if (!session) return json({ ok: false, error: `session not found: ${id}` }, 404);
       return json({ ok: true, session });
     }
@@ -265,7 +322,14 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
     const TYPES = ["project", "tool", "model", "provider", "repo"];
     const sessionId = url.searchParams.get("session");
     if (sessionId) {
-      const graph = await source.graphSession(sessionId);
+      let graph;
+      try {
+        graph = await source.graphSession(sessionId, lookupOptionsFromUrl(url));
+      } catch (error) {
+        const response = ambiguityResponse(error);
+        if (response) return response;
+        throw error;
+      }
       if (!graph) return json({ ok: false, error: `session not found: ${sessionId}` }, 404);
       return json({ ok: true, graph });
     }
