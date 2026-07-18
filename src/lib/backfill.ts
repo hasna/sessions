@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import type { SessionParser } from "./ingest/types.js";
@@ -70,6 +70,7 @@ export interface BackfillRunOptions {
   pilot?: number;
   rangeStart?: string;
   rangeEnd?: string;
+  allSources?: boolean;
   knownIds?: string[];
   checkpointPath?: string;
   backupCommand?: string;
@@ -162,6 +163,11 @@ interface MaterializedSession {
   maxBatchRecords: number;
 }
 
+interface FileSnapshot {
+  mtimeMs: number;
+  size: number;
+}
+
 function nowIso(now: () => Date): string {
   return now().toISOString();
 }
@@ -180,6 +186,19 @@ function nonNegativeInt(value: number | undefined, fallback: number, name: strin
 
 function byteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value));
+}
+
+function snapshotFile(file: string): FileSnapshot | null {
+  try {
+    const stat = statSync(file);
+    return { mtimeMs: stat.mtimeMs, size: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+function sameSnapshot(a: FileSnapshot, b: FileSnapshot): boolean {
+  return a.mtimeMs === b.mtimeMs && a.size === b.size;
 }
 
 function sessionKey(source: string, sourceId: string): string {
@@ -228,6 +247,19 @@ function readCheckpoint(path: string, now: () => Date): BackfillCheckpoint {
     failed: parsed.failed ?? {},
     skipped: parsed.skipped ?? {},
   };
+}
+
+function checkpointEntryMatchesInventory(checkpoint: BackfillCheckpointEntry, entry: BackfillInventoryEntry): boolean {
+  return (
+    checkpoint.source === entry.source &&
+    checkpoint.sourceId === entry.sourceId &&
+    checkpoint.sourcePath === entry.sourcePath &&
+    checkpoint.estimatedBytes === entry.estimatedBytes &&
+    checkpoint.messages === entry.messageCount &&
+    checkpoint.toolCalls === entry.toolCallCount &&
+    typeof checkpoint.updatedAt === "string" &&
+    !Number.isNaN(Date.parse(checkpoint.updatedAt))
+  );
 }
 
 function writeCheckpoint(path: string, checkpoint: BackfillCheckpoint, now: () => Date): void {
@@ -331,7 +363,29 @@ function cleanupParsedSessions(sessions: ParsedOrStagedSession[]): void {
 }
 
 function parseFileSessions(parser: SessionParser, file: string): ParsedOrStagedSession[] {
-  const result = parser.parseFileResult?.(file, { preferStaging: true }) ?? { sessions: parser.parseFile(file) };
+  const before = snapshotFile(file);
+  if (!parser.parseFileResult) {
+    throw new Error("parser does not expose bounded parseFileResult for safe backfill");
+  }
+  const result = parser.parseFileResult(file, { preferStaging: true });
+  const stagedSessions = result.stagedSessions ?? [];
+  if ((result.malformedRecordCount ?? 0) > 0) {
+    for (const staged of stagedSessions) staged.cleanup();
+    throw new Error(`malformed JSONL record count ${result.malformedRecordCount}`);
+  }
+  if (result.incompleteTrailingRecord) {
+    for (const staged of stagedSessions) staged.cleanup();
+    throw new Error("incomplete trailing JSONL record");
+  }
+  const after = snapshotFile(file);
+  if (before && !after) {
+    for (const staged of stagedSessions) staged.cleanup();
+    throw new Error("file vanished after parsing");
+  }
+  if (before && after && !sameSnapshot(before, after)) {
+    for (const staged of stagedSessions) staged.cleanup();
+    throw new Error("file changed during parsing");
+  }
   const out: ParsedOrStagedSession[] = [];
   for (const parsed of result.sessions) {
     out.push({
@@ -341,7 +395,7 @@ function parseFileSessions(parser: SessionParser, file: string): ParsedOrStagedS
       maxNormalizedBatchRecords: result.maxNormalizedBatchRecords ?? Math.max(parsed.messages.length, parsed.toolCalls.length),
     });
   }
-  for (const staged of result.stagedSessions ?? []) {
+  for (const staged of stagedSessions) {
     out.push({
       kind: "staged",
       staged,
@@ -401,9 +455,13 @@ function selectEntries(
   const rangeStart = opts.rangeStart ? parseBackfillKey(opts.rangeStart).key : null;
   const rangeEnd = opts.rangeEnd ? parseBackfillKey(opts.rangeEnd).key : null;
   const pilot = opts.pilot == null ? null : nonNegativeInt(opts.pilot, 0, "--pilot");
+  const knownKeys = new Set((opts.knownIds ?? []).map((id) => parseBackfillKey(id).key));
+  const knownIdsOnlyApplyBoundary =
+    Boolean(opts.apply) && knownKeys.size > 0 && pilot === null && !rangeStart && !rangeEnd && !opts.allSources;
   let selected = entries.filter((entry) => !entry.duplicateOf);
   if (rangeStart) selected = selected.filter((entry) => entry.key >= rangeStart);
   if (rangeEnd) selected = selected.filter((entry) => entry.key <= rangeEnd);
+  if (knownIdsOnlyApplyBoundary) selected = selected.filter((entry) => knownKeys.has(entry.key));
   if (pilot !== null) selected = selected.slice(0, pilot);
   return selected;
 }
@@ -490,7 +548,7 @@ function runBackupCommand(command: string | undefined, apply: boolean): Backfill
       reason: "apply requires --backup-command to complete a backup/capacity preflight gate",
     };
   }
-  const result = spawnSync("bash", ["-lc", trimmed], { stdio: "ignore" });
+  const result = spawnSync(trimmed, { shell: true, stdio: "ignore" });
   const exitCode = result.error ? 1 : result.status ?? (result.signal ? 1 : 0);
   return {
     required: true,
@@ -559,8 +617,13 @@ function createResult(
           : null;
   const confirmationSatisfied = !apply || opts.confirmApply === APPLY_CONFIRMATION;
   const productionAllowed = !apply || !productionLike || Boolean(opts.allowProduction);
+  const hasSourceBoundary = requestedSourceList(opts).length > 0;
+  const hasRangeBoundary = Boolean(opts.rangeStart || opts.rangeEnd);
+  const hasPilotBoundary = opts.pilot != null;
+  const hasKnownIdBoundary = known.length > 0;
+  const applyBoundaryAllowed = !apply || (hasSourceBoundary && (hasRangeBoundary || hasPilotBoundary || hasKnownIdBoundary)) || Boolean(opts.allSources);
   const capacityAllowed = capacityReason === null;
-  const backupPreflightAllowed = apply && confirmationSatisfied && productionAllowed && capacityAllowed;
+  const backupPreflightAllowed = apply && confirmationSatisfied && productionAllowed && applyBoundaryAllowed && capacityAllowed;
   const backup = backupPreflightAllowed
     ? runBackupCommand(opts.backupCommand, true)
     : runBackupCommand(opts.backupCommand, false);
@@ -648,8 +711,11 @@ function createResult(
   if (apply && !result.gates.confirmation.satisfied) {
     result.errors.push(`apply requires --confirm-apply ${APPLY_CONFIRMATION}`);
   }
+  if (apply && !applyBoundaryAllowed) {
+    result.errors.push("apply requires an explicit boundary: --source plus --pilot, --range-start/--range-end, or --known-id; use --all-sources to acknowledge all non-duplicate sessions");
+  }
   if (apply && !result.gates.production.allowed) {
-    result.errors.push(`production-like API URL ${apiUrl} requires --allow-production`);
+    result.errors.push(`production-like API URL ${apiUrl} requires --allow-production and separate out-of-band user approval`);
   }
   if (apply && !result.gates.capacity.allowed && result.gates.capacity.reason) {
     result.errors.push(result.gates.capacity.reason);
@@ -708,10 +774,17 @@ export async function runSessionBackfill(opts: BackfillRunOptions = {}): Promise
   }
 
   const pending = selected.filter((entry) => {
-    if (checkpoint.completed[entry.key]) {
+    const completed = checkpoint.completed[entry.key];
+    if (completed && checkpointEntryMatchesInventory(completed, entry)) {
       result.checkpoint.resumedSkipped++;
       result.applied.skipped++;
       return false;
+    }
+    if (completed) {
+      result.warnings.push(`${entry.key}: quarantined invalid completed checkpoint entry; current inventory will be re-imported`);
+      checkpoint.skipped[entry.key] = checkpointEntry(entry, now, "invalid completed checkpoint entry quarantined before re-import");
+      delete checkpoint.completed[entry.key];
+      writeCheckpoint(checkpointFile, checkpoint, now);
     }
     return true;
   });

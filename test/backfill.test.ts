@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSessionBackfill } from "../src/lib/backfill.js";
@@ -97,7 +97,11 @@ function stagedSession(
 class FakeParser implements SessionParser {
   readonly source: SessionSource = "codex";
 
-  constructor(private readonly byFile: Map<string, ParsedSession | StagedParsedSession>) {}
+  constructor(
+    private readonly byFile: Map<string, ParsedSession | StagedParsedSession>,
+    private readonly incompleteFiles = new Set<string>(),
+    private readonly malformedFiles = new Set<string>(),
+  ) {}
 
   sessionRoots(): string[] {
     return [root];
@@ -116,10 +120,27 @@ class FakeParser implements SessionParser {
     const value = this.byFile.get(filePath);
     if (!value) return { sessions: [] };
     if ("messages" in value) {
-      return { sessions: [value], maxBufferedLineBytes: 7, maxNormalizedBatchRecords: value.messages.length };
+      return {
+        sessions: [value],
+        incompleteTrailingRecord: this.incompleteFiles.has(filePath),
+        malformedRecordCount: this.malformedFiles.has(filePath) ? 1 : 0,
+        maxBufferedLineBytes: 7,
+        maxNormalizedBatchRecords: value.messages.length,
+      };
     }
-    return { sessions: [], stagedSessions: [value], maxBufferedLineBytes: 11, maxNormalizedBatchRecords: 1 };
+    return {
+      sessions: [],
+      stagedSessions: [value],
+      incompleteTrailingRecord: this.incompleteFiles.has(filePath),
+      malformedRecordCount: this.malformedFiles.has(filePath) ? 1 : 0,
+      maxBufferedLineBytes: 11,
+      maxNormalizedBatchRecords: 1,
+    };
   }
+}
+
+class LegacyParser extends FakeParser {
+  parseFileResult = undefined;
 }
 
 function sessionFromImport(input: SessionContentImport): Session {
@@ -256,6 +277,43 @@ describe("session backfill", () => {
     expect(result.errors.some((error) => error.includes("requires --allow-production"))).toBe(true);
   });
 
+  it("treats incomplete trailing rollout records as inventory errors", async () => {
+    const file = join(root, "incomplete.jsonl");
+    const parser = new FakeParser(
+      new Map([[file, parsedSession("incomplete", file, [message("m1", "partial")])]]),
+      new Set([file]),
+    );
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      checkpointPath: join(root, "checkpoint.json"),
+    });
+
+    expect(result.inventory.errors).toBe(1);
+    expect(result.inventory.selectableSessions).toBe(0);
+    expect(result.selection.selectedKeys).toEqual([]);
+    expect(result.errors).toEqual([`codex:${file}: incomplete trailing JSONL record`]);
+  });
+
+  it("treats malformed non-trailing rollout records as inventory errors", async () => {
+    const file = join(root, "malformed-middle.jsonl");
+    const parser = new FakeParser(
+      new Map([[file, parsedSession("malformed", file, [message("m1", "before"), message("m2", "after")])]]),
+      new Set(),
+      new Set([file]),
+    );
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      checkpointPath: join(root, "checkpoint.json"),
+    });
+
+    expect(result.inventory.errors).toBe(1);
+    expect(result.inventory.selectableSessions).toBe(0);
+    expect(result.selection.selectedKeys).toEqual([]);
+    expect(result.errors).toEqual([`codex:${file}: malformed JSONL record count 1`]);
+  });
+
   it("resumes from checkpoints without re-importing completed sessions", async () => {
     const fileA = join(root, "a.jsonl");
     const fileB = join(root, "b.jsonl");
@@ -275,6 +333,7 @@ describe("session backfill", () => {
       confirmApply: "BACKFILL_APPLY",
       allowProduction: true,
       backupCommand: "true",
+      allSources: true,
       maxTotalBytes: 1024 * 1024,
       checkpointPath: checkpoint,
       env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
@@ -292,6 +351,7 @@ describe("session backfill", () => {
       confirmApply: "BACKFILL_APPLY",
       allowProduction: true,
       backupCommand: "true",
+      allSources: true,
       maxTotalBytes: 1024 * 1024,
       checkpointPath: checkpoint,
       env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
@@ -301,6 +361,191 @@ describe("session backfill", () => {
     expect(second.checkpoint.resumedSkipped).toBe(1);
     expect(second.applied.pushed).toBe(1);
     expect(secondStore.imports).toEqual(["codex:b"]);
+  });
+
+  it("quarantines stale completed checkpoints instead of silently skipping selected apply entries", async () => {
+    const file = join(root, "stale.jsonl");
+    const parser = new FakeParser(new Map([[file, parsedSession("stale", file, [message("m1", "current")])]]));
+    const checkpoint = join(root, "checkpoint.json");
+    writeFileSync(
+      checkpoint,
+      `${JSON.stringify({
+        version: 1,
+        createdAt: "2026-07-17T09:00:00.000Z",
+        updatedAt: "2026-07-17T09:00:00.000Z",
+        completed: {
+          "codex:stale": {
+            source: "codex",
+            sourceId: "stale",
+            sourcePath: file,
+            estimatedBytes: 1,
+            messages: 99,
+            toolCalls: 0,
+            updatedAt: "2026-07-17T09:00:00.000Z",
+          },
+        },
+        failed: {},
+        skipped: {},
+      })}\n`,
+    );
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: checkpoint,
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(result.checkpoint.loadedCompleted).toBe(1);
+    expect(result.checkpoint.resumedSkipped).toBe(0);
+    expect(result.applied.pushed).toBe(1);
+    expect(store.imports).toEqual(["codex:stale"]);
+    expect(result.warnings).toEqual([
+      "codex:stale: quarantined invalid completed checkpoint entry; current inventory will be re-imported",
+    ]);
+    const saved = JSON.parse(readFileSync(checkpoint, "utf-8"));
+    expect(saved.completed["codex:stale"].messages).toBe(1);
+  });
+
+  it("requires an explicit apply boundary so omitted selectors cannot import every session", async () => {
+    const fileA = join(root, "a.jsonl");
+    const fileB = join(root, "b.jsonl");
+    const parser = new FakeParser(
+      new Map([
+        [fileA, parsedSession("a", fileA, [message("m1", "first")])],
+        [fileB, parsedSession("b", fileB, [message("m2", "second")])],
+      ]),
+    );
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(result.selection.selectedKeys).toEqual(["codex:a", "codex:b"]);
+    expect(result.gates.backup.ran).toBe(false);
+    expect(result.applied.attempted).toBe(0);
+    expect(store.imports).toEqual([]);
+    expect(result.errors).toContain(
+      "apply requires an explicit boundary: --source plus --pilot, --range-start/--range-end, or --known-id; use --all-sources to acknowledge all non-duplicate sessions",
+    );
+  });
+
+  it("allows all-session apply only with the explicit all-sources acknowledgement", async () => {
+    const fileA = join(root, "a.jsonl");
+    const fileB = join(root, "b.jsonl");
+    const parser = new FakeParser(
+      new Map([
+        [fileA, parsedSession("a", fileA, [message("m1", "first")])],
+        [fileB, parsedSession("b", fileB, [message("m2", "second")])],
+      ]),
+    );
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      allSources: true,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.applied.pushed).toBe(2);
+    expect(store.imports).toEqual(["codex:a", "codex:b"]);
+  });
+
+  it("uses known ids as the selected apply boundary when no pilot or range is supplied", async () => {
+    const fileA = join(root, "a.jsonl");
+    const fileB = join(root, "b.jsonl");
+    const parser = new FakeParser(
+      new Map([
+        [fileA, parsedSession("a", fileA, [message("m1", "first")])],
+        [fileB, parsedSession("b", fileB, [message("m2", "second")])],
+      ]),
+    );
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      source: "codex",
+      knownIds: ["codex:b"],
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(result.selection.selectedKeys).toEqual(["codex:b"]);
+    expect(result.selection.knownIds).toEqual([
+      { source: "codex", sourceId: "b", key: "codex:b", found: true, selected: true, verified: true },
+    ]);
+    expect(result.errors).toEqual([]);
+    expect(store.imports).toEqual(["codex:b"]);
+  });
+
+  it("fails closed when a parser lacks bounded parseFileResult metadata", async () => {
+    const file = join(root, "legacy.jsonl");
+    const parser = new LegacyParser(new Map([[file, parsedSession("legacy", file, [message("m1", "legacy")])]]));
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      checkpointPath: join(root, "checkpoint.json"),
+    });
+
+    expect(result.inventory.errors).toBe(1);
+    expect(result.inventory.selectableSessions).toBe(0);
+    expect(result.errors).toEqual([`codex:${file}: parser does not expose bounded parseFileResult for safe backfill`]);
+  });
+
+  it("runs backup preflight through the platform shell instead of a hard-coded bash path", async () => {
+    const file = join(root, "portable-backup.jsonl");
+    const parser = new FakeParser(new Map([[file, parsedSession("portable-backup", file, [message("m1", "hello")])]]));
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: `"${process.execPath}" --version`,
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(result.gates.backup.ran).toBe(true);
+    expect(result.gates.backup.exitCode).toBe(0);
+    expect(result.errors).toEqual([]);
+    expect(store.imports).toEqual(["codex:portable-backup"]);
   });
 
   it("materializes staged sessions with the configured bounded batch size", async () => {
@@ -328,6 +573,8 @@ describe("session backfill", () => {
       confirmApply: "BACKFILL_APPLY",
       allowProduction: true,
       backupCommand: "true",
+      source: "codex",
+      pilot: 1,
       batchSize: 2,
       maxTotalBytes: 1024 * 1024,
       checkpointPath: join(root, "checkpoint.json"),

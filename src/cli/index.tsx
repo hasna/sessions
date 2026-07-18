@@ -1212,6 +1212,7 @@ interface BackfillCliOptions {
   pilot?: string;
   rangeStart?: string;
   rangeEnd?: string;
+  allSources?: boolean;
   knownId?: string[];
   checkpoint?: string;
   backupCommand?: string;
@@ -1243,12 +1244,13 @@ program
   .description("Inventory or explicitly apply a bounded, checkpointed self_hosted session-content backfill")
   .option("--apply", "Apply the selected backfill to the self_hosted /v1 API (default is inventory/dry-run)")
   .option("--confirm-apply <token>", "Required with --apply; pass BACKFILL_APPLY")
-  .option("--allow-production", "Allow applying to production-like hasna.xyz API URLs")
+  .option("--allow-production", "Permit production-like hasna.xyz API URLs after separate out-of-band user approval")
   .option("-s, --source <source>", "Only backfill one provider: claude, codex, codewith, gemini")
   .option("--pilot <n>", "Deterministically select the first n sessions after sorting by source/source_id")
   .option("--range-start <source:id>", "Inclusive deterministic range start")
   .option("--range-end <source:id>", "Inclusive deterministic range end")
-  .option("--known-id <source:id>", "Require and verify a known source-qualified id", collectRepeatableOption, [])
+  .option("--all-sources", "With --apply, explicitly acknowledge selecting every non-duplicate inventoried session")
+  .option("--known-id <source:id>", "Require and verify a known source-qualified id; with --apply and no pilot/range, selects only known ids", collectRepeatableOption, [])
   .option("--batch-size <n>", "Maximum staged child records materialized per parser batch", "128")
   .option("--concurrency <n>", "Maximum concurrent session payload imports", "1")
   .option("--max-session-bytes <n>", "Fail closed if any selected session estimate exceeds this many bytes", String(64 * 1024 * 1024))
@@ -1267,6 +1269,7 @@ program
         pilot: opts.pilot == null ? undefined : parseNonNegativeIntOption(opts.pilot, 0, "--pilot"),
         rangeStart: opts.rangeStart,
         rangeEnd: opts.rangeEnd,
+        allSources: Boolean(opts.allSources),
         knownIds: opts.knownId ?? [],
         batchSize: parsePositiveIntOption(opts.batchSize, 128, "--batch-size"),
         concurrency: parsePositiveIntOption(opts.concurrency, 1, "--concurrency"),

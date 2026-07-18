@@ -424,6 +424,32 @@ describe("CodexParser", () => {
     expect(result.incompleteTrailingRecord).toBe(true);
     expect(result.sessions[0].messages.map((m) => m.content)).toEqual(["complete"]);
   });
+
+  it("accounts for malformed non-trailing rollout records without silently dropping them", () => {
+    const file = join(root, "codex", "sessions", "2026", "05", "02", "rollout-2026-05-02T15-00-00-malformed.jsonl");
+    writeFileSync(
+      file,
+      [
+        CODEX_LINES.split("\n")[0],
+        JSON.stringify({
+          timestamp: "2026-05-02T15:00:01Z",
+          type: "response_item",
+          payload: { type: "message", role: "user", content: [{ type: "input_text", text: "before corruption" }] },
+        }),
+        '{"timestamp":"2026-05-02T15:00:02Z","type":"response_item","payload":',
+        JSON.stringify({
+          timestamp: "2026-05-02T15:00:03Z",
+          type: "response_item",
+          payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "after corruption" }] },
+        }),
+      ].join("\n"),
+    );
+
+    const result = new CodexParser().parseFileResult(file);
+    expect(result.incompleteTrailingRecord).toBe(false);
+    expect(result.malformedRecordCount).toBe(1);
+    expect(result.sessions[0].messages.map((m) => m.content)).toEqual(["before corruption", "after corruption"]);
+  });
 });
 
 describe("CodewithParser", () => {

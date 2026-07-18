@@ -131,20 +131,21 @@ export class OpenAiRolloutParser implements SessionParser {
       });
     };
 
-    let readResult: { incompleteTrailingRecord: boolean; maxBufferedLineBytes: number };
+    let readResult: { incompleteTrailingRecord: boolean; malformedRecordCount: number; maxBufferedLineBytes: number };
     try {
       readResult = readJsonlRecords(filePath, parseRecord);
     } catch (error) {
       sink.cleanup();
       throw error;
     }
-    const { incompleteTrailingRecord, maxBufferedLineBytes } = readResult;
+    const { incompleteTrailingRecord, malformedRecordCount, maxBufferedLineBytes } = readResult;
 
     if (sink.messageCount === 0 && sink.toolCallCount === 0) {
       sink.cleanup();
       return {
         sessions: [],
         incompleteTrailingRecord,
+        malformedRecordCount,
         maxBufferedLineBytes,
         maxNormalizedBatchRecords: sink.maxNormalizedBatchRecords,
       };
@@ -181,6 +182,7 @@ export class OpenAiRolloutParser implements SessionParser {
     return {
       ...parsed,
       incompleteTrailingRecord,
+      malformedRecordCount,
       maxBufferedLineBytes,
       maxNormalizedBatchRecords: sink.maxNormalizedBatchRecords,
     };
@@ -340,12 +342,13 @@ class StagedRolloutSink implements RolloutSink {
 function readJsonlRecords(
   filePath: string,
   onRecord: (record: Record<string, unknown>) => void
-): { incompleteTrailingRecord: boolean; maxBufferedLineBytes: number } {
+): { incompleteTrailingRecord: boolean; malformedRecordCount: number; maxBufferedLineBytes: number } {
   const fd = openSync(filePath, "r");
   const decoder = new StringDecoder("utf8");
   const buffer = Buffer.allocUnsafe(READ_BUFFER_BYTES);
   let pending = "";
   let incompleteTrailingRecord = false;
+  let malformedRecordCount = 0;
   let maxBufferedLineBytes = 0;
 
   const parseLine = (line: string, trailing: boolean) => {
@@ -356,6 +359,7 @@ function readJsonlRecords(
       onRecord(JSON.parse(trimmed) as Record<string, unknown>);
     } catch {
       if (trailing) incompleteTrailingRecord = true;
+      else malformedRecordCount++;
     }
   };
 
@@ -383,5 +387,5 @@ function readJsonlRecords(
     closeSync(fd);
   }
 
-  return { incompleteTrailingRecord, maxBufferedLineBytes };
+  return { incompleteTrailingRecord, malformedRecordCount, maxBufferedLineBytes };
 }

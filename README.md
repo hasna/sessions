@@ -240,9 +240,14 @@ sessions backfill \
 ```
 
 Live apply is fail-closed: it requires a self-hosted API store, an explicit
-capacity ceiling, a successful backup hook, durable checkpointing, and the
-literal confirmation token. Production-like `hasna.xyz` API URLs also require
-`--allow-production`.
+selection boundary (`--source` plus `--pilot`, a range, or a `--known-id`; or
+the conspicuous `--all-sources` acknowledgement), a capacity ceiling, a
+successful backup hook, durable checkpointing, and the literal confirmation
+token. Production-like `hasna.xyz` API URLs also require `--allow-production`,
+but that flag is only a technical gate: actual production apply still requires
+separate out-of-band user approval before running the command.
+When `--known-id` is the only apply boundary beyond `--source`, only those known
+IDs are selected.
 
 ```bash
 sessions backfill \
