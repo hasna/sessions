@@ -1,7 +1,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { getClaudeProjectsDir } from "../paths.js";
-import type { SessionParser } from "./types.js";
+import type { ParseFileOptions, ParseFileResult, SessionParser } from "./types.js";
 import { flattenContent } from "./types.js";
 import { isInstructionPreamble, normalizeSessionTitle } from "../session-text.js";
 import type {
@@ -205,5 +206,37 @@ export class ClaudeParser implements SessionParser {
     };
 
     return [{ session, messages, toolCalls }];
+  }
+
+  parseFileResult(filePath: string, opts: ParseFileOptions = {}): ParseFileResult {
+    if (!existsSync(filePath)) return { sessions: [] };
+    const raw = readFileSync(filePath);
+    if (opts.maxBufferedBytes !== undefined && raw.byteLength > opts.maxBufferedBytes) {
+      throw new Error(`source file ${raw.byteLength} exceeds max buffered bytes ${opts.maxBufferedBytes}`);
+    }
+    const text = raw.toString("utf-8");
+    const lines = text.split("\n").filter((line) => line.trim());
+    let malformedRecordCount = 0;
+    let incompleteTrailingRecord = false;
+    let maxBufferedLineBytes = 0;
+    for (const [index, line] of lines.entries()) {
+      maxBufferedLineBytes = Math.max(maxBufferedLineBytes, Buffer.byteLength(line));
+      try {
+        JSON.parse(line);
+      } catch {
+        const trailing = index === lines.length - 1 && !text.endsWith("\n");
+        if (trailing) incompleteTrailingRecord = true;
+        else malformedRecordCount++;
+      }
+    }
+    const sessions = this.parseFile(filePath);
+    return {
+      sessions,
+      incompleteTrailingRecord,
+      malformedRecordCount,
+      maxBufferedLineBytes,
+      maxNormalizedBatchRecords: sessions.reduce((max, session) => Math.max(max, session.messages.length, session.toolCalls.length), 0),
+      sourceContentDigest: `sha256:${createHash("sha256").update(raw).digest("hex")}`,
+    };
   }
 }

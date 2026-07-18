@@ -1,7 +1,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
-import type { SessionParser } from "./types.js";
+import type { ParseFileOptions, ParseFileResult, SessionParser } from "./types.js";
 import type {
   MessageInsert,
   MessageRole,
@@ -118,5 +119,34 @@ export class GeminiParser implements SessionParser {
     }
 
     return sessions;
+  }
+
+  parseFileResult(filePath: string, opts: ParseFileOptions = {}): ParseFileResult {
+    if (!existsSync(filePath)) return { sessions: [] };
+    const raw = readFileSync(filePath);
+    if (opts.maxBufferedBytes !== undefined && raw.byteLength > opts.maxBufferedBytes) {
+      throw new Error(`source file ${raw.byteLength} exceeds max buffered bytes ${opts.maxBufferedBytes}`);
+    }
+    try {
+      JSON.parse(raw.toString("utf-8"));
+    } catch {
+      return {
+        sessions: [],
+        incompleteTrailingRecord: false,
+        malformedRecordCount: 1,
+        maxBufferedLineBytes: raw.byteLength,
+        maxNormalizedBatchRecords: 0,
+        sourceContentDigest: `sha256:${createHash("sha256").update(raw).digest("hex")}`,
+      };
+    }
+    const sessions = this.parseFile(filePath);
+    return {
+      sessions,
+      incompleteTrailingRecord: false,
+      malformedRecordCount: 0,
+      maxBufferedLineBytes: raw.byteLength,
+      maxNormalizedBatchRecords: sessions.reduce((max, session) => Math.max(max, session.messages.length, session.toolCalls.length), 0),
+      sourceContentDigest: `sha256:${createHash("sha256").update(raw).digest("hex")}`,
+    };
   }
 }

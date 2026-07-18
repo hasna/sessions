@@ -247,7 +247,10 @@ token. Production-like `hasna.xyz` API URLs also require `--allow-production`,
 but that flag is only a technical gate: actual production apply still requires
 separate out-of-band user approval before running the command.
 When `--known-id` is the only apply boundary beyond `--source`, only those known
-IDs are selected.
+IDs are selected. Do not combine `--all-sources` with `--known-id`: that mixes a
+broad acknowledgement with a narrow selector and fails closed. If a production
+deployment uses a non-`hasna.xyz` alias, set `HASNA_SESSIONS_PRODUCTION=1` so the
+same explicit production gate applies.
 
 ```bash
 sessions backfill \

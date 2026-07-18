@@ -178,8 +178,11 @@ function sessionFromImport(input: SessionContentImport): Session {
   };
 }
 
-function fakeStore(options: { failOn?: string } = {}): SessionStore & { imports: string[] } {
+function fakeStore(options: { failOn?: string; existing?: SessionContentImport[] } = {}): SessionStore & { imports: string[] } {
   const imported = new Map<string, Session>();
+  for (const input of options.existing ?? []) {
+    imported.set(`${input.session.source}:${input.session.source_id}`, sessionFromImport(input));
+  }
   const store = {
     mode: "cloud" as const,
     imports: [] as string[],
@@ -314,7 +317,7 @@ describe("session backfill", () => {
     expect(result.errors).toEqual([`codex:${file}: malformed JSONL record count 1`]);
   });
 
-  it("resumes from checkpoints without re-importing completed sessions", async () => {
+  it("resumes from checkpoints only when the destination verifies completed content identity", async () => {
     const fileA = join(root, "a.jsonl");
     const fileB = join(root, "b.jsonl");
     const parser = new FakeParser(
@@ -325,7 +328,7 @@ describe("session backfill", () => {
     );
     const checkpoint = join(root, "checkpoint.json");
 
-    const firstStore = fakeStore({ failOn: "codex:b" });
+    const firstStore = fakeStore();
     const first = await runSessionBackfill({
       parsers: [parser],
       store: firstStore,
@@ -339,11 +342,12 @@ describe("session backfill", () => {
       env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
     });
 
-    expect(first.applied.pushed).toBe(1);
-    expect(first.applied.failed).toBe(1);
+    expect(first.applied.pushed).toBe(2);
+    expect(first.applied.failed).toBe(0);
     expect(firstStore.imports).toEqual(["codex:a", "codex:b"]);
 
-    const secondStore = fakeStore();
+    const secondStore = firstStore;
+    secondStore.imports.length = 0;
     const second = await runSessionBackfill({
       parsers: [parser],
       store: secondStore,
@@ -357,10 +361,69 @@ describe("session backfill", () => {
       env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
     });
 
-    expect(second.checkpoint.loadedCompleted).toBe(1);
-    expect(second.checkpoint.resumedSkipped).toBe(1);
-    expect(second.applied.pushed).toBe(1);
-    expect(secondStore.imports).toEqual(["codex:b"]);
+    expect(second.checkpoint.loadedCompleted).toBe(2);
+    expect(second.checkpoint.resumedSkipped).toBe(2);
+    expect(second.applied.pushed).toBe(0);
+    expect(secondStore.imports).toEqual([]);
+  });
+
+  it("does not let a hand-authored matching checkpoint suppress import without destination proof", async () => {
+    const file = join(root, "fabricated.jsonl");
+    const parser = new FakeParser(new Map([[file, parsedSession("fabricated", file, [message("m1", "current")])]]));
+    const checkpoint = join(root, "checkpoint.json");
+
+    const inventory = await runSessionBackfill({
+      parsers: [parser],
+      source: "codex",
+      pilot: 1,
+      checkpointPath: checkpoint,
+    });
+    expect(inventory.errors).toEqual([]);
+    const store = fakeStore();
+    const entry = {
+      source: "codex",
+      sourceId: "fabricated",
+      sourcePath: file,
+      estimatedBytes: inventory.selection.selectedEstimatedBytes,
+      messages: 1,
+      toolCalls: 0,
+      sourceContentDigest: "unknown-to-attacker",
+      runConfigDigest: "unknown-to-attacker",
+      updatedAt: "2026-07-17T09:00:00.000Z",
+    };
+    writeFileSync(
+      checkpoint,
+      `${JSON.stringify({
+        version: 2,
+        createdAt: "2026-07-17T09:00:00.000Z",
+        updatedAt: "2026-07-17T09:00:00.000Z",
+        completed: { "codex:fabricated": entry },
+        failed: {},
+        skipped: {},
+      })}\n`,
+    );
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: checkpoint,
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(result.checkpoint.loadedCompleted).toBe(1);
+    expect(result.checkpoint.resumedSkipped).toBe(0);
+    expect(result.applied.pushed).toBe(1);
+    expect(store.imports).toEqual(["codex:fabricated"]);
+    expect(result.warnings).toEqual([
+      "codex:fabricated: quarantined invalid completed checkpoint entry; current inventory will be re-imported",
+    ]);
   });
 
   it("quarantines stale completed checkpoints instead of silently skipping selected apply entries", async () => {
@@ -404,13 +467,11 @@ describe("session backfill", () => {
       env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
     });
 
-    expect(result.checkpoint.loadedCompleted).toBe(1);
+    expect(result.checkpoint.loadedCompleted).toBe(0);
     expect(result.checkpoint.resumedSkipped).toBe(0);
     expect(result.applied.pushed).toBe(1);
     expect(store.imports).toEqual(["codex:stale"]);
-    expect(result.warnings).toEqual([
-      "codex:stale: quarantined invalid completed checkpoint entry; current inventory will be re-imported",
-    ]);
+    expect(result.warnings).toEqual([]);
     const saved = JSON.parse(readFileSync(checkpoint, "utf-8"));
     expect(saved.completed["codex:stale"].messages).toBe(1);
   });
@@ -474,6 +535,31 @@ describe("session backfill", () => {
     expect(result.errors).toEqual([]);
     expect(result.applied.pushed).toBe(2);
     expect(store.imports).toEqual(["codex:a", "codex:b"]);
+  });
+
+  it("fails closed on contradictory all-sources and known-id selectors", async () => {
+    const fileA = join(root, "a.jsonl");
+    const parser = new FakeParser(new Map([[fileA, parsedSession("a", fileA, [message("m1", "first")])]]));
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      allSources: true,
+      knownIds: ["codex:a"],
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(result.gates.backup.ran).toBe(false);
+    expect(result.applied.attempted).toBe(0);
+    expect(store.imports).toEqual([]);
+    expect(result.errors).toContain("apply selectors are contradictory: --all-sources cannot be combined with --known-id");
   });
 
   it("uses known ids as the selected apply boundary when no pilot or range is supplied", async () => {
@@ -645,5 +731,57 @@ describe("session backfill", () => {
     expect(payload.inventory.sessions).toBe(1);
     expect(payload.selection.selectedKeys).toEqual(["codex:cli-backfill"]);
     expect(payload.gates.backup.ran).toBe(false);
+  });
+
+  it("enforces the streaming max-session byte cap before buffering a huge JSONL line", async () => {
+    const codexDir = join(root, "codex", "sessions", "2026", "07", "17");
+    mkdirSync(codexDir, { recursive: true });
+    const file = join(codexDir, "rollout-2026-07-17T10-00-00-huge-line.jsonl");
+    writeFileSync(file, JSON.stringify({ timestamp: "2026-07-17T10:00:00Z", type: "session_meta", payload: { id: "huge-line" } }));
+    writeFileSync(file, `\n${"x".repeat(2 * 1024 * 1024)}\n`, { flag: "a" });
+    const { CodexParser } = await import("../src/lib/ingest/codex.js");
+    const previousCodexPath = process.env.CODEX_PATH;
+    process.env.CODEX_PATH = join(root, "codex");
+
+    try {
+      const result = await runSessionBackfill({
+        parsers: [new CodexParser()],
+        maxSessionBytes: 1024,
+        checkpointPath: join(root, "checkpoint.json"),
+        env: {},
+      });
+
+      expect(result.inventory.errors).toBe(1);
+      expect(result.inventory.maxBufferedLineBytes).toBe(0);
+      expect(result.selection.selected).toBe(0);
+      expect(result.errors[0]).toContain("JSONL pending line exceeds max buffered bytes 1024");
+    } finally {
+      if (previousCodexPath === undefined) delete process.env.CODEX_PATH;
+      else process.env.CODEX_PATH = previousCodexPath;
+    }
+  });
+
+  it("treats explicit production declarations as production-like even for alias hosts", async () => {
+    const file = join(root, "one.jsonl");
+    const parser = new FakeParser(new Map([[file, parsedSession("one", file, [message("m1", "hello")])]]));
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      backupCommand: "true",
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: { HASNA_SESSIONS_API_URL: "https://sessions-prod.example.test", HASNA_SESSIONS_PRODUCTION: "1" },
+    });
+
+    expect(result.gates.production.productionLike).toBe(true);
+    expect(result.gates.production.allowed).toBe(false);
+    expect(result.applied.attempted).toBe(0);
+    expect(store.imports).toEqual([]);
   });
 });

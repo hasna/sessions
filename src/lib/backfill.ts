@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { SessionParser } from "./ingest/types.js";
 import { listParsers } from "./ingest/index.js";
@@ -17,7 +18,7 @@ import type {
 } from "../types/index.js";
 import { isSessionSource } from "../types/index.js";
 
-const CHECKPOINT_VERSION = 1;
+const CHECKPOINT_VERSION = 2;
 const DEFAULT_BATCH_SIZE = 128;
 const DEFAULT_CONCURRENCY = 1;
 const DEFAULT_MAX_SESSION_BYTES = 64 * 1024 * 1024;
@@ -36,6 +37,8 @@ export interface BackfillInventoryEntry extends BackfillKey {
   estimatedBytes: number;
   maxBufferedLineBytes: number;
   maxNormalizedBatchRecords: number;
+  sourceContentDigest: string;
+  runConfigDigest: string;
   duplicateOf: string | null;
 }
 
@@ -46,6 +49,8 @@ export interface BackfillCheckpointEntry {
   estimatedBytes: number;
   messages: number;
   toolCalls: number;
+  sourceContentDigest: string;
+  runConfigDigest: string;
   updatedAt: string;
   note?: string;
 }
@@ -154,8 +159,8 @@ export interface BackfillRunResult {
 }
 
 type ParsedOrStagedSession =
-  | { kind: "parsed"; parsed: ParsedSession; maxBufferedLineBytes: number; maxNormalizedBatchRecords: number }
-  | { kind: "staged"; staged: StagedParsedSession; maxBufferedLineBytes: number; maxNormalizedBatchRecords: number };
+  | { kind: "parsed"; parsed: ParsedSession; maxBufferedLineBytes: number; maxNormalizedBatchRecords: number; sourceContentDigest: string }
+  | { kind: "staged"; staged: StagedParsedSession; maxBufferedLineBytes: number; maxNormalizedBatchRecords: number; sourceContentDigest: string };
 
 interface MaterializedSession {
   input: SessionContentImport;
@@ -186,6 +191,10 @@ function nonNegativeInt(value: number | undefined, fallback: number, name: strin
 
 function byteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value));
+}
+
+function sha256Json(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
 
 function snapshotFile(file: string): FileSnapshot | null {
@@ -238,7 +247,20 @@ function readCheckpoint(path: string, now: () => Date): BackfillCheckpoint {
   if (!existsSync(path)) return emptyCheckpoint(now);
   const parsed = JSON.parse(readFileSync(path, "utf-8")) as BackfillCheckpoint;
   if (parsed.version !== CHECKPOINT_VERSION) {
-    throw new Error(`unsupported backfill checkpoint version at ${path}`);
+    return {
+      ...emptyCheckpoint(now),
+      skipped: Object.fromEntries(
+        Object.entries(parsed.completed ?? {}).map(([key, value]) => [
+          key,
+          {
+            ...value,
+            sourceContentDigest: "unsupported-checkpoint-version",
+            runConfigDigest: "unsupported-checkpoint-version",
+            note: `unsupported checkpoint version ${String(parsed.version)} ignored before re-import`,
+          },
+        ]),
+      ),
+    };
   }
   return {
     ...emptyCheckpoint(now),
@@ -247,19 +269,6 @@ function readCheckpoint(path: string, now: () => Date): BackfillCheckpoint {
     failed: parsed.failed ?? {},
     skipped: parsed.skipped ?? {},
   };
-}
-
-function checkpointEntryMatchesInventory(checkpoint: BackfillCheckpointEntry, entry: BackfillInventoryEntry): boolean {
-  return (
-    checkpoint.source === entry.source &&
-    checkpoint.sourceId === entry.sourceId &&
-    checkpoint.sourcePath === entry.sourcePath &&
-    checkpoint.estimatedBytes === entry.estimatedBytes &&
-    checkpoint.messages === entry.messageCount &&
-    checkpoint.toolCalls === entry.toolCallCount &&
-    typeof checkpoint.updatedAt === "string" &&
-    !Number.isNaN(Date.parse(checkpoint.updatedAt))
-  );
 }
 
 function writeCheckpoint(path: string, checkpoint: BackfillCheckpoint, now: () => Date): void {
@@ -278,6 +287,8 @@ function checkpointEntry(entry: BackfillInventoryEntry, now: () => Date, note?: 
     estimatedBytes: entry.estimatedBytes,
     messages: entry.messageCount,
     toolCalls: entry.toolCallCount,
+    sourceContentDigest: entry.sourceContentDigest,
+    runConfigDigest: entry.runConfigDigest,
     updatedAt: nowIso(now),
     note,
   };
@@ -320,8 +331,30 @@ function estimateStaged(staged: StagedParsedSession, batchSize: number): { bytes
   return { bytes, maxBatchRecords };
 }
 
-function entryFromParsed(parsed: ParsedSession, maxBufferedLineBytes: number, maxNormalizedBatchRecords: number): BackfillInventoryEntry {
+function bindRunConfig(entry: Omit<BackfillInventoryEntry, "runConfigDigest" | "duplicateOf">): BackfillInventoryEntry {
   return {
+    ...entry,
+    runConfigDigest: sha256Json({
+      version: CHECKPOINT_VERSION,
+      source: entry.source,
+      sourceId: entry.sourceId,
+      sourcePath: entry.sourcePath,
+      messageCount: entry.messageCount,
+      toolCallCount: entry.toolCallCount,
+      estimatedBytes: entry.estimatedBytes,
+      sourceContentDigest: entry.sourceContentDigest,
+    }),
+    duplicateOf: null,
+  };
+}
+
+function entryFromParsed(
+  parsed: ParsedSession,
+  maxBufferedLineBytes: number,
+  maxNormalizedBatchRecords: number,
+  sourceContentDigest: string,
+): BackfillInventoryEntry {
+  return bindRunConfig({
     source: parsed.session.source,
     sourceId: parsed.session.source_id,
     key: sessionKey(parsed.session.source, parsed.session.source_id),
@@ -331,8 +364,8 @@ function entryFromParsed(parsed: ParsedSession, maxBufferedLineBytes: number, ma
     estimatedBytes: estimateParsed(parsed),
     maxBufferedLineBytes,
     maxNormalizedBatchRecords,
-    duplicateOf: null,
-  };
+    sourceContentDigest,
+  });
 }
 
 function entryFromStaged(
@@ -340,9 +373,10 @@ function entryFromStaged(
   batchSize: number,
   maxBufferedLineBytes: number,
   maxNormalizedBatchRecords: number,
+  sourceContentDigest: string,
 ): BackfillInventoryEntry {
   const estimate = estimateStaged(staged, batchSize);
-  return {
+  return bindRunConfig({
     source: staged.session.source,
     sourceId: staged.session.source_id,
     key: sessionKey(staged.session.source, staged.session.source_id),
@@ -352,8 +386,8 @@ function entryFromStaged(
     estimatedBytes: estimate.bytes,
     maxBufferedLineBytes,
     maxNormalizedBatchRecords: Math.max(maxNormalizedBatchRecords, estimate.maxBatchRecords),
-    duplicateOf: null,
-  };
+    sourceContentDigest,
+  });
 }
 
 function cleanupParsedSessions(sessions: ParsedOrStagedSession[]): void {
@@ -362,12 +396,12 @@ function cleanupParsedSessions(sessions: ParsedOrStagedSession[]): void {
   }
 }
 
-function parseFileSessions(parser: SessionParser, file: string): ParsedOrStagedSession[] {
+function parseFileSessions(parser: SessionParser, file: string, maxBufferedBytes: number): ParsedOrStagedSession[] {
   const before = snapshotFile(file);
   if (!parser.parseFileResult) {
     throw new Error("parser does not expose bounded parseFileResult for safe backfill");
   }
-  const result = parser.parseFileResult(file, { preferStaging: true });
+  const result = parser.parseFileResult(file, { preferStaging: true, maxBufferedBytes });
   const stagedSessions = result.stagedSessions ?? [];
   if ((result.malformedRecordCount ?? 0) > 0) {
     for (const staged of stagedSessions) staged.cleanup();
@@ -387,12 +421,25 @@ function parseFileSessions(parser: SessionParser, file: string): ParsedOrStagedS
     throw new Error("file changed during parsing");
   }
   const out: ParsedOrStagedSession[] = [];
+  const sourceContentDigest =
+    result.sourceContentDigest ??
+    sha256Json({
+      file,
+      sessions: result.sessions,
+      staged: stagedSessions.map((staged) => ({
+        source: staged.session.source,
+        sourceId: staged.session.source_id,
+        messages: staged.messageCount,
+        toolCalls: staged.toolCallCount,
+      })),
+    });
   for (const parsed of result.sessions) {
     out.push({
       kind: "parsed",
       parsed,
       maxBufferedLineBytes: result.maxBufferedLineBytes ?? 0,
       maxNormalizedBatchRecords: result.maxNormalizedBatchRecords ?? Math.max(parsed.messages.length, parsed.toolCalls.length),
+      sourceContentDigest,
     });
   }
   for (const staged of stagedSessions) {
@@ -401,6 +448,7 @@ function parseFileSessions(parser: SessionParser, file: string): ParsedOrStagedS
       staged,
       maxBufferedLineBytes: result.maxBufferedLineBytes ?? 0,
       maxNormalizedBatchRecords: result.maxNormalizedBatchRecords ?? staged.maxNormalizedBatchRecords,
+      sourceContentDigest,
     });
   }
   return out;
@@ -409,6 +457,7 @@ function parseFileSessions(parser: SessionParser, file: string): ParsedOrStagedS
 function inventoryParsers(
   parsers: SessionParser[],
   batchSize: number,
+  maxBufferedBytes: number,
 ): { entries: BackfillInventoryEntry[]; files: number; errors: string[] } {
   const entries: BackfillInventoryEntry[] = [];
   const errors: string[] = [];
@@ -419,12 +468,12 @@ function inventoryParsers(
     for (const file of parserFiles) {
       let sessions: ParsedOrStagedSession[] = [];
       try {
-        sessions = parseFileSessions(parser, file);
+        sessions = parseFileSessions(parser, file, maxBufferedBytes);
         for (const session of sessions) {
           if (session.kind === "parsed") {
-            entries.push(entryFromParsed(session.parsed, session.maxBufferedLineBytes, session.maxNormalizedBatchRecords));
+            entries.push(entryFromParsed(session.parsed, session.maxBufferedLineBytes, session.maxNormalizedBatchRecords, session.sourceContentDigest));
           } else {
-            entries.push(entryFromStaged(session.staged, batchSize, session.maxBufferedLineBytes, session.maxNormalizedBatchRecords));
+            entries.push(entryFromStaged(session.staged, batchSize, session.maxBufferedLineBytes, session.maxNormalizedBatchRecords, session.sourceContentDigest));
           }
         }
       } catch (error) {
@@ -508,22 +557,57 @@ function materializeEntry(
   parsers: SessionParser[],
   entry: BackfillInventoryEntry,
   batchSize: number,
+  maxBufferedBytes: number,
 ): MaterializedSession {
   const parser = parsers.find((candidate) => candidate.source === entry.source);
   if (!parser) throw new Error(`no parser registered for ${entry.source}`);
   if (!entry.sourcePath) throw new Error(`${entry.key}: no source path available`);
   let sessions: ParsedOrStagedSession[] = [];
   try {
-    sessions = parseFileSessions(parser, entry.sourcePath);
+    sessions = parseFileSessions(parser, entry.sourcePath, maxBufferedBytes);
     const match = sessions.find((session) => {
       const candidate = session.kind === "parsed" ? session.parsed.session : session.staged.session;
       return candidate.source === entry.source && candidate.source_id === entry.sourceId;
     });
     if (!match) throw new Error(`${entry.key}: source file no longer contains this session`);
-    return match.kind === "parsed" ? materializeParsed(match.parsed) : materializeStaged(match.staged, batchSize);
+    const materialized = match.kind === "parsed" ? materializeParsed(match.parsed) : materializeStaged(match.staged, batchSize);
+    materialized.input.session.metadata = {
+      ...(materialized.input.session.metadata ?? {}),
+      backfill: {
+        version: CHECKPOINT_VERSION,
+        sourceContentDigest: entry.sourceContentDigest,
+        runConfigDigest: entry.runConfigDigest,
+      },
+    };
+    return materialized;
   } finally {
     cleanupParsedSessions(sessions);
   }
+}
+
+async function completedCheckpointHasVerifiedDestination(
+  store: SessionStore,
+  entry: BackfillInventoryEntry,
+): Promise<boolean> {
+  const session = await store.get(entry.sourceId, { source: entry.source });
+  const backfill = session?.metadata?.backfill as Record<string, unknown> | undefined;
+  const identityMatches = Boolean(
+    session &&
+      session.source === entry.source &&
+      session.source_id === entry.sourceId &&
+      session.message_count === entry.messageCount &&
+      session.tool_call_count === entry.toolCallCount,
+  );
+  if (!identityMatches) return false;
+  if (
+    backfill &&
+      backfill?.version === CHECKPOINT_VERSION &&
+      backfill?.sourceContentDigest === entry.sourceContentDigest &&
+      backfill?.runConfigDigest === entry.runConfigDigest
+  ) {
+    return true;
+  }
+  return session?.source_path === entry.sourcePath;
 }
 
 function runBackupCommand(command: string | undefined, apply: boolean): BackfillRunResult["gates"]["backup"] {
@@ -567,7 +651,8 @@ function runBackupCommand(command: string | undefined, apply: boolean): Backfill
   };
 }
 
-function isProductionLikeUrl(raw: string | undefined): boolean {
+function isProductionLikeUrl(raw: string | undefined, env: Record<string, string | undefined> = process.env): boolean {
+  if (env.HASNA_SESSIONS_PRODUCTION === "1" || env.HASNA_SESSIONS_PRODUCTION === "true") return true;
   if (!raw) return false;
   try {
     const host = new URL(raw).hostname.toLowerCase();
@@ -606,7 +691,7 @@ function createResult(
   const selectedEstimatedBytes = selected.reduce((sum, entry) => sum + entry.estimatedBytes, 0);
   const largestSessionBytes = entries.reduce((max, entry) => Math.max(max, entry.estimatedBytes), 0);
   const selectedLargestSessionBytes = selected.reduce((max, entry) => Math.max(max, entry.estimatedBytes), 0);
-  const productionLike = isProductionLikeUrl(apiUrl ?? undefined);
+  const productionLike = isProductionLikeUrl(apiUrl ?? undefined, env);
   const capacityReason =
     apply && maxTotalBytes === null
       ? "apply requires --max-total-bytes so the capacity gate is explicit"
@@ -621,7 +706,11 @@ function createResult(
   const hasRangeBoundary = Boolean(opts.rangeStart || opts.rangeEnd);
   const hasPilotBoundary = opts.pilot != null;
   const hasKnownIdBoundary = known.length > 0;
-  const applyBoundaryAllowed = !apply || (hasSourceBoundary && (hasRangeBoundary || hasPilotBoundary || hasKnownIdBoundary)) || Boolean(opts.allSources);
+  const contradictorySelectors = Boolean(opts.allSources && known.length > 0);
+  const applyBoundaryAllowed =
+    !apply ||
+    (!contradictorySelectors &&
+      ((hasSourceBoundary && (hasRangeBoundary || hasPilotBoundary || hasKnownIdBoundary)) || Boolean(opts.allSources)));
   const capacityAllowed = capacityReason === null;
   const backupPreflightAllowed = apply && confirmationSatisfied && productionAllowed && applyBoundaryAllowed && capacityAllowed;
   const backup = backupPreflightAllowed
@@ -714,6 +803,9 @@ function createResult(
   if (apply && !applyBoundaryAllowed) {
     result.errors.push("apply requires an explicit boundary: --source plus --pilot, --range-start/--range-end, or --known-id; use --all-sources to acknowledge all non-duplicate sessions");
   }
+  if (apply && contradictorySelectors) {
+    result.errors.push("apply selectors are contradictory: --all-sources cannot be combined with --known-id");
+  }
   if (apply && !result.gates.production.allowed) {
     result.errors.push(`production-like API URL ${apiUrl} requires --allow-production and separate out-of-band user approval`);
   }
@@ -749,7 +841,7 @@ export async function runSessionBackfill(opts: BackfillRunOptions = {}): Promise
   const parsers = selectParsers(opts);
   const checkpointFile = checkpointPath(opts.checkpointPath);
   const checkpoint = readCheckpoint(checkpointFile, now);
-  const inventory = inventoryParsers(parsers, batchSize);
+  const inventory = inventoryParsers(parsers, batchSize, maxSessionBytes);
   const selected = selectEntries(inventory.entries, opts);
   const result = createResult(
     opts,
@@ -773,12 +865,13 @@ export async function runSessionBackfill(opts: BackfillRunOptions = {}): Promise
     return result;
   }
 
-  const pending = selected.filter((entry) => {
+  const pending: BackfillInventoryEntry[] = [];
+  for (const entry of selected) {
     const completed = checkpoint.completed[entry.key];
-    if (completed && checkpointEntryMatchesInventory(completed, entry)) {
+    if (completed && (await completedCheckpointHasVerifiedDestination(store, entry))) {
       result.checkpoint.resumedSkipped++;
       result.applied.skipped++;
-      return false;
+      continue;
     }
     if (completed) {
       result.warnings.push(`${entry.key}: quarantined invalid completed checkpoint entry; current inventory will be re-imported`);
@@ -786,13 +879,13 @@ export async function runSessionBackfill(opts: BackfillRunOptions = {}): Promise
       delete checkpoint.completed[entry.key];
       writeCheckpoint(checkpointFile, checkpoint, now);
     }
-    return true;
-  });
+    pending.push(entry);
+  }
 
   await runWithConcurrency(pending, concurrency, async (entry) => {
     result.applied.attempted++;
     try {
-      const materialized = materializeEntry(parsers, entry, batchSize);
+      const materialized = materializeEntry(parsers, entry, batchSize, maxSessionBytes);
       result.applied.maxMaterializedSessionBytes = Math.max(
         result.applied.maxMaterializedSessionBytes,
         materialized.estimatedBytes,

@@ -191,6 +191,31 @@ describe("ClaudeParser", () => {
     expect(files.some((f) => f.endsWith("sess-claude-1.jsonl"))).toBe(true);
   });
 
+  it("exposes bounded parseFileResult metadata for safe backfill", () => {
+    const result = new ClaudeParser().parseFileResult(claudeFile, { maxBufferedBytes: 1024 * 1024 });
+    expect(result.sessions).toHaveLength(1);
+    expect(result.malformedRecordCount).toBe(0);
+    expect(result.incompleteTrailingRecord).toBe(false);
+    expect(result.maxBufferedLineBytes).toBeGreaterThan(0);
+    expect(result.sourceContentDigest).toMatch(/^sha256:/);
+  });
+
+  it("accounts for malformed Claude JSONL records", () => {
+    const file = join(root, "claude", "projects", "-Users-h-Workspace-myapp", "malformed-claude.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: "user", message: { role: "user", content: "before" }, uuid: "u", timestamp: "2026-05-01T10:00:00Z" }),
+        '{"type":"assistant","message":',
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: "after" }, uuid: "a", timestamp: "2026-05-01T10:00:01Z" }),
+      ].join("\n"),
+    );
+
+    const result = new ClaudeParser().parseFileResult(file);
+    expect(result.malformedRecordCount).toBe(1);
+    expect(result.incompleteTrailingRecord).toBe(false);
+  });
+
   it("uses the filename (not the in-file sessionId) as source_id, so files sharing a sessionId don't collapse", () => {
     const dir = join(root, "claude", "projects", "-Users-h-Workspace-shared");
     mkdirSync(dir, { recursive: true });
@@ -508,6 +533,24 @@ describe("GeminiParser", () => {
     expect(g1?.messages).toHaveLength(2);
     expect(g1?.session.title).toBe("hello gemini");
     expect(g1?.session.model_provider).toBe("google");
+  });
+
+  it("exposes bounded parseFileResult metadata for safe backfill", () => {
+    const result = new GeminiParser().parseFileResult(geminiFile, { maxBufferedBytes: 1024 * 1024 });
+    expect(result.sessions).toHaveLength(2);
+    expect(result.malformedRecordCount).toBe(0);
+    expect(result.incompleteTrailingRecord).toBe(false);
+    expect(result.maxBufferedLineBytes).toBeGreaterThan(0);
+    expect(result.sourceContentDigest).toMatch(/^sha256:/);
+  });
+
+  it("accounts for malformed Gemini logs", () => {
+    const file = join(root, "gemini", "tmp", "abc123hash", "logs.json");
+    writeFileSync(file, "{not valid json");
+    const result = new GeminiParser().parseFileResult(file);
+    expect(result.sessions).toHaveLength(0);
+    expect(result.malformedRecordCount).toBe(1);
+    expect(result.incompleteTrailingRecord).toBe(false);
   });
 });
 
