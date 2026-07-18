@@ -721,6 +721,8 @@ function productionTargetDescription(opts: BackfillRunOptions, apiUrl: string | 
   return "target";
 }
 
+const API_URL_ENV_KEYS = ["HASNA_SESSIONS_API_URL", "SESSIONS_API_URL"];
+
 function firstEnv(env: Record<string, string | undefined>, keys: string[]): string | null {
   for (const key of keys) {
     const value = env[key]?.trim();
@@ -736,7 +738,7 @@ function isApplyStoreModeAllowed(opts: BackfillRunOptions, env: Record<string, s
   const storageMode = resolveStorageMode("sessions", env).mode;
   const normalizedMode = (clientMode ?? storageMode).toLowerCase().replace(/-/g, "_");
   const cloudLikeMode = normalizedMode === "cloud" || normalizedMode === "self_hosted" || normalizedMode === "remote" || normalizedMode === "hybrid";
-  const apiUrlPresent = Boolean(firstEnv(env, ["HASNA_SESSIONS_API_URL", "SESSIONS_API_URL"]));
+  const apiUrlPresent = Boolean(firstEnv(env, API_URL_ENV_KEYS));
   const apiKeyPresent = Boolean(firstEnv(env, ["HASNA_SESSIONS_API_KEY", "SESSIONS_API_KEY"]));
   return cloudLikeMode && apiUrlPresent && apiKeyPresent;
 }
@@ -762,7 +764,7 @@ function createResult(
 ): BackfillRunResult {
   const apply = Boolean(opts.apply);
   const env = opts.env ?? process.env;
-  const apiUrl = env.HASNA_SESSIONS_API_URL || null;
+  const apiUrl = firstEnv(env, API_URL_ENV_KEYS);
   const duplicateEntries = entries.filter((entry) => entry.duplicateOf);
   const known = (opts.knownIds ?? []).map(parseBackfillKey);
   const selectedKeys = new Set(selected.map((entry) => entry.key));

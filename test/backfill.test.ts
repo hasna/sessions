@@ -973,6 +973,40 @@ describe("session backfill", () => {
     );
   });
 
+  it("treats SESSIONS_API_URL production aliases as production-like before backup or import", async () => {
+    const file = join(root, "alias-production.jsonl");
+    const marker = join(root, "backup-ran");
+    const parser = new FakeParser(new Map([[file, parsedSession("alias-production", file, [message("m1", "hello")])]]));
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      backupCommand: `"${process.execPath}" -e "require('fs').writeFileSync('${marker}', 'ran')"`,
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: {
+        SESSIONS_MODE: "self_hosted",
+        SESSIONS_API_URL: "https://sessions.hasna.xyz",
+        SESSIONS_API_KEY: "placeholder",
+      },
+    });
+
+    expect(result.gates.production).toEqual({
+      url: "https://sessions.hasna.xyz",
+      productionLike: true,
+      allowed: false,
+    });
+    expect(result.gates.backup.ran).toBe(false);
+    expect(result.applied.attempted).toBe(0);
+    expect(store.imports).toEqual([]);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it("persists completed checkpoints for concurrent imports", async () => {
     const files = ["a", "b", "c"].map((id) => join(root, `${id}.jsonl`));
     const parser = new FakeParser(
