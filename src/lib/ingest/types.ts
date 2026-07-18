@@ -6,6 +6,8 @@ export interface ParseFileOptions {
    * remains array-based for generic callers.
    */
   preferStaging?: boolean;
+  /** Maximum raw JSONL line or whole-file bytes the parser may buffer. */
+  maxBufferedBytes?: number;
 }
 
 export interface ParseFileResult {
@@ -13,10 +15,14 @@ export interface ParseFileResult {
   stagedSessions?: StagedParsedSession[];
   /** True when the file ended with a syntactically incomplete JSON object. */
   incompleteTrailingRecord?: boolean;
+  /** Count of syntactically malformed non-empty JSONL records before the trailing record. */
+  malformedRecordCount?: number;
   /** Largest raw JSONL line buffered while parsing, excluding normalized output. */
   maxBufferedLineBytes?: number;
   /** Largest normalized record batch held before handing data to storage. */
   maxNormalizedBatchRecords?: number;
+  /** Digest of the bounded source content used to build this result. */
+  sourceContentDigest?: string;
 }
 
 export interface SessionParser {

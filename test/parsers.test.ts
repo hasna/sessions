@@ -191,6 +191,50 @@ describe("ClaudeParser", () => {
     expect(files.some((f) => f.endsWith("sess-claude-1.jsonl"))).toBe(true);
   });
 
+  it("exposes bounded parseFileResult metadata for safe backfill", () => {
+    const result = new ClaudeParser().parseFileResult(claudeFile, { maxBufferedBytes: 1024 * 1024 });
+    expect(result.sessions).toHaveLength(1);
+    expect(result.malformedRecordCount).toBe(0);
+    expect(result.incompleteTrailingRecord).toBe(false);
+    expect(result.maxBufferedLineBytes).toBeGreaterThan(0);
+    expect(result.sourceContentDigest).toMatch(/^sha256:/);
+  });
+
+  it("rejects oversized Claude files before buffering while preserving normal bounded parses", () => {
+    const file = join(root, "claude", "projects", "-Users-h-Workspace-myapp", "oversized-claude.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: "user", message: { role: "user", content: "normal" }, uuid: "u", timestamp: "2026-05-01T10:00:00Z" }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: "x".repeat(2048) }, uuid: "a", timestamp: "2026-05-01T10:00:01Z" }),
+      ].join("\n"),
+    );
+
+    expect(() => new ClaudeParser().parseFileResult(file, { maxBufferedBytes: 128 })).toThrow(
+      /exceeds max buffered bytes 128/,
+    );
+    const result = new ClaudeParser().parseFileResult(file, { maxBufferedBytes: 4096 });
+    expect(result.sessions).toHaveLength(1);
+    expect(result.malformedRecordCount).toBe(0);
+    expect(result.sourceContentDigest).toMatch(/^sha256:/);
+  });
+
+  it("accounts for malformed Claude JSONL records", () => {
+    const file = join(root, "claude", "projects", "-Users-h-Workspace-myapp", "malformed-claude.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: "user", message: { role: "user", content: "before" }, uuid: "u", timestamp: "2026-05-01T10:00:00Z" }),
+        '{"type":"assistant","message":',
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: "after" }, uuid: "a", timestamp: "2026-05-01T10:00:01Z" }),
+      ].join("\n"),
+    );
+
+    const result = new ClaudeParser().parseFileResult(file);
+    expect(result.malformedRecordCount).toBe(1);
+    expect(result.incompleteTrailingRecord).toBe(false);
+  });
+
   it("uses the filename (not the in-file sessionId) as source_id, so files sharing a sessionId don't collapse", () => {
     const dir = join(root, "claude", "projects", "-Users-h-Workspace-shared");
     mkdirSync(dir, { recursive: true });
@@ -424,6 +468,32 @@ describe("CodexParser", () => {
     expect(result.incompleteTrailingRecord).toBe(true);
     expect(result.sessions[0].messages.map((m) => m.content)).toEqual(["complete"]);
   });
+
+  it("accounts for malformed non-trailing rollout records without silently dropping them", () => {
+    const file = join(root, "codex", "sessions", "2026", "05", "02", "rollout-2026-05-02T15-00-00-malformed.jsonl");
+    writeFileSync(
+      file,
+      [
+        CODEX_LINES.split("\n")[0],
+        JSON.stringify({
+          timestamp: "2026-05-02T15:00:01Z",
+          type: "response_item",
+          payload: { type: "message", role: "user", content: [{ type: "input_text", text: "before corruption" }] },
+        }),
+        '{"timestamp":"2026-05-02T15:00:02Z","type":"response_item","payload":',
+        JSON.stringify({
+          timestamp: "2026-05-02T15:00:03Z",
+          type: "response_item",
+          payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "after corruption" }] },
+        }),
+      ].join("\n"),
+    );
+
+    const result = new CodexParser().parseFileResult(file);
+    expect(result.incompleteTrailingRecord).toBe(false);
+    expect(result.malformedRecordCount).toBe(1);
+    expect(result.sessions[0].messages.map((m) => m.content)).toEqual(["before corruption", "after corruption"]);
+  });
 });
 
 describe("CodewithParser", () => {
@@ -482,6 +552,43 @@ describe("GeminiParser", () => {
     expect(g1?.messages).toHaveLength(2);
     expect(g1?.session.title).toBe("hello gemini");
     expect(g1?.session.model_provider).toBe("google");
+  });
+
+  it("exposes bounded parseFileResult metadata for safe backfill", () => {
+    const result = new GeminiParser().parseFileResult(geminiFile, { maxBufferedBytes: 1024 * 1024 });
+    expect(result.sessions).toHaveLength(2);
+    expect(result.malformedRecordCount).toBe(0);
+    expect(result.incompleteTrailingRecord).toBe(false);
+    expect(result.maxBufferedLineBytes).toBeGreaterThan(0);
+    expect(result.sourceContentDigest).toMatch(/^sha256:/);
+  });
+
+  it("rejects oversized Gemini logs before buffering while preserving normal bounded parses", () => {
+    const file = join(root, "gemini", "tmp", "abc123hash", "oversized-logs.json");
+    writeFileSync(
+      file,
+      JSON.stringify([
+        { sessionId: "oversized", messageId: 1, role: "user", message: "normal", timestamp: "2026-05-03T10:00:00Z" },
+        { sessionId: "oversized", messageId: 2, role: "model", message: "x".repeat(2048), timestamp: "2026-05-03T10:00:01Z" },
+      ]),
+    );
+
+    expect(() => new GeminiParser().parseFileResult(file, { maxBufferedBytes: 128 })).toThrow(
+      /exceeds max buffered bytes 128/,
+    );
+    const result = new GeminiParser().parseFileResult(file, { maxBufferedBytes: 4096 });
+    expect(result.sessions).toHaveLength(1);
+    expect(result.malformedRecordCount).toBe(0);
+    expect(result.sourceContentDigest).toMatch(/^sha256:/);
+  });
+
+  it("accounts for malformed Gemini logs", () => {
+    const file = join(root, "gemini", "tmp", "abc123hash", "logs.json");
+    writeFileSync(file, "{not valid json");
+    const result = new GeminiParser().parseFileResult(file);
+    expect(result.sessions).toHaveLength(0);
+    expect(result.malformedRecordCount).toBe(1);
+    expect(result.incompleteTrailingRecord).toBe(false);
   });
 });
 

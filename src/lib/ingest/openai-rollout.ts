@@ -1,4 +1,5 @@
 import { closeSync, existsSync, mkdtempSync, openSync, readSync, readdirSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { StringDecoder } from "node:string_decoder";
@@ -131,22 +132,29 @@ export class OpenAiRolloutParser implements SessionParser {
       });
     };
 
-    let readResult: { incompleteTrailingRecord: boolean; maxBufferedLineBytes: number };
+    let readResult: {
+      incompleteTrailingRecord: boolean;
+      malformedRecordCount: number;
+      maxBufferedLineBytes: number;
+      sourceContentDigest: string;
+    };
     try {
-      readResult = readJsonlRecords(filePath, parseRecord);
+      readResult = readJsonlRecords(filePath, parseRecord, opts.maxBufferedBytes);
     } catch (error) {
       sink.cleanup();
       throw error;
     }
-    const { incompleteTrailingRecord, maxBufferedLineBytes } = readResult;
+    const { incompleteTrailingRecord, malformedRecordCount, maxBufferedLineBytes, sourceContentDigest } = readResult;
 
     if (sink.messageCount === 0 && sink.toolCallCount === 0) {
       sink.cleanup();
       return {
         sessions: [],
         incompleteTrailingRecord,
+        malformedRecordCount,
         maxBufferedLineBytes,
         maxNormalizedBatchRecords: sink.maxNormalizedBatchRecords,
+        sourceContentDigest,
       };
     }
 
@@ -181,8 +189,10 @@ export class OpenAiRolloutParser implements SessionParser {
     return {
       ...parsed,
       incompleteTrailingRecord,
+      malformedRecordCount,
       maxBufferedLineBytes,
       maxNormalizedBatchRecords: sink.maxNormalizedBatchRecords,
+      sourceContentDigest,
     };
   }
 }
@@ -339,23 +349,31 @@ class StagedRolloutSink implements RolloutSink {
 
 function readJsonlRecords(
   filePath: string,
-  onRecord: (record: Record<string, unknown>) => void
-): { incompleteTrailingRecord: boolean; maxBufferedLineBytes: number } {
+  onRecord: (record: Record<string, unknown>) => void,
+  maxBufferedBytes?: number,
+): { incompleteTrailingRecord: boolean; malformedRecordCount: number; maxBufferedLineBytes: number; sourceContentDigest: string } {
   const fd = openSync(filePath, "r");
   const decoder = new StringDecoder("utf8");
   const buffer = Buffer.allocUnsafe(READ_BUFFER_BYTES);
+  const hash = createHash("sha256");
   let pending = "";
   let incompleteTrailingRecord = false;
+  let malformedRecordCount = 0;
   let maxBufferedLineBytes = 0;
 
   const parseLine = (line: string, trailing: boolean) => {
     const trimmed = line.trim();
     if (!trimmed) return;
-    maxBufferedLineBytes = Math.max(maxBufferedLineBytes, Buffer.byteLength(line));
+    const lineBytes = Buffer.byteLength(line);
+    if (maxBufferedBytes !== undefined && lineBytes > maxBufferedBytes) {
+      throw new Error(`JSONL line ${lineBytes} exceeds max buffered bytes ${maxBufferedBytes}`);
+    }
+    maxBufferedLineBytes = Math.max(maxBufferedLineBytes, lineBytes);
     try {
       onRecord(JSON.parse(trimmed) as Record<string, unknown>);
     } catch {
       if (trailing) incompleteTrailingRecord = true;
+      else malformedRecordCount++;
     }
   };
 
@@ -364,7 +382,12 @@ function readJsonlRecords(
       const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
 
-      pending += decoder.write(buffer.subarray(0, bytesRead));
+      const chunk = buffer.subarray(0, bytesRead);
+      hash.update(chunk);
+      pending += decoder.write(chunk);
+      if (maxBufferedBytes !== undefined && Buffer.byteLength(pending) > maxBufferedBytes) {
+        throw new Error(`JSONL pending line exceeds max buffered bytes ${maxBufferedBytes}`);
+      }
       let newlineIndex = pending.indexOf("\n");
       while (newlineIndex !== -1) {
         const line = pending.slice(0, newlineIndex).replace(/\r$/, "");
@@ -383,5 +406,5 @@ function readJsonlRecords(
     closeSync(fd);
   }
 
-  return { incompleteTrailingRecord, maxBufferedLineBytes };
+  return { incompleteTrailingRecord, malformedRecordCount, maxBufferedLineBytes, sourceContentDigest: `sha256:${hash.digest("hex")}` };
 }
