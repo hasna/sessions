@@ -6,6 +6,7 @@ import type { SessionParser } from "./ingest/types.js";
 import { listParsers } from "./ingest/index.js";
 import { getSessionsDir } from "./paths.js";
 import type { SessionStore } from "../db/session-store.js";
+import { resolveStorageMode } from "../generated/storage-kit/mode.js";
 import type {
   MessageInsert,
   ParsedSession,
@@ -208,6 +209,38 @@ function snapshotFile(file: string): FileSnapshot | null {
 
 function sameSnapshot(a: FileSnapshot, b: FileSnapshot): boolean {
   return a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
+function hasSameCheckpointProvenance(
+  checkpoint: BackfillCheckpointEntry,
+  entry: BackfillInventoryEntry,
+): boolean {
+  return (
+    checkpoint.source === entry.source &&
+    checkpoint.sourceId === entry.sourceId &&
+    checkpoint.sourcePath === entry.sourcePath &&
+    checkpoint.messages === entry.messageCount &&
+    checkpoint.toolCalls === entry.toolCallCount &&
+    checkpoint.estimatedBytes === entry.estimatedBytes &&
+    checkpoint.sourceContentDigest === entry.sourceContentDigest &&
+    checkpoint.runConfigDigest === entry.runConfigDigest
+  );
+}
+
+function hasSameInventoryProvenance(
+  fresh: BackfillInventoryEntry,
+  selected: BackfillInventoryEntry,
+): boolean {
+  return (
+    fresh.source === selected.source &&
+    fresh.sourceId === selected.sourceId &&
+    fresh.sourcePath === selected.sourcePath &&
+    fresh.messageCount === selected.messageCount &&
+    fresh.toolCallCount === selected.toolCallCount &&
+    fresh.estimatedBytes === selected.estimatedBytes &&
+    fresh.sourceContentDigest === selected.sourceContentDigest &&
+    fresh.runConfigDigest === selected.runConfigDigest
+  );
 }
 
 function sessionKey(source: string, sourceId: string): string {
@@ -516,8 +549,13 @@ function selectEntries(
 }
 
 function materializeParsed(parsed: ParsedSession): MaterializedSession {
+  const input = {
+    session: { ...parsed.session },
+    messages: parsed.messages.map((message) => ({ ...message })),
+    toolCalls: parsed.toolCalls.map((toolCall) => ({ ...toolCall })),
+  };
   return {
-    input: parsed,
+    input,
     estimatedBytes: estimateParsed(parsed),
     maxBatchRecords: Math.max(parsed.messages.length, parsed.toolCalls.length),
   };
@@ -570,6 +608,13 @@ function materializeEntry(
       return candidate.source === entry.source && candidate.source_id === entry.sourceId;
     });
     if (!match) throw new Error(`${entry.key}: source file no longer contains this session`);
+    const freshEntry =
+      match.kind === "parsed"
+        ? entryFromParsed(match.parsed, match.maxBufferedLineBytes, match.maxNormalizedBatchRecords, match.sourceContentDigest)
+        : entryFromStaged(match.staged, batchSize, match.maxBufferedLineBytes, match.maxNormalizedBatchRecords, match.sourceContentDigest);
+    if (!hasSameInventoryProvenance(freshEntry, entry)) {
+      throw new Error("source changed after inventory; refusing to import stale selection");
+    }
     const materialized = match.kind === "parsed" ? materializeParsed(match.parsed) : materializeStaged(match.staged, batchSize);
     materialized.input.session.metadata = {
       ...(materialized.input.session.metadata ?? {}),
@@ -588,26 +633,26 @@ function materializeEntry(
 async function completedCheckpointHasVerifiedDestination(
   store: SessionStore,
   entry: BackfillInventoryEntry,
+  completed: BackfillCheckpointEntry,
 ): Promise<boolean> {
+  if (!hasSameCheckpointProvenance(completed, entry)) return false;
   const session = await store.get(entry.sourceId, { source: entry.source });
   const backfill = session?.metadata?.backfill as Record<string, unknown> | undefined;
-  const identityMatches = Boolean(
+  const destinationMatches = Boolean(
     session &&
       session.source === entry.source &&
       session.source_id === entry.sourceId &&
+      session.source_path === entry.sourcePath &&
       session.message_count === entry.messageCount &&
       session.tool_call_count === entry.toolCallCount,
   );
-  if (!identityMatches) return false;
-  if (
+  return Boolean(
+    destinationMatches &&
     backfill &&
       backfill?.version === CHECKPOINT_VERSION &&
       backfill?.sourceContentDigest === entry.sourceContentDigest &&
-      backfill?.runConfigDigest === entry.runConfigDigest
-  ) {
-    return true;
-  }
-  return session?.source_path === entry.sourcePath;
+      backfill?.runConfigDigest === entry.runConfigDigest,
+  );
 }
 
 function runBackupCommand(command: string | undefined, apply: boolean): BackfillRunResult["gates"]["backup"] {
@@ -662,6 +707,26 @@ function isProductionLikeUrl(raw: string | undefined, env: Record<string, string
   }
 }
 
+function firstEnv(env: Record<string, string | undefined>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = env[key]?.trim();
+    if (value) return value;
+  }
+  return null;
+}
+
+function isApplyStoreModeAllowed(opts: BackfillRunOptions, env: Record<string, string | undefined>): boolean {
+  if (!opts.apply) return true;
+  if (opts.store) return opts.store.mode === "cloud";
+  const clientMode = firstEnv(env, ["HASNA_SESSIONS_MODE", "SESSIONS_MODE"]);
+  const storageMode = resolveStorageMode("sessions", env).mode;
+  const normalizedMode = (clientMode ?? storageMode).toLowerCase().replace(/-/g, "_");
+  const cloudLikeMode = normalizedMode === "cloud" || normalizedMode === "self_hosted" || normalizedMode === "remote" || normalizedMode === "hybrid";
+  const apiUrlPresent = Boolean(firstEnv(env, ["HASNA_SESSIONS_API_URL", "SESSIONS_API_URL"]));
+  const apiKeyPresent = Boolean(firstEnv(env, ["HASNA_SESSIONS_API_KEY", "SESSIONS_API_KEY"]));
+  return cloudLikeMode && apiUrlPresent && apiKeyPresent;
+}
+
 async function resolveApplyStore(opts: BackfillRunOptions): Promise<SessionStore> {
   if (opts.store) return opts.store;
   const { resolveSessionStore } = await import("../db/session-store.js");
@@ -712,7 +777,8 @@ function createResult(
     (!contradictorySelectors &&
       ((hasSourceBoundary && (hasRangeBoundary || hasPilotBoundary || hasKnownIdBoundary)) || Boolean(opts.allSources)));
   const capacityAllowed = capacityReason === null;
-  const backupPreflightAllowed = apply && confirmationSatisfied && productionAllowed && applyBoundaryAllowed && capacityAllowed;
+  const storeModeAllowed = isApplyStoreModeAllowed(opts, env);
+  const backupPreflightAllowed = apply && confirmationSatisfied && productionAllowed && applyBoundaryAllowed && capacityAllowed && storeModeAllowed;
   const backup = backupPreflightAllowed
     ? runBackupCommand(opts.backupCommand, true)
     : runBackupCommand(opts.backupCommand, false);
@@ -812,6 +878,9 @@ function createResult(
   if (apply && !result.gates.capacity.allowed && result.gates.capacity.reason) {
     result.errors.push(result.gates.capacity.reason);
   }
+  if (apply && !storeModeAllowed) {
+    result.errors.push("apply requires self_hosted/cloud API mode; local mode is inventory-only");
+  }
   if (apply && backup.reason) result.errors.push(backup.reason);
   return result;
 }
@@ -868,7 +937,7 @@ export async function runSessionBackfill(opts: BackfillRunOptions = {}): Promise
   const pending: BackfillInventoryEntry[] = [];
   for (const entry of selected) {
     const completed = checkpoint.completed[entry.key];
-    if (completed && (await completedCheckpointHasVerifiedDestination(store, entry))) {
+    if (completed && (await completedCheckpointHasVerifiedDestination(store, entry, completed))) {
       result.checkpoint.resumedSkipped++;
       result.applied.skipped++;
       continue;

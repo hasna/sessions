@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSessionBackfill } from "../src/lib/backfill.js";
@@ -143,6 +143,42 @@ class LegacyParser extends FakeParser {
   parseFileResult = undefined;
 }
 
+class RaceParser implements SessionParser {
+  readonly source: SessionSource = "codex";
+  calls = 0;
+
+  constructor(
+    private readonly file: string,
+    private readonly before: ParsedSession,
+    private readonly after: ParsedSession,
+  ) {}
+
+  sessionRoots(): string[] {
+    return [root];
+  }
+
+  listSessionFiles(): string[] {
+    return [this.file];
+  }
+
+  parseFile(): ParsedSession[] {
+    return [];
+  }
+
+  parseFileResult() {
+    this.calls++;
+    const session = this.calls === 1 ? this.before : this.after;
+    return {
+      sessions: [session],
+      incompleteTrailingRecord: false,
+      malformedRecordCount: 0,
+      maxBufferedLineBytes: 7,
+      maxNormalizedBatchRecords: session.messages.length,
+      sourceContentDigest: `digest-${this.calls}`,
+    };
+  }
+}
+
 function sessionFromImport(input: SessionContentImport): Session {
   return {
     id: `${input.session.source}-${input.session.source_id}`,
@@ -224,6 +260,13 @@ function fakeStore(options: { failOn?: string; existing?: SessionContentImport[]
     recomputeMachines: async () => {},
   } satisfies SessionStore & { imports: string[] };
   return store;
+}
+
+function localFakeStore(): SessionStore & { imports: string[] } {
+  return {
+    ...fakeStore(),
+    mode: "local" as const,
+  };
 }
 
 describe("session backfill", () => {
@@ -424,6 +467,105 @@ describe("session backfill", () => {
     expect(result.warnings).toEqual([
       "codex:fabricated: quarantined invalid completed checkpoint entry; current inventory will be re-imported",
     ]);
+  });
+
+  it("does not resume when destination has matching path and counts but no backfill metadata", async () => {
+    const file = join(root, "no-metadata.jsonl");
+    const session = parsedSession("no-metadata", file, [message("m1", "current")]);
+    const parser = new FakeParser(new Map([[file, session]]));
+    const checkpoint = join(root, "checkpoint.json");
+    const firstStore = fakeStore();
+
+    const first = await runSessionBackfill({
+      parsers: [parser],
+      store: firstStore,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: checkpoint,
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+    expect(first.applied.pushed).toBe(1);
+
+    const secondStore = fakeStore({
+      existing: [{ ...session, session: { ...session.session, metadata: {} } }],
+    });
+    const second = await runSessionBackfill({
+      parsers: [parser],
+      store: secondStore,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: checkpoint,
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(second.checkpoint.resumedSkipped).toBe(0);
+    expect(second.applied.pushed).toBe(1);
+    expect(secondStore.imports).toEqual(["codex:no-metadata"]);
+    expect(second.warnings).toEqual([
+      "codex:no-metadata: quarantined invalid completed checkpoint entry; current inventory will be re-imported",
+    ]);
+  });
+
+  it("does not resume when destination backfill metadata is stale despite matching path and counts", async () => {
+    const file = join(root, "stale-destination.jsonl");
+    const session = parsedSession("stale-destination", file, [message("m1", "current")]);
+    const parser = new FakeParser(new Map([[file, session]]));
+    const checkpoint = join(root, "checkpoint.json");
+    const firstStore = fakeStore();
+
+    const first = await runSessionBackfill({
+      parsers: [parser],
+      store: firstStore,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: checkpoint,
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+    expect(first.applied.pushed).toBe(1);
+
+    const secondStore = fakeStore({
+      existing: [
+        {
+          ...session,
+          session: {
+            ...session.session,
+            metadata: { backfill: { version: 2, sourceContentDigest: "stale", runConfigDigest: "stale" } },
+          },
+        },
+      ],
+    });
+    const second = await runSessionBackfill({
+      parsers: [parser],
+      store: secondStore,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: checkpoint,
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(second.checkpoint.resumedSkipped).toBe(0);
+    expect(second.applied.pushed).toBe(1);
+    expect(secondStore.imports).toEqual(["codex:stale-destination"]);
   });
 
   it("quarantines stale completed checkpoints instead of silently skipping selected apply entries", async () => {
@@ -671,6 +813,87 @@ describe("session backfill", () => {
     expect(result.applied.maxMaterializedBatchRecords).toBeLessThanOrEqual(2);
     expect(result.applied.maxMaterializedSessionBytes).toBeLessThanOrEqual(result.limits.maxSessionBytes);
     expect(store.imports).toEqual(["codex:staged"]);
+  });
+
+  it("fails closed when source content changes between inventory and materialization", async () => {
+    const file = join(root, "race.jsonl");
+    const before = parsedSession("race", file, [message("m1", "before")]);
+    const after = parsedSession("race", file, [message("m1", "after")]);
+    const parser = new RaceParser(file, before, after);
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(parser.calls).toBe(2);
+    expect(result.applied.pushed).toBe(0);
+    expect(result.applied.failed).toBe(1);
+    expect(store.imports).toEqual([]);
+    expect(result.errors).toEqual([
+      "codex:race: source changed after inventory; refusing to import stale selection",
+    ]);
+  });
+
+  it("does not run backup or import when apply resolves to local store mode", async () => {
+    const file = join(root, "local-mode.jsonl");
+    const marker = join(root, "backup-ran");
+    const parser = new FakeParser(new Map([[file, parsedSession("local-mode", file, [message("m1", "hello")])]]));
+    const store = localFakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: `"${process.execPath}" -e "require('fs').writeFileSync('${marker}', 'ran')"`,
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: { HASNA_SESSIONS_STORAGE_MODE: "local", HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(result.gates.backup.ran).toBe(false);
+    expect(result.applied.attempted).toBe(0);
+    expect(store.imports).toEqual([]);
+    expect(existsSync(marker)).toBe(false);
+    expect(result.errors).toContain("apply requires self_hosted/cloud API mode; local mode is inventory-only");
+  });
+
+  it("does not run backup in local mode before resolving the default store", async () => {
+    const file = join(root, "default-local-mode.jsonl");
+    const marker = join(root, "default-backup-ran");
+    const parser = new FakeParser(new Map([[file, parsedSession("default-local-mode", file, [message("m1", "hello")])]]));
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: `"${process.execPath}" -e "require('fs').writeFileSync('${marker}', 'ran')"`,
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: { HASNA_SESSIONS_MODE: "local", HASNA_SESSIONS_STORAGE_MODE: "local" },
+    });
+
+    expect(result.gates.backup.ran).toBe(false);
+    expect(result.applied.attempted).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    expect(result.errors).toContain("apply requires self_hosted/cloud API mode; local mode is inventory-only");
   });
 
   it("emits machine-readable CLI inventory JSON without API credentials", () => {

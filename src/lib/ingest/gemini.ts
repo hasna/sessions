@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
@@ -23,6 +23,34 @@ interface GeminiLogEntry {
   message?: string;
   timestamp?: string;
   role?: string;
+}
+
+function readBoundedFile(
+  filePath: string,
+  maxBufferedBytes: number | undefined,
+): { raw: Buffer; digest: string } {
+  const stat = statSync(filePath);
+  if (maxBufferedBytes !== undefined && stat.size > maxBufferedBytes) {
+    throw new Error(`source file ${stat.size} exceeds max buffered bytes ${maxBufferedBytes}`);
+  }
+  const raw = Buffer.alloc(stat.size);
+  const hash = createHash("sha256");
+  const chunk = Buffer.alloc(Math.min(64 * 1024, Math.max(1, maxBufferedBytes ?? 64 * 1024)));
+  const fd = openSync(filePath, "r");
+  let offset = 0;
+  try {
+    for (;;) {
+      const bytesRead = readSync(fd, chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      const slice = chunk.subarray(0, bytesRead);
+      hash.update(slice);
+      slice.copy(raw, offset);
+      offset += bytesRead;
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return { raw, digest: `sha256:${hash.digest("hex")}` };
 }
 
 /**
@@ -57,6 +85,10 @@ export class GeminiParser implements SessionParser {
     } catch {
       return [];
     }
+    return this.parseEntries(filePath, entries);
+  }
+
+  private parseEntries(filePath: string, entries: GeminiLogEntry[]): ParsedSession[] {
     if (entries.length === 0) return [];
 
     const mtime = (() => {
@@ -123,12 +155,11 @@ export class GeminiParser implements SessionParser {
 
   parseFileResult(filePath: string, opts: ParseFileOptions = {}): ParseFileResult {
     if (!existsSync(filePath)) return { sessions: [] };
-    const raw = readFileSync(filePath);
-    if (opts.maxBufferedBytes !== undefined && raw.byteLength > opts.maxBufferedBytes) {
-      throw new Error(`source file ${raw.byteLength} exceeds max buffered bytes ${opts.maxBufferedBytes}`);
-    }
+    const { raw, digest } = readBoundedFile(filePath, opts.maxBufferedBytes);
+    let entries: GeminiLogEntry[];
     try {
-      JSON.parse(raw.toString("utf-8"));
+      const data = JSON.parse(raw.toString("utf-8"));
+      entries = Array.isArray(data) ? data : [];
     } catch {
       return {
         sessions: [],
@@ -136,17 +167,17 @@ export class GeminiParser implements SessionParser {
         malformedRecordCount: 1,
         maxBufferedLineBytes: raw.byteLength,
         maxNormalizedBatchRecords: 0,
-        sourceContentDigest: `sha256:${createHash("sha256").update(raw).digest("hex")}`,
+        sourceContentDigest: digest,
       };
     }
-    const sessions = this.parseFile(filePath);
+    const sessions = this.parseEntries(filePath, entries);
     return {
       sessions,
       incompleteTrailingRecord: false,
       malformedRecordCount: 0,
       maxBufferedLineBytes: raw.byteLength,
       maxNormalizedBatchRecords: sessions.reduce((max, session) => Math.max(max, session.messages.length, session.toolCalls.length), 0),
-      sourceContentDigest: `sha256:${createHash("sha256").update(raw).digest("hex")}`,
+      sourceContentDigest: digest,
     };
   }
 }

@@ -200,6 +200,25 @@ describe("ClaudeParser", () => {
     expect(result.sourceContentDigest).toMatch(/^sha256:/);
   });
 
+  it("rejects oversized Claude files before buffering while preserving normal bounded parses", () => {
+    const file = join(root, "claude", "projects", "-Users-h-Workspace-myapp", "oversized-claude.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: "user", message: { role: "user", content: "normal" }, uuid: "u", timestamp: "2026-05-01T10:00:00Z" }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: "x".repeat(2048) }, uuid: "a", timestamp: "2026-05-01T10:00:01Z" }),
+      ].join("\n"),
+    );
+
+    expect(() => new ClaudeParser().parseFileResult(file, { maxBufferedBytes: 128 })).toThrow(
+      /exceeds max buffered bytes 128/,
+    );
+    const result = new ClaudeParser().parseFileResult(file, { maxBufferedBytes: 4096 });
+    expect(result.sessions).toHaveLength(1);
+    expect(result.malformedRecordCount).toBe(0);
+    expect(result.sourceContentDigest).toMatch(/^sha256:/);
+  });
+
   it("accounts for malformed Claude JSONL records", () => {
     const file = join(root, "claude", "projects", "-Users-h-Workspace-myapp", "malformed-claude.jsonl");
     writeFileSync(
@@ -541,6 +560,25 @@ describe("GeminiParser", () => {
     expect(result.malformedRecordCount).toBe(0);
     expect(result.incompleteTrailingRecord).toBe(false);
     expect(result.maxBufferedLineBytes).toBeGreaterThan(0);
+    expect(result.sourceContentDigest).toMatch(/^sha256:/);
+  });
+
+  it("rejects oversized Gemini logs before buffering while preserving normal bounded parses", () => {
+    const file = join(root, "gemini", "tmp", "abc123hash", "oversized-logs.json");
+    writeFileSync(
+      file,
+      JSON.stringify([
+        { sessionId: "oversized", messageId: 1, role: "user", message: "normal", timestamp: "2026-05-03T10:00:00Z" },
+        { sessionId: "oversized", messageId: 2, role: "model", message: "x".repeat(2048), timestamp: "2026-05-03T10:00:01Z" },
+      ]),
+    );
+
+    expect(() => new GeminiParser().parseFileResult(file, { maxBufferedBytes: 128 })).toThrow(
+      /exceeds max buffered bytes 128/,
+    );
+    const result = new GeminiParser().parseFileResult(file, { maxBufferedBytes: 4096 });
+    expect(result.sessions).toHaveLength(1);
+    expect(result.malformedRecordCount).toBe(0);
     expect(result.sourceContentDigest).toMatch(/^sha256:/);
   });
 

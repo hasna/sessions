@@ -1,6 +1,7 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { getClaudeProjectsDir } from "../paths.js";
 import type { ParseFileOptions, ParseFileResult, SessionParser } from "./types.js";
 import { flattenContent } from "./types.js";
@@ -20,6 +21,88 @@ const COMMAND_TAG_RE = /<command-(?:message|name|args)>[\s\S]*?<\/command-(?:mes
 
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+function readBoundedJsonl(
+  filePath: string,
+  maxBufferedBytes: number | undefined,
+): {
+  digest: string;
+  lines: string[];
+  incompleteTrailingRecord: boolean;
+  malformedRecordCount: number;
+  maxBufferedLineBytes: number;
+} {
+  const stat = statSync(filePath);
+  if (maxBufferedBytes !== undefined && stat.size > maxBufferedBytes) {
+    throw new Error(`source file ${stat.size} exceeds max buffered bytes ${maxBufferedBytes}`);
+  }
+
+  const hash = createHash("sha256");
+  const lines: string[] = [];
+  const decoder = new StringDecoder("utf-8");
+  const buffer = Buffer.alloc(Math.min(64 * 1024, Math.max(1, maxBufferedBytes ?? 64 * 1024)));
+  let pending = "";
+  let pendingBytes = 0;
+  let malformedRecordCount = 0;
+  let incompleteTrailingRecord = false;
+  let maxBufferedLineBytes = 0;
+  const fd = openSync(filePath, "r");
+  try {
+    for (;;) {
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      const chunk = buffer.subarray(0, bytesRead);
+      hash.update(chunk);
+      pending += decoder.write(chunk);
+      for (;;) {
+        const newline = pending.indexOf("\n");
+        if (newline < 0) {
+          pendingBytes = Buffer.byteLength(pending);
+          if (maxBufferedBytes !== undefined && pendingBytes > maxBufferedBytes) {
+            throw new Error(`JSONL pending line exceeds max buffered bytes ${maxBufferedBytes}`);
+          }
+          maxBufferedLineBytes = Math.max(maxBufferedLineBytes, pendingBytes);
+          break;
+        }
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        const lineBytes = Buffer.byteLength(line);
+        maxBufferedLineBytes = Math.max(maxBufferedLineBytes, lineBytes);
+        if (line.trim()) {
+          try {
+            JSON.parse(line);
+            lines.push(line);
+          } catch {
+            malformedRecordCount++;
+          }
+        }
+      }
+    }
+    pending += decoder.end();
+    if (pending.trim()) {
+      const lineBytes = Buffer.byteLength(pending);
+      maxBufferedLineBytes = Math.max(maxBufferedLineBytes, lineBytes);
+      if (maxBufferedBytes !== undefined && lineBytes > maxBufferedBytes) {
+        throw new Error(`JSONL pending line exceeds max buffered bytes ${maxBufferedBytes}`);
+      }
+      try {
+        JSON.parse(pending);
+        lines.push(pending);
+      } catch {
+        incompleteTrailingRecord = true;
+      }
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return {
+    digest: `sha256:${hash.digest("hex")}`,
+    lines,
+    incompleteTrailingRecord,
+    malformedRecordCount,
+    maxBufferedLineBytes,
+  };
 }
 
 function titleFromClaudeUserContent(content: string, isMeta: boolean): string | null {
@@ -62,6 +145,10 @@ export class ClaudeParser implements SessionParser {
     if (!existsSync(filePath)) return [];
     const raw = readFileSync(filePath, "utf-8");
     const lines = raw.split("\n").filter((l) => l.trim());
+    return this.parseLines(filePath, lines);
+  }
+
+  private parseLines(filePath: string, lines: string[]): ParsedSession[] {
     if (lines.length === 0) return [];
 
     // Claude message UUIDs are not globally unique across resumed sessions and
@@ -210,33 +297,15 @@ export class ClaudeParser implements SessionParser {
 
   parseFileResult(filePath: string, opts: ParseFileOptions = {}): ParseFileResult {
     if (!existsSync(filePath)) return { sessions: [] };
-    const raw = readFileSync(filePath);
-    if (opts.maxBufferedBytes !== undefined && raw.byteLength > opts.maxBufferedBytes) {
-      throw new Error(`source file ${raw.byteLength} exceeds max buffered bytes ${opts.maxBufferedBytes}`);
-    }
-    const text = raw.toString("utf-8");
-    const lines = text.split("\n").filter((line) => line.trim());
-    let malformedRecordCount = 0;
-    let incompleteTrailingRecord = false;
-    let maxBufferedLineBytes = 0;
-    for (const [index, line] of lines.entries()) {
-      maxBufferedLineBytes = Math.max(maxBufferedLineBytes, Buffer.byteLength(line));
-      try {
-        JSON.parse(line);
-      } catch {
-        const trailing = index === lines.length - 1 && !text.endsWith("\n");
-        if (trailing) incompleteTrailingRecord = true;
-        else malformedRecordCount++;
-      }
-    }
-    const sessions = this.parseFile(filePath);
+    const result = readBoundedJsonl(filePath, opts.maxBufferedBytes);
+    const sessions = this.parseLines(filePath, result.lines);
     return {
       sessions,
-      incompleteTrailingRecord,
-      malformedRecordCount,
-      maxBufferedLineBytes,
+      incompleteTrailingRecord: result.incompleteTrailingRecord,
+      malformedRecordCount: result.malformedRecordCount,
+      maxBufferedLineBytes: result.maxBufferedLineBytes,
       maxNormalizedBatchRecords: sessions.reduce((max, session) => Math.max(max, session.messages.length, session.toolCalls.length), 0),
-      sourceContentDigest: `sha256:${createHash("sha256").update(raw).digest("hex")}`,
+      sourceContentDigest: result.digest,
     };
   }
 }
