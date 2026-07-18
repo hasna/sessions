@@ -453,6 +453,10 @@ function parseFileSessions(parser: SessionParser, file: string, maxBufferedBytes
     for (const staged of stagedSessions) staged.cleanup();
     throw new Error("file changed during parsing");
   }
+  if (stagedSessions.length > 0 && !result.sourceContentDigest) {
+    for (const staged of stagedSessions) staged.cleanup();
+    throw new Error("staged parseFileResult requires sourceContentDigest for safe backfill");
+  }
   const out: ParsedOrStagedSession[] = [];
   const sourceContentDigest =
     result.sourceContentDigest ??
@@ -707,6 +711,16 @@ function isProductionLikeUrl(raw: string | undefined, env: Record<string, string
   }
 }
 
+function isProductionLikeTarget(opts: BackfillRunOptions, apiUrl: string | null, env: Record<string, string | undefined>): boolean {
+  return isProductionLikeUrl(apiUrl ?? undefined, env) || Boolean(opts.apply && opts.store?.mode === "cloud" && !apiUrl);
+}
+
+function productionTargetDescription(opts: BackfillRunOptions, apiUrl: string | null): string {
+  if (apiUrl) return `API URL ${apiUrl}`;
+  if (opts.store?.mode === "cloud") return "injected cloud store";
+  return "target";
+}
+
 function firstEnv(env: Record<string, string | undefined>, keys: string[]): string | null {
   for (const key of keys) {
     const value = env[key]?.trim();
@@ -756,7 +770,7 @@ function createResult(
   const selectedEstimatedBytes = selected.reduce((sum, entry) => sum + entry.estimatedBytes, 0);
   const largestSessionBytes = entries.reduce((max, entry) => Math.max(max, entry.estimatedBytes), 0);
   const selectedLargestSessionBytes = selected.reduce((max, entry) => Math.max(max, entry.estimatedBytes), 0);
-  const productionLike = isProductionLikeUrl(apiUrl ?? undefined, env);
+  const productionLike = isProductionLikeTarget(opts, apiUrl, env);
   const capacityReason =
     apply && maxTotalBytes === null
       ? "apply requires --max-total-bytes so the capacity gate is explicit"
@@ -873,7 +887,7 @@ function createResult(
     result.errors.push("apply selectors are contradictory: --all-sources cannot be combined with --known-id");
   }
   if (apply && !result.gates.production.allowed) {
-    result.errors.push(`production-like API URL ${apiUrl} requires --allow-production and separate out-of-band user approval`);
+    result.errors.push(`production-like ${productionTargetDescription(opts, apiUrl)} requires --allow-production and separate out-of-band user approval`);
   }
   if (apply && !result.gates.capacity.allowed && result.gates.capacity.reason) {
     result.errors.push(result.gates.capacity.reason);

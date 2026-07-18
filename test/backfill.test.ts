@@ -66,6 +66,7 @@ function stagedSession(
   sourcePath: string,
   messages: MessageInsert[],
   toolCalls: ToolCallInsert[] = [],
+  cleanup: () => void = () => {},
 ): StagedParsedSession {
   return {
     session: {
@@ -90,7 +91,7 @@ function stagedSession(
     forEachToolCallBatch: (batchSize, callback) => {
       for (const batch of chunked(toolCalls, batchSize)) callback(batch);
     },
-    cleanup: () => {},
+    cleanup,
   };
 }
 
@@ -135,6 +136,7 @@ class FakeParser implements SessionParser {
       malformedRecordCount: this.malformedFiles.has(filePath) ? 1 : 0,
       maxBufferedLineBytes: 11,
       maxNormalizedBatchRecords: 1,
+      sourceContentDigest: `digest-${value.session.source_id}`,
     };
   }
 }
@@ -175,6 +177,42 @@ class RaceParser implements SessionParser {
       maxBufferedLineBytes: 7,
       maxNormalizedBatchRecords: session.messages.length,
       sourceContentDigest: `digest-${this.calls}`,
+    };
+  }
+}
+
+class StagedRaceParser implements SessionParser {
+  readonly source: SessionSource = "codex";
+  calls = 0;
+
+  constructor(
+    private readonly file: string,
+    private readonly before: StagedParsedSession,
+    private readonly after: StagedParsedSession,
+  ) {}
+
+  sessionRoots(): string[] {
+    return [root];
+  }
+
+  listSessionFiles(): string[] {
+    return [this.file];
+  }
+
+  parseFile(): ParsedSession[] {
+    return [];
+  }
+
+  parseFileResult() {
+    this.calls++;
+    const session = this.calls === 1 ? this.before : this.after;
+    return {
+      sessions: [],
+      stagedSessions: [session],
+      incompleteTrailingRecord: false,
+      malformedRecordCount: 0,
+      maxBufferedLineBytes: 7,
+      maxNormalizedBatchRecords: session.maxNormalizedBatchRecords,
     };
   }
 }
@@ -815,6 +853,41 @@ describe("session backfill", () => {
     expect(store.imports).toEqual(["codex:staged"]);
   });
 
+  it("fails closed and cleans staged resources when staged parser omits source content digest", async () => {
+    const file = join(root, "staged-missing-digest.jsonl");
+    let cleanupCalls = 0;
+    const alpha = stagedSession("staged-missing-digest", file, [message("m1", "alpha")], [], () => {
+      cleanupCalls++;
+    });
+    const bravo = stagedSession("staged-missing-digest", file, [message("m1", "bravo")], [], () => {
+      cleanupCalls++;
+    });
+    const parser = new StagedRaceParser(file, alpha, bravo);
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(parser.calls).toBe(1);
+    expect(cleanupCalls).toBe(1);
+    expect(result.inventory.errors).toBe(1);
+    expect(result.inventory.selectableSessions).toBe(0);
+    expect(result.applied.pushed).toBe(0);
+    expect(result.errors).toEqual([`codex:${file}: staged parseFileResult requires sourceContentDigest for safe backfill`]);
+    expect(store.imports).toEqual([]);
+  });
+
   it("fails closed when source content changes between inventory and materialization", async () => {
     const file = join(root, "race.jsonl");
     const before = parsedSession("race", file, [message("m1", "before")]);
@@ -870,6 +943,62 @@ describe("session backfill", () => {
     expect(store.imports).toEqual([]);
     expect(existsSync(marker)).toBe(false);
     expect(result.errors).toContain("apply requires self_hosted/cloud API mode; local mode is inventory-only");
+  });
+
+  it("treats injected cloud stores without API provenance as production-like", async () => {
+    const file = join(root, "injected-cloud.jsonl");
+    const parser = new FakeParser(new Map([[file, parsedSession("injected-cloud", file, [message("m1", "hello")])]]));
+    const store = fakeStore();
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      backupCommand: "true",
+      source: "codex",
+      pilot: 1,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: join(root, "checkpoint.json"),
+      env: {},
+    });
+
+    expect(result.gates.production.productionLike).toBe(true);
+    expect(result.gates.production.allowed).toBe(false);
+    expect(result.gates.backup.ran).toBe(false);
+    expect(result.applied.attempted).toBe(0);
+    expect(store.imports).toEqual([]);
+    expect(result.errors).toContain(
+      "production-like injected cloud store requires --allow-production and separate out-of-band user approval",
+    );
+  });
+
+  it("persists completed checkpoints for concurrent imports", async () => {
+    const files = ["a", "b", "c"].map((id) => join(root, `${id}.jsonl`));
+    const parser = new FakeParser(
+      new Map(files.map((file, index) => [file, parsedSession(String.fromCharCode(97 + index), file, [message(`m${index + 1}`, file)])])),
+    );
+    const store = fakeStore();
+    const checkpoint = join(root, "checkpoint.json");
+
+    const result = await runSessionBackfill({
+      parsers: [parser],
+      store,
+      apply: true,
+      confirmApply: "BACKFILL_APPLY",
+      allowProduction: true,
+      backupCommand: "true",
+      allSources: true,
+      concurrency: 2,
+      maxTotalBytes: 1024 * 1024,
+      checkpointPath: checkpoint,
+      env: { HASNA_SESSIONS_API_URL: "https://staging.example.test" },
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.applied.pushed).toBe(3);
+    const saved = JSON.parse(readFileSync(checkpoint, "utf-8"));
+    expect(Object.keys(saved.completed).sort()).toEqual(["codex:a", "codex:b", "codex:c"]);
   });
 
   it("does not run backup in local mode before resolving the default store", async () => {
