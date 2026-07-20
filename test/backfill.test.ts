@@ -351,7 +351,10 @@ describe("session backfill", () => {
       backupCommand: "false",
       maxTotalBytes: 1024 * 1024,
       checkpointPath: join(root, "checkpoint.json"),
-      env: { HASNA_SESSIONS_API_URL: "https://sessions.hasna.xyz" },
+      env: {
+        HASNA_SESSIONS_API_URL: "https://sessions.internal-test.example",
+        HASNA_SESSIONS_PRODUCTION_HOSTS: "internal-test.example",
+      },
     });
 
     expect(result.gates.production.allowed).toBe(false);
@@ -991,13 +994,14 @@ describe("session backfill", () => {
       checkpointPath: join(root, "checkpoint.json"),
       env: {
         SESSIONS_MODE: "self_hosted",
-        SESSIONS_API_URL: "https://sessions.hasna.xyz",
+        SESSIONS_API_URL: "https://sessions.internal-test.example",
         SESSIONS_API_KEY: "placeholder",
+        HASNA_SESSIONS_PRODUCTION_HOSTS: "internal-test.example",
       },
     });
 
     expect(result.gates.production).toEqual({
-      url: "https://sessions.hasna.xyz",
+      url: "https://sessions.internal-test.example",
       productionLike: true,
       allowed: false,
     });

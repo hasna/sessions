@@ -28,7 +28,7 @@ function buildResumeCommand(session: Session): string[] {
 // Session-record store seam (SAME resolver the CLI uses). When the client-flip
 // resolves to cloud-http — HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY set
 // (self_hosted) — the core session-record read tools (recent/list/get/machines/
-// stats/search) route to https://sessions.hasna.xyz/v1 with the bearer key so
+// stats/search) route to the configured self-hosted `/v1` API with the bearer key so
 // every machine's MCP sees the ONE shared cloud session registry. Env unset =>
 // local SQLite index exactly as before (no regression). Analytical/local-only
 // tools (ingest, embed, semantic/graph/recall, tool-call search, adapters) have
