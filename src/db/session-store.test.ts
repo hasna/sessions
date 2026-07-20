@@ -4,7 +4,7 @@ import { resolveSessionStore } from "./session-store.js";
 
 const CLOUD_ENV = {
   HASNA_SESSIONS_MODE: "self_hosted",
-  HASNA_SESSIONS_API_URL: "https://sessions.hasna.xyz",
+  HASNA_SESSIONS_API_URL: "https://sessions.your-deployment.example",
   HASNA_SESSIONS_API_KEY: "hasna_sessions_test_key",
 } as const;
 

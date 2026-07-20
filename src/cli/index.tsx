@@ -1244,7 +1244,7 @@ program
   .description("Inventory or explicitly apply a bounded, checkpointed self_hosted session-content backfill")
   .option("--apply", "Apply the selected backfill to the self_hosted /v1 API (default is inventory/dry-run)")
   .option("--confirm-apply <token>", "Required with --apply; pass BACKFILL_APPLY")
-  .option("--allow-production", "Permit production-like hasna.xyz API URLs after separate out-of-band user approval")
+  .option("--allow-production", "Permit production-like API URLs after separate out-of-band user approval")
   .option("-s, --source <source>", "Only backfill one provider: claude, codex, codewith, gemini")
   .option("--pilot <n>", "Deterministically select the first n sessions after sorting by source/source_id")
   .option("--range-start <source:id>", "Inclusive deterministic range start")
