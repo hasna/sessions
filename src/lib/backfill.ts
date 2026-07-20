@@ -700,12 +700,28 @@ function runBackupCommand(command: string | undefined, apply: boolean): Backfill
   };
 }
 
+/**
+ * Operator-configured production host suffixes (comma/space separated), e.g.
+ * `HASNA_SESSIONS_PRODUCTION_HOSTS=hasna.xyz`. This published package does not
+ * ship a built-in production hostname — operators who want the API URL alone to
+ * trip the production safety gate must set this (or the blanket
+ * `HASNA_SESSIONS_PRODUCTION=1` override) explicitly.
+ */
+function productionHostSuffixes(env: Record<string, string | undefined>): string[] {
+  const raw = env.HASNA_SESSIONS_PRODUCTION_HOSTS?.trim();
+  if (!raw) return [];
+  return raw
+    .split(/[\s,]+/)
+    .map((suffix) => suffix.trim().toLowerCase())
+    .filter((suffix) => suffix.length > 0);
+}
+
 function isProductionLikeUrl(raw: string | undefined, env: Record<string, string | undefined> = process.env): boolean {
   if (env.HASNA_SESSIONS_PRODUCTION === "1" || env.HASNA_SESSIONS_PRODUCTION === "true") return true;
   if (!raw) return false;
   try {
     const host = new URL(raw).hostname.toLowerCase();
-    return host === "sessions.hasna.xyz" || host.endsWith(".hasna.xyz");
+    return productionHostSuffixes(env).some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
   } catch {
     return false;
   }
