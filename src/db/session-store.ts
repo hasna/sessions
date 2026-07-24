@@ -33,7 +33,7 @@ import type { IngestResult } from "../lib/ingest/index.js";
 import { contentShrinkError } from "../lib/content-import-safety.js";
 
 export interface IngestStoreOptions {
-  /** Ingest only this provider (claude | codex | gemini). */
+  /** Ingest only this provider (claude | codex | codewith | gemini). */
   source?: string;
   /** Ingest only these providers. Ignored when `source` is set. */
   sources?: string[];
