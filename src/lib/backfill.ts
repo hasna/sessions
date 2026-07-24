@@ -702,7 +702,7 @@ function runBackupCommand(command: string | undefined, apply: boolean): Backfill
 
 /**
  * Operator-configured production host suffixes (comma/space separated), e.g.
- * `HASNA_SESSIONS_PRODUCTION_HOSTS=hasna.xyz`. This published package does not
+ * `HASNA_SESSIONS_PRODUCTION_HOSTS=your-domain.example`. This published package does not
  * ship a built-in production hostname — operators who want the API URL alone to
  * trip the production safety gate must set this (or the blanket
  * `HASNA_SESSIONS_PRODUCTION=1` override) explicitly.
