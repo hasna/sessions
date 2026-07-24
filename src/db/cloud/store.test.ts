@@ -3,7 +3,7 @@ import type { QueryResultRow } from "pg";
 import type { PoolQueryClient, TypedQueryClient } from "../../generated/storage-kit/index.js";
 import type { SessionContentImport } from "../../types/index.js";
 import { SessionAmbiguousError, SessionInvalidIdentifierError } from "../../types/index.js";
-import { getSessionByPrefix, importSessionContent, upsertSession } from "./store.js";
+import { getSessionByPrefix, importSessionContent, listMachines, upsertSession } from "./store.js";
 
 function splitSqlList(list: string): string[] {
   return list
@@ -529,5 +529,106 @@ describe("cloud import sanitization", () => {
     );
 
     expect(sessionParams[17]).toBe(3933601403);
+  });
+});
+
+describe("cloud listMachines aggregation", () => {
+  // Regression for machines-empty: sessions carry machine tags but the `machines`
+  // table is never populated in self_hosted /v1 mode (upsertSession only writes
+  // sessions.machine). listMachines must aggregate from the sessions table, not
+  // silently return [] by reading an empty machines table.
+  function clientWithSessions(
+    sessions: { machine: string | null; ingested_at: string }[],
+    machinesTable: QueryResultRow[] = [],
+  ): TypedQueryClient {
+    return {
+      async query() {
+        return { rows: [], rowCount: 0 };
+      },
+      async many<T extends QueryResultRow>(sql: string): Promise<T[]> {
+        if (sql.includes("FROM sessions")) {
+          // Emulate the aggregation Postgres would perform for the new query.
+          const counts = new Map<string, { session_count: number; last: string }>();
+          for (const s of sessions) {
+            if (s.machine == null || s.machine === "") continue;
+            const cur = counts.get(s.machine) ?? { session_count: 0, last: "" };
+            cur.session_count += 1;
+            if (s.ingested_at > cur.last) cur.last = s.ingested_at;
+            counts.set(s.machine, cur);
+          }
+          const meta = new Map(machinesTable.map((m) => [String(m.name), m]));
+          return [...counts.entries()]
+            .map(([name, agg]) => {
+              const m = meta.get(name);
+              return {
+                name,
+                hostname: (m?.hostname as string | undefined) ?? null,
+                platform: (m?.platform as string | undefined) ?? null,
+                first_seen_at: (m?.first_seen_at as string | undefined) ?? agg.last,
+                last_seen_at: (m?.last_seen_at as string | undefined) ?? agg.last,
+                session_count: agg.session_count,
+              };
+            })
+            .sort((a, b) => b.session_count - a.session_count || a.name.localeCompare(b.name)) as T[];
+        }
+        // Old behaviour path: read the (empty) machines table.
+        return machinesTable as T[];
+      },
+      async one() {
+        throw new Error("one() not used in this test");
+      },
+      async get() {
+        return null;
+      },
+      async execute() {},
+    };
+  }
+
+  test("aggregates machine tags from sessions when the machines table is empty", async () => {
+    const client = clientWithSessions([
+      { machine: "station01", ingested_at: "2026-07-01T00:00:00.000Z" },
+      { machine: "station01", ingested_at: "2026-07-02T00:00:00.000Z" },
+      { machine: "station01", ingested_at: "2026-07-03T00:00:00.000Z" },
+      { machine: "audit-sessions-machine", ingested_at: "2026-07-04T00:00:00.000Z" },
+      { machine: null, ingested_at: "2026-07-05T00:00:00.000Z" },
+      { machine: "", ingested_at: "2026-07-06T00:00:00.000Z" },
+    ]);
+
+    const machines = await listMachines(client);
+
+    expect(machines).toHaveLength(2);
+    expect(machines[0]).toMatchObject({ name: "station01", session_count: 3 });
+    expect(machines[1]).toMatchObject({ name: "audit-sessions-machine", session_count: 1 });
+    // last_seen_at is derived from session timestamps when no machines row exists.
+    expect(machines[0]?.last_seen_at).toBe("2026-07-03T00:00:00.000Z");
+  });
+
+  test("uses machines-table metadata when a machine has registered", async () => {
+    const client = clientWithSessions(
+      [
+        { machine: "station01", ingested_at: "2026-07-01T00:00:00.000Z" },
+        { machine: "station01", ingested_at: "2026-07-02T00:00:00.000Z" },
+      ],
+      [
+        {
+          name: "station01",
+          hostname: "station01.local",
+          platform: "linux",
+          first_seen_at: "2026-06-01T00:00:00.000Z",
+          last_seen_at: "2026-06-30T00:00:00.000Z",
+          session_count: 0,
+        },
+      ],
+    );
+
+    const machines = await listMachines(client);
+
+    expect(machines).toHaveLength(1);
+    expect(machines[0]).toMatchObject({
+      name: "station01",
+      hostname: "station01.local",
+      platform: "linux",
+      session_count: 2,
+    });
   });
 });

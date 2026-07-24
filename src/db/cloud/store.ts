@@ -388,16 +388,32 @@ export async function searchSessions(
 }
 
 export async function listMachines(client: TypedQueryClient = getCloudClient()): Promise<Machine[]> {
+  // Aggregate machines directly from the machine tags carried by stored sessions.
+  // The `machines` table is only maintained by the local ingest/recompute path and
+  // is never populated when sessions arrive via the /v1 API (upsertSession only
+  // writes sessions.machine). Deriving from sessions keeps the counts truthful in
+  // self_hosted mode; the machines table is LEFT JOINed purely for optional
+  // hostname/platform/first-last-seen metadata when a machine has registered.
   const rows = await client.many<Machine & Record<string, unknown>>(
-    `SELECT name, hostname, platform, first_seen_at, last_seen_at, session_count
-       FROM machines ORDER BY last_seen_at DESC`,
+    `SELECT
+        s.machine AS name,
+        m.hostname AS hostname,
+        m.platform AS platform,
+        COALESCE(m.first_seen_at, MIN(COALESCE(s.started_at, s.ingested_at))) AS first_seen_at,
+        COALESCE(m.last_seen_at, MAX(COALESCE(s.ended_at, s.started_at, s.updated_at, s.ingested_at))) AS last_seen_at,
+        COUNT(*) AS session_count
+       FROM sessions s
+       LEFT JOIN machines m ON m.name = s.machine
+      WHERE s.machine IS NOT NULL AND s.machine <> ''
+      GROUP BY s.machine, m.hostname, m.platform, m.first_seen_at, m.last_seen_at
+      ORDER BY session_count DESC, name ASC`,
   );
   return rows.map((row) => ({
     name: String(row.name),
     hostname: (row.hostname as string) ?? null,
     platform: (row.platform as string) ?? null,
-    first_seen_at: String(row.first_seen_at),
-    last_seen_at: String(row.last_seen_at),
+    first_seen_at: row.first_seen_at == null ? "" : String(row.first_seen_at),
+    last_seen_at: row.last_seen_at == null ? "" : String(row.last_seen_at),
     session_count: num(row.session_count),
   }));
 }
