@@ -53,6 +53,19 @@ describe("sessions content sync CLI", () => {
     expect(Buffer.from(daemonHelp.stdout).toString("utf-8")).toContain('default: "60"');
   });
 
+  it("defaults sync --limit to a bounded value mirroring daemon so a bare sync does not scan the whole store", () => {
+    // Regression: a bare `sessions sync` had no default --limit and scanned the entire
+    // local store (~13k sessions), parsing per-session content and hanging with no output.
+    // Both `sync` and `daemon` must expose the same bounded default (500).
+    const limitDefault = /-l, --limit <n>[\s\S]*?\(default:\s+"500"\)/;
+
+    const syncHelp = Buffer.from(runCli(["sync", "--help"]).stdout).toString("utf-8");
+    expect(syncHelp).toMatch(limitDefault);
+
+    const daemonHelp = Buffer.from(runCli(["daemon", "--help"]).stdout).toString("utf-8");
+    expect(daemonHelp).toMatch(limitDefault);
+  });
+
   it("dry-runs content sync as parseable JSON without API credentials", () => {
     const result = runCli([
       "sync",

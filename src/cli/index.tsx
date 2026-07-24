@@ -1328,6 +1328,12 @@ interface ContentSyncResult {
 const CLOUD_SYNC_BACKUP_GUIDANCE =
   "Live self_hosted pushes require a successful --backup-command. Raw SQLite file copies are not treated as a safe backup while the DB may be active.";
 
+// Default number of local sessions scanned per content-sync cycle. A bare `sessions sync`
+// on a large store (~13k sessions) would otherwise scan and parse every session and hang
+// with no progress; both `sync` and `daemon` share this bounded default so a single command
+// completes promptly. Pass --limit to scan more.
+const DEFAULT_SYNC_LIMIT = 500;
+
 function runBackupCommand(command: string | undefined, dryRun: boolean): ContentSyncResult["backup"]["hook"] {
   const trimmed = command?.trim();
   if (!trimmed) return { configured: false, ran: false, exitCode: null };
@@ -1383,7 +1389,7 @@ function printContentSyncResult(result: ContentSyncResult, prefix = "sync"): voi
 async function runContentSyncOnce(opts: ApiSyncCliOptions): Promise<ContentSyncResult> {
   const { resolveSessionStore, getLocalStore } = await import("../db/session-store.js");
   const dryRun = Boolean(opts.dryRun);
-  const limit = parsePositiveIntOption(opts.limit, opts.watch ? 500 : 100000, "--limit");
+  const limit = parsePositiveIntOption(opts.limit, DEFAULT_SYNC_LIMIT, "--limit");
   const local = getLocalStore();
   const result: ContentSyncResult = {
     target: "self_hosted_api",
@@ -1569,7 +1575,7 @@ program
   .option("-s, --source <source>", "Only sync one provider: claude, codex, codewith, gemini")
   .option("-p, --project <value>", "Only sync sessions for this project path/name")
   .option("-m, --machine <name>", "Only sync sessions from this machine")
-  .option("-l, --limit <n>", "Maximum local sessions to scan per cycle")
+  .option("-l, --limit <n>", "Maximum local sessions to scan per cycle", String(DEFAULT_SYNC_LIMIT))
   .option("--interval <seconds>", "Watch interval in seconds (minimum 5)")
   .option("--max-iterations <n>", "Stop watch mode after n cycles", "60")
   .option("--backup-command <command>", "Required for live self_hosted pushes; output is suppressed")
@@ -1586,7 +1592,7 @@ program
   .option("-s, --source <source>", "Only sync one provider: claude, codex, codewith, gemini")
   .option("-p, --project <value>", "Only sync sessions for this project path/name")
   .option("-m, --machine <name>", "Only sync sessions from this machine")
-  .option("-l, --limit <n>", "Maximum local sessions to scan per cycle", "500")
+  .option("-l, --limit <n>", "Maximum local sessions to scan per cycle", String(DEFAULT_SYNC_LIMIT))
   .option("--interval <seconds>", "Watch interval in seconds (minimum 5)", "60")
   .option("--max-iterations <n>", "Stop after n cycles; pass a larger value for longer supervised runs", "60")
   .option("--backup-command <command>", "Required for live self_hosted pushes; output is suppressed")
