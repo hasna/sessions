@@ -4,7 +4,8 @@
 // client-flip resolves to `cloud-http` — HASNA_SESSIONS_MODE=self_hosted (or
 // cloud) AND HASNA_SESSIONS_API_URL + HASNA_SESSIONS_API_KEY are set — every
 // read and write is routed to the app's cloud `/v1` HTTP API
-// (https://sessions.hasna.xyz/v1) with the bearer key, using the
+// (the configured HASNA_SESSIONS_API_URL, e.g. https://sessions.your-deployment.example/v1)
+// with the bearer key, using the
 // @hasna/contracts HTTP storage client's transport. NO SQLite, NO DSN, NO raw
 // RDS from a client.
 //

@@ -188,7 +188,7 @@ writing directly to a database. Configure:
 
 ```bash
 export HASNA_SESSIONS_MODE=self_hosted
-export HASNA_SESSIONS_API_URL=https://sessions.hasna.xyz
+export HASNA_SESSIONS_API_URL=https://sessions.your-deployment.example
 export HASNA_SESSIONS_API_KEY=...
 ```
 
@@ -243,14 +243,17 @@ Live apply is fail-closed: it requires a self-hosted API store, an explicit
 selection boundary (`--source` plus `--pilot`, a range, or a `--known-id`; or
 the conspicuous `--all-sources` acknowledgement), a capacity ceiling, a
 successful backup hook, durable checkpointing, and the literal confirmation
-token. Production-like `hasna.xyz` API URLs also require `--allow-production`,
-but that flag is only a technical gate: actual production apply still requires
-separate out-of-band user approval before running the command.
+token. Production-like API URLs also require `--allow-production`, but that
+flag is only a technical gate: actual production apply still requires separate
+out-of-band user approval before running the command.
 When `--known-id` is the only apply boundary beyond `--source`, only those known
 IDs are selected. Do not combine `--all-sources` with `--known-id`: that mixes a
-broad acknowledgement with a narrow selector and fails closed. If a production
-deployment uses a non-`hasna.xyz` alias, set `HASNA_SESSIONS_PRODUCTION=1` so the
-same explicit production gate applies.
+broad acknowledgement with a narrow selector and fails closed. An API URL is
+only auto-detected as production-like against host suffixes you configure via
+`HASNA_SESSIONS_PRODUCTION_HOSTS` (comma/space separated, e.g. your own root
+domain) — this package does not ship a built-in production hostname. If you'd
+rather force the gate unconditionally regardless of URL, set
+`HASNA_SESSIONS_PRODUCTION=1`.
 
 ```bash
 sessions backfill \
