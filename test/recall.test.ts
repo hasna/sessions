@@ -6,6 +6,7 @@ import { closeDatabase, getDatabase, resetDatabase } from "../src/db/database.js
 import { saveParsedSession } from "../src/db/sessions.js";
 import { embedSessions, type Embedder } from "../src/lib/embeddings.js";
 import { recallSessions } from "../src/lib/recall.js";
+import { resolveSessionStore } from "../src/storage.js";
 
 const repoRoot = join(import.meta.dir, "..");
 
@@ -197,6 +198,41 @@ describe("recallSessions", () => {
   });
 });
 
+describe("@hasna/sessions/storage recall contract", () => {
+  it("preserves recall in local mode", async () => {
+    const { stripe } = seedRecallFixtures();
+    const store = resolveSessionStore({ HASNA_SESSIONS_MODE: "local" });
+
+    const response = await store.recall("stripe webhook", { limit: 1 });
+
+    expect(store.mode).toBe("local");
+    expect(response.results[0].session_id).toBe(stripe.id);
+  });
+
+  it("reports recall as local-only in hosted mode without making a request", async () => {
+    let requestCount = 0;
+    const store = resolveSessionStore(
+      {
+        HASNA_SESSIONS_STORAGE_MODE: "cloud",
+        HASNA_SESSIONS_API_URL: "https://sessions.example.test",
+        HASNA_SESSIONS_API_KEY: "test-key",
+      },
+      {
+        fetchImpl: async () => {
+          requestCount += 1;
+          throw new Error("hosted recall must not make a request");
+        },
+      },
+    );
+
+    expect(store.mode).toBe("cloud");
+    await expect(store.recall("stripe webhook", { limit: 1 })).rejects.toThrow(
+      "'recall' is local-only and is not available in hosted/self-hosted mode",
+    );
+    expect(requestCount).toBe(0);
+  });
+});
+
 describe("sessions recall CLI", () => {
   let dir: string;
   let dbPath: string;
@@ -245,5 +281,35 @@ describe("sessions recall CLI", () => {
     expect(payload.query).toBe("stripe webhook");
     expect(payload.results[0].resume.shell_command).toBe("claude --resume claude-stripe-001");
     expect(payload.results[0].touched_file_paths).toContain("src/routes/stripe-webhook.ts");
+  });
+
+  it("reports recall as local-only in self_hosted mode with supported alternatives", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "run", "src/cli/index.tsx", "recall", "stripe webhook"],
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        HASNA_SESSIONS_STORAGE_MODE: "self_hosted",
+        HASNA_SESSIONS_MODE: "self_hosted",
+        HASNA_SESSIONS_API_URL: "https://sessions.example.test",
+        HASNA_SESSIONS_API_KEY: "test-key",
+        SESSIONS_STORAGE_MODE: "self_hosted",
+        SESSIONS_MODE: "self_hosted",
+        SESSIONS_API_URL: "https://sessions.example.test",
+        SESSIONS_API_KEY: "test-key",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const stderr = Buffer.from(result.stderr).toString("utf-8");
+    expect(result.exitCode).toBe(1);
+    expect(Buffer.from(result.stdout).toString("utf-8")).toBe("");
+    expect(stderr).toContain(
+      "'recall' is local-only and is not available in hosted/self-hosted mode",
+    );
+    expect(stderr).toContain("'sessions list'");
+    expect(stderr).toContain("'sessions show <id>'");
+    expect(stderr).toContain("'sessions search <query>'");
   });
 });
