@@ -286,17 +286,17 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
         throw error;
       }
     },
-    // Not yet available server-side: these require the local embedding/FTS index
-    // or a local-to-local DB merge. Fail loudly instead of silently reading the
-    // local SQLite island (that was the split-brain bug).
+    // These require the local embedding/FTS index or a local-to-local DB merge;
+    // recall is intentionally local-only. Fail loudly instead of silently
+    // reading the local SQLite island (that was the split-brain bug).
     semanticSearch() {
       return notAvailableInCloud("semantic search");
     },
     hybridSearch() {
       return notAvailableInCloud("hybrid search");
     },
-    recall() {
-      return notAvailableInCloud("recall");
+    async recall() {
+      return recallNotAvailableInCloud();
     },
     embed() {
       return notAvailableInCloud("embed");
@@ -323,6 +323,14 @@ function notAvailableInCloud(op: string): never {
     `'${op}' is not available in self_hosted mode: it depends on the local session index ` +
       `(embeddings / full recall / local DB merge), which the cloud /v1 API does not serve. ` +
       `Run it on a machine in local mode (unset HASNA_SESSIONS_API_URL/API_KEY).`,
+  );
+}
+
+function recallNotAvailableInCloud(): never {
+  throw new Error(
+    `'recall' is local-only and is not available in hosted/self-hosted mode. ` +
+      `Use 'sessions list', 'sessions show <id>', or 'sessions search <query>' against the hosted store, ` +
+      `or run recall on a machine in local mode.`,
   );
 }
 

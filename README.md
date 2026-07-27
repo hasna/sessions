@@ -180,6 +180,15 @@ session metadata and content to the authenticated `/v1` API. Clients do not
 open a Postgres DSN, and the former client-side storage subcommand family has
 been removed.
 
+`sessions recall` is local-only because its combined FTS, semantic, tool-call,
+and graph ranking uses the on-box index. In hosted/self-hosted mode, use
+`sessions list`, `sessions show <id>`, and `sessions search <query>` against the
+active hosted store instead. Run `sessions recall` on a machine in local mode
+when the richer recall result is required; the CLI and public storage SDK fail
+before making a hosted recall request. No `/v1/recall` endpoint is provided;
+generated HTTP SDK consumers can use `listSessions`, `getSession` with
+`listSessionMessages`, and `searchSessions`.
+
 ## Self-Hosted API Sync
 
 Use API sync when this machine should push local indexed sessions, messages, and

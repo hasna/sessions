@@ -1965,7 +1965,7 @@ program
 
 program
   .command("recall <query>")
-  .description("Recall a coding session by natural language, with evidence, touched files, graph context, and resume metadata")
+  .description("Local-only recall by natural language, with evidence, touched files, graph context, and resume metadata")
   .option("-s, --source <source>", "Filter by provider: claude, codex, codewith, or gemini")
   .option("-p, --project <value>", "Filter by project name or path")
   .option("-m, --machine <name>", "Filter by machine")
