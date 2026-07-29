@@ -59,6 +59,12 @@ import {
   parseConcurrency,
   parseJitterMs,
 } from "../lib/bulk.js";
+import {
+  findLastSession,
+  formatResumeGroupTable,
+  resumeGroup,
+} from "../lib/session-resume.js";
+import { getMachineName } from "../lib/machine.js";
 
 const program = new Command();
 
@@ -144,6 +150,10 @@ function preCloudSyncBackupRecord(): { artifact: null; created_at: string; note:
 function collectRepeatableOption(value: string, previous: string[] = []): string[] {
   previous.push(value);
   return previous;
+}
+
+function quoteShellArgument(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 /** Format a table of Store sessions (LocalStore | ApiStore), never the registry. */
@@ -890,6 +900,58 @@ program
       console.error(`Error: ${error.message}`);
       process.exit(1);
     }
+  });
+
+program
+  .command("resume-group <tmux-group>")
+  .description("Find the last agent session in each tmux window and rebuild the group with resume commands")
+  .option("-n, --dry-run", "Show what would be resumed without changing tmux")
+  .option("-m, --machine <name>", "Run on a machine from the sessions machine registry")
+  .option("--json", "Output the resume report as JSON")
+  .action(async (tmuxGroup: string, opts: any) => {
+    if (opts.machine && opts.machine !== getMachineName()) {
+      const { resolveSessionStore } = await import("../db/session-store.js");
+      const machines = await resolveSessionStore().machines();
+      const machine = machines.find(
+        (candidate) => candidate.name === opts.machine || candidate.hostname === opts.machine
+      );
+      if (!machine) throw new Error(`machine not found in registry: ${opts.machine}`);
+      const host = machine.hostname?.trim() || machine.name;
+      const remoteArgs = ["sessions", "resume-group", tmuxGroup, "--json"];
+      if (opts.dryRun) remoteArgs.push("--dry-run");
+      const remoteCommand = remoteArgs.map(quoteShellArgument).join(" ");
+      const remote = spawnSync("ssh", [host, remoteCommand], { encoding: "utf-8" });
+      if (remote.error) throw remote.error;
+      if (remote.status !== 0) {
+        throw new Error(remote.stderr.trim() || `remote sessions command failed on ${machine.name}`);
+      }
+      if (opts.json) {
+        writeStdoutFully(remote.stdout);
+      } else {
+        const result = JSON.parse(remote.stdout);
+        console.log(formatResumeGroupTable(result));
+      }
+      return;
+    }
+
+    const result = resumeGroup(tmuxGroup, { dryRun: opts.dryRun });
+    if (opts.json) printJson(result);
+    else console.log(formatResumeGroupTable(result));
+    if (result.summary.failed > 0) process.exitCode = 1;
+  });
+
+program
+  .command("find-last <tmux-window-target>")
+  .description("Find the last resumable Claude, Codex, or Takumi session for a tmux pane/window")
+  .option("--json", "Output the match as JSON")
+  .action((tmuxWindowTarget: string, opts: any) => {
+    const match = findLastSession(tmuxWindowTarget);
+    if (!match) throw new Error(`no resumable session found for ${tmuxWindowTarget}`);
+    if (opts.json) {
+      printJson(match);
+      return;
+    }
+    console.log(`${match.target}  ${match.agent}  ${match.sessionId}  ${match.source}`);
   });
 
 program

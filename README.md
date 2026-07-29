@@ -85,6 +85,12 @@ sessions transcript-search "raw Claude-only query"
 sessions rename <id-or-name> "my friendly name"
 sessions resume --last --print-command
 sessions resume <friendly-name-or-id>
+
+# Recover Claude/Codex/Takumi sessions from tmux pane history and local files
+sessions resume-group platform-alumia
+sessions resume-group platform-alumia --dry-run
+sessions find-last "platform-alumia:3"
+sessions resume-group platform-alumia --machine spark01
 ```
 
 `sessions list` is the friendly-name registry used for resume workflows.
@@ -145,7 +151,8 @@ Exposes session tools for agents/orchestrators: `search_sessions`,
 `search_tool_calls`, `recall_session`, `semantic_search`, `recent_sessions`, `list_sessions`,
 `get_session`, `ingest`, `embed`, `session_stats`, `knowledge_graph`, plus
 registry-backed tools (`sessions_list`, `sessions_history`, `sessions_search`,
-`sessions_resume`, `sessions_rename`, `sessions_watch`, `sessions_stats`),
+`sessions_resume`, `sessions_resume_group`, `sessions_find_last`,
+`sessions_list_by_project`, `sessions_rename`, `sessions_watch`, `sessions_stats`),
 cross-adapter import tools, and agent registry tools. MCP no longer exposes the
 removed DSN-on-client push/pull tools or direct feedback write tool.
 

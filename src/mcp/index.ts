@@ -13,6 +13,11 @@ import type { CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
 import { resolveSessionStore, getLocalStore } from "../db/session-store.js";
 import type { Session } from "../types/index.js";
+import {
+  findLastSession,
+  listSessionsByProject,
+  resumeGroup,
+} from "../lib/session-resume.js";
 
 /**
  * Build the underlying resume command for a Store session using its provider
@@ -544,6 +549,48 @@ server.tool(
       }
 
       return textJson({ session, command: buildResumeCommand(session) });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "sessions_resume_group",
+  "Detect the last Claude, Codex, or Takumi session in every window of a tmux group and rebuild the windows with resume commands.",
+  {
+    tmux_group: z.string().min(1),
+    dry_run: z.boolean().optional(),
+  },
+  async (args: { tmux_group: string; dry_run?: boolean }) => {
+    try {
+      return textJson(resumeGroup(args.tmux_group, { dryRun: args.dry_run }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "sessions_find_last",
+  "Find the last resumable agent session for a specific tmux pane or window target.",
+  { tmux_window_target: z.string().min(1) },
+  async (args: { tmux_window_target: string }) => {
+    try {
+      return textJson(findLastSession(args.tmux_window_target));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "sessions_list_by_project",
+  "List raw Claude and Codex sessions for a project directory, sorted by most recent file activity.",
+  { project_path: z.string().min(1) },
+  async (args: { project_path: string }) => {
+    try {
+      return textJson(listSessionsByProject(args.project_path));
     } catch (e) {
       return fail(e);
     }

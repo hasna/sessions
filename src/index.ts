@@ -36,6 +36,7 @@ export {
   decodePath,
   getClaudeProjectsDir,
   getClaudeBaseDir,
+  getCodexSessionsDir,
   getSessionsDbPath,
   getSessionsDir,
   findMatchingProjectDirs,
@@ -82,6 +83,26 @@ export type {
   BulkSessionOptions,
   BulkSessionPlan,
 } from "./lib/bulk.js";
+
+export {
+  detectResumeAgent,
+  findExplicitResumeCommand,
+  findLastSession,
+  formatResumeGroupTable,
+  listSessionsByProject,
+  resumeGroup,
+} from "./lib/session-resume.js";
+export type {
+  FindLastSessionOptions,
+  LastSessionMatch,
+  ProjectSession,
+  ResumeAgent,
+  ResumeGroupEntry,
+  ResumeGroupEntryStatus,
+  ResumeGroupOptions,
+  ResumeGroupResult,
+  SessionDiscoverySource,
+} from "./lib/session-resume.js";
 
 export {
   recallSessions,
