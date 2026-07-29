@@ -6,12 +6,16 @@
 // shapes so the generated SDK/OpenAPI is one contract.
 
 import type {
+  AppendLiveTraceEventInput,
+  AppendLiveTraceEventResult,
   Machine,
   Message,
   Session,
   SessionContentImport,
   SessionLookupOptions,
   ToolCall,
+  TailLiveTraceOptions,
+  TailLiveTraceResult,
 } from "../types/index.js";
 import type { SearchHit, ToolCallHit } from "../lib/search.js";
 import type { Entity, EntityType, RelatedSession, SessionGraph } from "../lib/graph.js";
@@ -60,6 +64,8 @@ export interface DataSource {
   graphEntities(type?: EntityType): Promise<Entity[]>;
   graphRelated(type: EntityType, name: string, limit: number): Promise<RelatedSession[]>;
   graphSession(idOrPrefix: string, opts?: SessionLookupOptions): Promise<SessionGraph | null>;
+  appendTrace(traceId: string, input: AppendLiveTraceEventInput): Promise<AppendLiveTraceEventResult>;
+  tailTrace(traceId: string, opts?: TailLiveTraceOptions): Promise<TailLiveTraceResult | null>;
 }
 
 const cloudSource: DataSource = {
@@ -84,6 +90,8 @@ const cloudSource: DataSource = {
   graphRelated: (type, name, limit) =>
     cloud.graphRelated(type as cloud.CloudEntityType, name, limit),
   graphSession: (idOrPrefix, opts) => cloud.graphSession(idOrPrefix, opts),
+  appendTrace: (traceId, input) => cloud.appendLiveTraceEvent(traceId, input),
+  tailTrace: (traceId, opts) => cloud.tailLiveTrace(traceId, opts),
 };
 
 function localSource(): DataSource {
@@ -221,6 +229,14 @@ function localSource(): DataSource {
       const session = getSessionByPrefix(idOrPrefix, opts);
       if (!session) return null;
       return sessionGraph(session.id);
+    },
+    async appendTrace(traceId, input) {
+      const { appendLocalLiveTraceEvent } = await import("../db/live-traces.js");
+      return appendLocalLiveTraceEvent(traceId, input);
+    },
+    async tailTrace(traceId, opts = {}) {
+      const { tailLocalLiveTrace } = await import("../db/live-traces.js");
+      return tailLocalLiveTrace(traceId, opts);
     },
   };
 }

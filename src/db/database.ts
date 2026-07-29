@@ -180,6 +180,46 @@ const SCHEMA: string[] = [
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
 
+  `CREATE TABLE IF NOT EXISTS live_traces (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK(status IN ('active', 'completed', 'failed', 'cancelled')),
+    workflow_run_id TEXT NOT NULL,
+    loop_run_id TEXT NOT NULL,
+    step_id TEXT,
+    task_id TEXT,
+    provider TEXT,
+    worktree_path TEXT,
+    worktree_policy TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    next_sequence INTEGER NOT NULL DEFAULT 1
+  )`,
+
+  `CREATE TABLE IF NOT EXISTS live_trace_events (
+    trace_id TEXT NOT NULL REFERENCES live_traces(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('message', 'tool_call', 'command', 'validation', 'verifier', 'status')),
+    level TEXT NOT NULL CHECK(level IN ('info', 'warn', 'error')),
+    message TEXT NOT NULL,
+    event_status TEXT,
+    data TEXT NOT NULL DEFAULT '{}',
+    workflow_run_id TEXT NOT NULL,
+    loop_run_id TEXT NOT NULL,
+    step_id TEXT,
+    task_id TEXT,
+    provider TEXT,
+    worktree_path TEXT,
+    worktree_policy TEXT,
+    occurred_at TEXT NOT NULL,
+    stored_at TEXT NOT NULL,
+    redacted INTEGER NOT NULL DEFAULT 0,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (trace_id, id),
+    UNIQUE(trace_id, sequence)
+  )`,
+
   // Indexes
   `CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source_id)`,
@@ -195,6 +235,10 @@ const SCHEMA: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_tool_calls_message_id ON tool_calls(message_id)`,
   `CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_name ON tool_calls(tool_name)`,
   `CREATE INDEX IF NOT EXISTS idx_embeddings_session_id ON embeddings(session_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_live_traces_workflow_run ON live_traces(workflow_run_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_live_traces_loop_run ON live_traces(loop_run_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_live_traces_expires_at ON live_traces(expires_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_live_trace_events_sequence ON live_trace_events(trace_id, sequence)`,
 
   // FTS5 virtual tables (standalone, with UNINDEXED reference columns)
   `CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(

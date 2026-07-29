@@ -7,6 +7,11 @@
 import type { PoolQueryClient, TypedQueryClient } from "../../generated/storage-kit/index.js";
 import type {
   Machine,
+  AppendLiveTraceEventInput,
+  AppendLiveTraceEventResult,
+  LiveTrace,
+  LiveTraceCorrelation,
+  LiveTraceEvent,
   Message,
   MessageInsert,
   Session,
@@ -15,6 +20,8 @@ import type {
   SessionLookupOptions,
   ToolCall,
   ToolCallInsert,
+  TailLiveTraceOptions,
+  TailLiveTraceResult,
 } from "../../types/index.js";
 import {
   SESSION_SOURCES,
@@ -25,6 +32,14 @@ import { getCloudClient } from "./client.js";
 import { encodePath } from "../../lib/paths.js";
 import { contentShrinkError } from "../../lib/content-import-safety.js";
 import { sanitizeSessionContentImport, sanitizeSessionInsert } from "../../lib/import-sanitizer.js";
+import {
+  clampTraceCursor,
+  clampTraceTailLimit,
+  sanitizeAppendLiveTraceEventInput,
+  sanitizeTraceId,
+  traceExpiry,
+  traceMaxEvents,
+} from "../../lib/live-trace.js";
 
 interface SessionRow {
   id: string;
@@ -1098,5 +1113,273 @@ export async function graphSession(
     provider: session.model_provider,
     repo: session.git_origin_url,
     tools: tools.map((t) => t.tool_name),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Live workflow traces. These records intentionally contain only visible
+// messages and bounded execution summaries; sanitization happens before SQL.
+// ---------------------------------------------------------------------------
+
+interface LiveTraceRow extends Record<string, unknown> {
+  id: string;
+  status: string;
+  workflow_run_id: string;
+  loop_run_id: string;
+  step_id: string | null;
+  task_id: string | null;
+  provider: string | null;
+  worktree_path: string | null;
+  worktree_policy: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
+  next_sequence: number;
+}
+
+interface LiveTraceEventRow extends Record<string, unknown> {
+  trace_id: string;
+  id: string;
+  sequence: number;
+  kind: string;
+  level: string;
+  message: string;
+  event_status: string | null;
+  data: string;
+  workflow_run_id: string;
+  loop_run_id: string;
+  step_id: string | null;
+  task_id: string | null;
+  provider: string | null;
+  worktree_path: string | null;
+  worktree_policy: string | null;
+  occurred_at: string;
+  stored_at: string;
+  redacted: boolean;
+  truncated: boolean;
+}
+
+function rowToLiveTrace(row: LiveTraceRow): LiveTrace {
+  return {
+    id: row.id,
+    status: row.status as LiveTrace["status"],
+    workflow_run_id: row.workflow_run_id,
+    loop_run_id: row.loop_run_id,
+    step_id: row.step_id,
+    task_id: row.task_id,
+    provider: row.provider,
+    worktree_path: row.worktree_path,
+    worktree_policy: row.worktree_policy,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    expires_at: row.expires_at,
+    next_sequence: num(row.next_sequence),
+  };
+}
+
+function rowToLiveTraceEvent(row: LiveTraceEventRow): LiveTraceEvent {
+  return {
+    id: row.id,
+    trace_id: row.trace_id,
+    sequence: num(row.sequence),
+    kind: row.kind as LiveTraceEvent["kind"],
+    level: row.level as LiveTraceEvent["level"],
+    message: row.message,
+    event_status: row.event_status,
+    data: parseMetadata(row.data),
+    workflow_run_id: row.workflow_run_id,
+    loop_run_id: row.loop_run_id,
+    step_id: row.step_id,
+    task_id: row.task_id,
+    provider: row.provider,
+    worktree_path: row.worktree_path,
+    worktree_policy: row.worktree_policy,
+    occurred_at: row.occurred_at,
+    stored_at: row.stored_at,
+    redacted: Boolean(row.redacted),
+    truncated: Boolean(row.truncated),
+  };
+}
+
+function liveTraceCorrelation(trace: LiveTrace): LiveTraceCorrelation {
+  return {
+    workflow_run_id: trace.workflow_run_id,
+    loop_run_id: trace.loop_run_id,
+    step_id: trace.step_id,
+    task_id: trace.task_id,
+    provider: trace.provider,
+    worktree_path: trace.worktree_path,
+    worktree_policy: trace.worktree_policy,
+  };
+}
+
+function assertLiveTraceCorrelation(
+  trace: LiveTrace,
+  supplied: Partial<LiveTraceCorrelation> | undefined,
+): void {
+  if (!supplied) return;
+  const current = liveTraceCorrelation(trace);
+  for (const key of Object.keys(supplied) as (keyof LiveTraceCorrelation)[]) {
+    if (supplied[key] !== undefined && supplied[key] !== current[key]) {
+      throw new Error(
+        `trace correlation is immutable: ${key} is '${String(current[key])}', not '${String(supplied[key])}'`,
+      );
+    }
+  }
+}
+
+function resolveLiveEventCorrelation(
+  trace: LiveTrace,
+  supplied: Partial<LiveTraceCorrelation>,
+): LiveTraceCorrelation {
+  if (supplied.workflow_run_id !== undefined && supplied.workflow_run_id !== trace.workflow_run_id) {
+    throw new Error("event correlation workflow_run_id must match the trace");
+  }
+  if (supplied.loop_run_id !== undefined && supplied.loop_run_id !== trace.loop_run_id) {
+    throw new Error("event correlation loop_run_id must match the trace");
+  }
+  return {
+    workflow_run_id: trace.workflow_run_id,
+    loop_run_id: trace.loop_run_id,
+    step_id: supplied.step_id ?? trace.step_id,
+    task_id: supplied.task_id ?? trace.task_id,
+    provider: supplied.provider ?? trace.provider,
+    worktree_path: supplied.worktree_path ?? trace.worktree_path,
+    worktree_policy: supplied.worktree_policy ?? trace.worktree_policy,
+  };
+}
+
+export async function appendLiveTraceEvent(
+  rawTraceId: string,
+  input: AppendLiveTraceEventInput,
+  client: PoolQueryClient = getCloudClient(),
+): Promise<AppendLiveTraceEventResult> {
+  const traceId = sanitizeTraceId(rawTraceId);
+  const safe = sanitizeAppendLiveTraceEventInput(input);
+  const storedAt = new Date().toISOString();
+  const expiresAt = traceExpiry(new Date(storedAt));
+
+  return client.transaction(async (tx) => {
+    await tx.execute("DELETE FROM live_traces WHERE expires_at <= $1", [storedAt]);
+    let row = await tx.get<LiveTraceRow>("SELECT * FROM live_traces WHERE id = $1 FOR UPDATE", [traceId]);
+    if (!row) {
+      if (!safe.correlation) throw new Error("correlation is required on the first append");
+      const c = safe.correlation;
+      await tx.execute(
+        `INSERT INTO live_traces (
+          id, status, workflow_run_id, loop_run_id, step_id, task_id, provider,
+          worktree_path, worktree_policy, created_at, updated_at, expires_at, next_sequence
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1)`,
+        [
+          traceId,
+          safe.trace_status,
+          c.workflow_run_id,
+          c.loop_run_id,
+          c.step_id ?? null,
+          c.task_id ?? null,
+          c.provider ?? null,
+          c.worktree_path ?? null,
+          c.worktree_policy ?? null,
+          storedAt,
+          storedAt,
+          expiresAt,
+        ],
+      );
+      row = await tx.get<LiveTraceRow>("SELECT * FROM live_traces WHERE id = $1 FOR UPDATE", [traceId]);
+    }
+    if (!row) throw new Error(`failed to create trace: ${traceId}`);
+    let trace = rowToLiveTrace(row);
+    assertLiveTraceCorrelation(trace, safe.correlation);
+
+    const duplicate = await tx.get<LiveTraceEventRow>(
+      "SELECT * FROM live_trace_events WHERE trace_id = $1 AND id = $2",
+      [traceId, safe.event.id],
+    );
+    if (duplicate) return { trace, event: rowToLiveTraceEvent(duplicate), idempotent: true };
+    if (trace.status !== "active") {
+      throw new Error(`trace '${traceId}' is ${trace.status}; new events cannot be appended`);
+    }
+
+    const sequence = trace.next_sequence;
+    const c = resolveLiveEventCorrelation(trace, safe.event.correlation);
+    await tx.execute(
+      `INSERT INTO live_trace_events (
+        trace_id, id, sequence, kind, level, message, event_status, data,
+        workflow_run_id, loop_run_id, step_id, task_id, provider, worktree_path,
+        worktree_policy, occurred_at, stored_at, redacted, truncated
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+      )`,
+      [
+        traceId,
+        safe.event.id,
+        sequence,
+        safe.event.kind,
+        safe.event.level,
+        safe.event.message,
+        safe.event.event_status,
+        JSON.stringify(safe.event.data),
+        c.workflow_run_id,
+        c.loop_run_id,
+        c.step_id ?? null,
+        c.task_id ?? null,
+        c.provider ?? null,
+        c.worktree_path ?? null,
+        c.worktree_policy ?? null,
+        safe.event.occurred_at,
+        storedAt,
+        safe.event.redacted,
+        safe.event.truncated,
+      ],
+    );
+    await tx.execute(
+      "UPDATE live_traces SET status = $1, updated_at = $2, expires_at = $3, next_sequence = $4 WHERE id = $5",
+      [safe.trace_status, storedAt, expiresAt, sequence + 1, traceId],
+    );
+    await tx.execute("DELETE FROM live_trace_events WHERE trace_id = $1 AND sequence <= $2", [
+      traceId,
+      sequence - traceMaxEvents(),
+    ]);
+
+    row = await tx.get<LiveTraceRow>("SELECT * FROM live_traces WHERE id = $1", [traceId]);
+    const event = await tx.get<LiveTraceEventRow>(
+      "SELECT * FROM live_trace_events WHERE trace_id = $1 AND id = $2",
+      [traceId, safe.event.id],
+    );
+    if (!row || !event) throw new Error(`failed to persist trace event: ${safe.event.id}`);
+    trace = rowToLiveTrace(row);
+    return { trace, event: rowToLiveTraceEvent(event), idempotent: false };
+  });
+}
+
+export async function tailLiveTrace(
+  rawTraceId: string,
+  options: TailLiveTraceOptions = {},
+  client: TypedQueryClient = getCloudClient(),
+): Promise<TailLiveTraceResult | null> {
+  const traceId = sanitizeTraceId(rawTraceId);
+  const row = await client.get<LiveTraceRow>(
+    "SELECT * FROM live_traces WHERE id = $1 AND expires_at > $2",
+    [traceId, new Date().toISOString()],
+  );
+  if (!row) return null;
+  const after = clampTraceCursor(options.after);
+  const limit = clampTraceTailLimit(options.limit);
+  const rows = await client.many<LiveTraceEventRow>(
+    "SELECT * FROM live_trace_events WHERE trace_id = $1 AND sequence > $2 ORDER BY sequence ASC LIMIT $3",
+    [traceId, after, limit],
+  );
+  const earliestRow = await client.get<{ sequence: number | null }>(
+    "SELECT MIN(sequence) AS sequence FROM live_trace_events WHERE trace_id = $1",
+    [traceId],
+  );
+  const earliest = earliestRow?.sequence == null ? null : num(earliestRow.sequence);
+  const events = rows.map(rowToLiveTraceEvent);
+  return {
+    trace: rowToLiveTrace(row),
+    events,
+    next_after: events.at(-1)?.sequence ?? after,
+    earliest_sequence: earliest,
+    cursor_expired: earliest !== null && after < earliest - 1,
   };
 }

@@ -17,12 +17,16 @@
 import { resolveStorageClient } from "@hasna/contracts/client/storage";
 import type { HasnaStorageClient } from "@hasna/contracts/client/storage";
 import type {
+  AppendLiveTraceEventInput,
+  AppendLiveTraceEventResult,
   Machine,
   Message,
   Session,
   SessionContentImport,
   SessionLookupOptions,
   ToolCall,
+  TailLiveTraceOptions,
+  TailLiveTraceResult,
 } from "../types/index.js";
 import type { SessionContentImportResult, UpsertSessionInput } from "./cloud/store.js";
 import type { SearchHit, ToolCallHit } from "../lib/search.js";
@@ -127,6 +131,10 @@ export interface SessionStore {
   ingest(opts?: IngestStoreOptions): Promise<IngestResult[]>;
   /** Recompute per-machine session counts in the index (index maintenance). */
   recomputeMachines(): Promise<void>;
+  /** Append one redacted, bounded operator-visible workflow trace event. */
+  appendTrace(traceId: string, input: AppendLiveTraceEventInput): Promise<AppendLiveTraceEventResult>;
+  /** Replay trace events after a sequence cursor; callers may poll for live tailing. */
+  tailTrace(traceId: string, opts?: TailLiveTraceOptions): Promise<TailLiveTraceResult | null>;
 }
 
 const APP = "sessions";

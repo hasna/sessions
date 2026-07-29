@@ -20,6 +20,100 @@ export type MessageRole = (typeof MESSAGE_ROLES)[number];
 export const TOOL_CALL_STATUSES = ["success", "error", "timeout"] as const;
 export type ToolCallStatus = (typeof TOOL_CALL_STATUSES)[number];
 
+// ── Live workflow traces ──────────────────────────────────────────────
+
+/**
+ * Deliberately excludes hidden model reasoning. Producers may append only
+ * operator-visible messages and execution summaries.
+ */
+export const LIVE_TRACE_EVENT_KINDS = [
+  "message",
+  "tool_call",
+  "command",
+  "validation",
+  "verifier",
+  "status",
+] as const;
+export type LiveTraceEventKind = (typeof LIVE_TRACE_EVENT_KINDS)[number];
+
+export const LIVE_TRACE_STATUSES = ["active", "completed", "failed", "cancelled"] as const;
+export type LiveTraceStatus = (typeof LIVE_TRACE_STATUSES)[number];
+
+export interface LiveTraceCorrelation {
+  workflow_run_id: string;
+  loop_run_id: string;
+  step_id?: string | null;
+  task_id?: string | null;
+  provider?: string | null;
+  worktree_path?: string | null;
+  worktree_policy?: string | null;
+}
+
+export interface LiveTrace extends LiveTraceCorrelation {
+  id: string;
+  status: LiveTraceStatus;
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
+  next_sequence: number;
+}
+
+export interface LiveTraceEvent extends LiveTraceCorrelation {
+  id: string;
+  trace_id: string;
+  sequence: number;
+  kind: LiveTraceEventKind;
+  level: "info" | "warn" | "error";
+  message: string;
+  event_status: string | null;
+  data: Record<string, unknown>;
+  occurred_at: string;
+  stored_at: string;
+  redacted: boolean;
+  truncated: boolean;
+}
+
+export interface AppendLiveTraceEventInput {
+  /** Required on the first append; later appends may omit unchanged fields. */
+  correlation?: LiveTraceCorrelation;
+  event: {
+    /** Stable producer ID. Reusing it makes retries idempotent. */
+    id?: string;
+    kind: LiveTraceEventKind;
+    level?: "info" | "warn" | "error";
+    message: string;
+    event_status?: string | null;
+    data?: Record<string, unknown>;
+    occurred_at?: string;
+    /** Per-event overrides for step/task/provider/worktree correlation. */
+    correlation?: Partial<LiveTraceCorrelation>;
+  };
+  /** Set by terminal status events so tailers can stop without guessing. */
+  trace_status?: LiveTraceStatus;
+}
+
+export interface AppendLiveTraceEventResult {
+  trace: LiveTrace;
+  event: LiveTraceEvent;
+  idempotent: boolean;
+}
+
+export interface TailLiveTraceOptions {
+  /** Return events whose sequence is greater than this cursor. */
+  after?: number;
+  /** Bounded to 500 by storage implementations. */
+  limit?: number;
+}
+
+export interface TailLiveTraceResult {
+  trace: LiveTrace;
+  events: LiveTraceEvent[];
+  next_after: number;
+  earliest_sequence: number | null;
+  /** True when rolling retention removed events at or before the requested cursor. */
+  cursor_expired: boolean;
+}
+
 // ── Session ────────────────────────────────────────────────────────────
 
 export interface Session {
