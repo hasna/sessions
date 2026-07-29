@@ -50,6 +50,7 @@
     "contract:validate": "bun x @hasna/contracts validate hasna.contract.json",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:postgres": "bun run scripts/postgres-test-gate.ts",
     "prepublishOnly": "bun run typecheck && bun test && bun run build",
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:ingest": "bun run src/cli/index.tsx ingest --verbose",

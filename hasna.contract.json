@@ -5,7 +5,7 @@
   "class": "service",
   "contractVersion": "v1",
   "kitVersion": "0.5.2",
-  "description": "Search and sync AI coding sessions (Claude, Codex, Codewith, Gemini). Local mode uses SQLite at ~/.hasna/sessions/sessions.db; cloud storage mode (HASNA_SESSIONS_STORAGE_MODE=cloud) is PURE REMOTE per Amendment A1 — sessions-serve reads/writes shared Postgres directly for session metadata, imported messages, and tool calls via /v1 including /v1/sessions/import.",
+  "description": "Search and sync AI coding sessions across local and self-hosted deployments.",
   "bins": [
     "sessions",
     "sessions-mcp",
@@ -15,6 +15,17 @@
     "local",
     "self-hosted"
   ],
+  "surfaces": {
+    "api": {
+      "status": "supported"
+    },
+    "sdk": {
+      "status": "supported"
+    },
+    "cli": {
+      "status": "supported"
+    }
+  },
   "serviceSurfaces": [
     {
       "name": "http",
@@ -46,10 +57,14 @@
     }
   ],
   "storage": {
+    "engines": [
+      "sqlite",
+      "postgres"
+    ],
+    "pgTestGate": "bun run test:postgres",
     "mode": "local",
     "envPrefix": "HASNA_SESSIONS_",
     "aliasEnvPrefix": "SESSIONS_",
-    "databaseUrlSecretRef": "hasna/oss/sessions/database-url",
     "sqlitePath": "~/.hasna/sessions/sessions.db"
   },
   "metadata": {
