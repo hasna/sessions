@@ -8,8 +8,14 @@ function codewithSessionsRoot(): string {
     : join(homedir(), ".codewith", "sessions");
 }
 
+function codewithSessionIndex(): string {
+  return process.env.CODEWITH_PATH
+    ? join(process.env.CODEWITH_PATH, "session_index.jsonl")
+    : join(homedir(), ".codewith", "session_index.jsonl");
+}
+
 export class CodewithParser extends OpenAiRolloutParser {
   constructor() {
-    super("codewith", codewithSessionsRoot);
+    super("codewith", codewithSessionsRoot, codewithSessionIndex);
   }
 }
