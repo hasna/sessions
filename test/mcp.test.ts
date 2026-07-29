@@ -68,6 +68,7 @@ describe("sessions MCP server", () => {
     expect(tools).toContain("knowledge_graph");
     expect(tools).toContain("machines");
     expect(tools).toContain("register_agent");
+    expect(tools).toContain("sessions_watchdog_scan");
     // The DSN-on-client storage sync tools (sessions_storage_push/pull/sync) and
     // the direct-sqlite send_feedback tool were removed in the Store refactor:
     // no client path may touch a Postgres DSN or open sqlite directly.

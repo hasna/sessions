@@ -63,6 +63,18 @@ export type {
 } from "./lib/live.js";
 
 export {
+  parseWatchdogPaneLine,
+  scanWatchdogFromTmuxOutput,
+  scanWatchdogSessions,
+} from "./lib/watchdog.js";
+export type {
+  WatchdogCandidate,
+  WatchdogPaneRecord,
+  WatchdogScanOptions,
+  WatchdogStatus,
+} from "./lib/watchdog.js";
+
+export {
   BULK_SESSION_ACTIONS,
   buildBulkGuardDecision,
   buildBulkSessionPlan,

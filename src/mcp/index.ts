@@ -11,6 +11,7 @@ import { getPackageInfo, getPackageVersion } from "../lib/package.js";
 import { listAdapters, getAdapter } from "../lib/adapters/index.js";
 import type { CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
+import { scanWatchdogSessions } from "../lib/watchdog.js";
 import { resolveSessionStore, getLocalStore } from "../db/session-store.js";
 import type { Session } from "../types/index.js";
 
@@ -581,6 +582,19 @@ server.tool(
         generated_at: new Date().toISOString(),
         sessions: await sessionStore().list({ project_path: args.project }),
       });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "sessions_watchdog_scan",
+  "Find dead or crashed Claude panes in primary tmux windows when a healthy sibling agent session confirms the session group.",
+  {},
+  async () => {
+    try {
+      return textJson(scanWatchdogSessions());
     } catch (e) {
       return fail(e);
     }
