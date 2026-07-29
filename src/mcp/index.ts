@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * MCP server for sessions.
- * Provides indexed search/ingest tools, friendly-name registry tools, and cross-adapter import.
+ * Provides indexed search/ingest tools, active-store tools, and cross-adapter import.
  */
 
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -56,10 +56,13 @@ MCP server for ${packageInfo.name}
 Options:
   -V, --version  output the version number
   -h, --help     display help for command
-  --http         run Streamable HTTP transport on 127.0.0.1 (default port 8877)
-  --port <n>     HTTP port (--http or MCP_HTTP=1)
+  --http         explicitly select Streamable HTTP transport (the default)
+  --stdio        run the MCP server over stdio
+  --port <n>     HTTP port (default: 8877)
 
-Runs a stdio MCP server with session discovery, resume, search, stats, and feedback tools.`);
+Runs Streamable HTTP on 127.0.0.1 by default. Set MCP_STDIO=1 or pass --stdio
+for stdio clients. MCP_HTTP=1 explicitly selects HTTP; MCP_HTTP_PORT sets its
+port.`);
 }
 
 const args = process.argv.slice(2);
