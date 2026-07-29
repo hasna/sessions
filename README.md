@@ -1,10 +1,14 @@
 # @hasna/sessions
 
 Search and resume your AI coding sessions — a unified, full-text searchable index
-of every Claude Code, OpenAI Codex, and Gemini session on your machine.
+of every Claude Code, OpenAI Codex, Codewith, and Gemini session on your machine.
 
 [![npm](https://img.shields.io/npm/v/@hasna/sessions)](https://www.npmjs.com/package/@hasna/sessions)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+Documentation: [CLI reference](docs/cli-reference.md) ·
+[Configuration](docs/configuration.md) ·
+[Live status contract](docs/live-status-contract.md)
 
 ## Install
 
@@ -52,7 +56,7 @@ sessions graph --session <id>                # a session's neighborhood
 
 # Browse
 sessions recent                # most recently active sessions
-sessions indexed-list --project app    # filter indexed sessions by project name or path
+sessions list-indexed --project app    # alias: indexed-list
 sessions show <id>             # full details + message previews
 sessions stats                 # per-source + top-project counts
 
@@ -76,19 +80,22 @@ sessions sync --watch --interval 60 --max-iterations 3
 sessions reindex
 ```
 
-## Friendly names & resume
+## Session titles & resume
 
 ```bash
 sessions list --json
 sessions history --today
-sessions transcript-search "raw Claude-only query"
-sessions rename <id-or-name> "my friendly name"
+sessions transcript-search "search every indexed transcript"
+sessions rename <id-or-prefix> "a clearer title"
 sessions resume --last --print-command
-sessions resume <friendly-name-or-id>
+sessions resume <id-or-prefix>
 ```
 
-`sessions list` is the friendly-name registry used for resume workflows.
-Use `sessions indexed-list` to browse the SQLite search index.
+`sessions list`, `rename`, and `resume` use the active store: the local SQLite
+index by default or the authenticated self-hosted `/v1` API when configured.
+Only Claude sessions currently produce an executable resume command. Use
+`sessions list-indexed` (alias `indexed-list`) when you need source and machine
+filters in addition to project filtering.
 Use `sessions live` when you need current tmux/Codewith pane state; it reports
 active, idle, needs_attention, and dead panes from tmux even when no indexed
 session history exists yet.
@@ -142,16 +149,17 @@ sessions-mcp
 ```
 
 Exposes session tools for agents/orchestrators: `search_sessions`,
-`search_tool_calls`, `recall_session`, `semantic_search`, `recent_sessions`, `list_sessions`,
-`get_session`, `ingest`, `embed`, `session_stats`, `knowledge_graph`, plus
-registry-backed tools (`sessions_list`, `sessions_history`, `sessions_search`,
-`sessions_resume`, `sessions_rename`, `sessions_watch`, `sessions_stats`),
-cross-adapter import tools, and agent registry tools. MCP no longer exposes the
-removed DSN-on-client push/pull tools or direct feedback write tool.
+`search_tool_calls`, `recall_session`, `semantic_search`, `recent_sessions`,
+`list_sessions`, `machines`, `get_session`, `ingest`, `embed`, `session_stats`,
+`knowledge_graph`, active-store tools (`sessions_list`, `sessions_history`,
+`sessions_search`, `sessions_resume`, `sessions_rename`, `sessions_watch`,
+`sessions_stats`), cross-adapter import tools, and agent registry tools. MCP no
+longer exposes the removed DSN-on-client push/pull tools or direct feedback
+write tool.
 
 ## HTTP mode
 
-Long-lived Streamable HTTP transport (default port **8835**, bind `127.0.0.1` only):
+Long-lived Streamable HTTP transport (default port **8877**, bind `127.0.0.1` only):
 
 ```bash
 sessions-mcp --http
@@ -159,13 +167,15 @@ sessions-mcp --http
 MCP_HTTP=1 sessions-mcp
 
 # override port
-sessions-mcp --http --port 8835
-MCP_HTTP_PORT=8835 sessions-mcp --http
+sessions-mcp --http --port 8877
+MCP_HTTP_PORT=8877 sessions-mcp --http
 ```
 
 Endpoints: `GET /health` → `{"status":"ok","name":"sessions"}`, MCP at `/mcp`.
 Uses stateless `StreamableHTTPServerTransport` (shared process, many clients).
-`sessions-mcp` without flags still uses stdio (unchanged).
+HTTP is the default transport. Use `sessions-mcp --stdio` or `MCP_STDIO=1` for
+stdio clients; `--http` and `MCP_HTTP=1` remain available as explicit HTTP
+selectors.
 
 ## Local and self-hosted registry mode
 
@@ -229,7 +239,8 @@ larger value for a longer supervised run.
 
 ```bash
 sessions daemon --interval 60 --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups'
-sessions sync --watch --interval 60 --max-iterations 10
+sessions sync --watch --interval 60 --max-iterations 10 \
+  --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups'
 ```
 
 For one-time historical content backfills, use the explicit backfill workflow
