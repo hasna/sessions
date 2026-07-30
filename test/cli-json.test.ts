@@ -374,6 +374,21 @@ describe("CLI JSON output", () => {
     expect(status.roots.some((root: { source: string; exists: boolean }) => root.source === "codewith" && !root.exists)).toBe(true);
     expect(status.roots.some((root: { source: string; exists: boolean }) => root.source === "codex" && !root.exists)).toBe(true);
     expect(status.roots.some((root: { source: string; exists: boolean }) => root.source === "gemini" && !root.exists)).toBe(true);
+    for (const root of status.roots) {
+      expect(root).toHaveProperty("lastAttemptAt");
+      expect(root).toHaveProperty("lastSuccessAt");
+      expect(root).toHaveProperty("lagSeconds");
+      expect(root).toHaveProperty("skippedFiles");
+      expect(root).toHaveProperty("lastError");
+    }
+
+    const humanResult = runCli(["watch-ingest", "--status"]);
+    const humanOutput = Buffer.from(humanResult.stdout).toString("utf-8");
+    expect(humanOutput).toContain("lag(s)");
+    expect(humanOutput).toContain("skipped");
+    expect(humanOutput).toContain("last attempt");
+    expect(humanOutput).toContain("last success");
+    expect(humanOutput).toContain("last error");
 
     const reindexResult = runCli(["reindex", "--json"]);
     const reindex = parseJsonOutput(reindexResult);

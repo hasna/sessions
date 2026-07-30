@@ -1640,8 +1640,14 @@ program
       console.log(`  sources:  ${status.sources.join(", ") || "(no provider dirs found)"}`);
       console.log(`  debounce: ${status.debounceMs}ms`);
       console.log(`  poll:     ${status.pollMs}ms`);
+      console.log("  state source  lag(s) skipped last attempt             last success             last error root");
       for (const root of status.roots) {
-        console.log(`  ${root.exists ? "ok " : "miss"} ${root.source.padEnd(7)} ${root.root}`);
+        const lag = String(root.lagSeconds ?? "-").padStart(6);
+        const skipped = String(root.skippedFiles).padStart(7);
+        const attempt = (root.lastAttemptAt ?? "-").padEnd(24);
+        const success = (root.lastSuccessAt ?? "-").padEnd(24);
+        const error = root.lastError ?? "-";
+        console.log(`  ${root.exists ? "ok  " : "miss"}  ${root.source.padEnd(7)} ${lag} ${skipped} ${attempt} ${success} ${error} ${root.root}`);
       }
       return;
     }

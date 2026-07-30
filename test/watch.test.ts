@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getWatchStatus, startWatch, type Watcher } from "../src/lib/watch.js";
 import { getDatabase, resetDatabase, closeDatabase } from "../src/db/database.js";
 import { listSessions } from "../src/db/sessions.js";
+import { getParser, registerParser } from "../src/lib/ingest/index.js";
 
 let root: string;
 let projectDir: string;
@@ -17,6 +18,15 @@ const sessionLines = (id: string, text: string) =>
   ].join("\n");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await sleep(50);
+  }
+  throw new Error("timed out waiting for watcher state");
+};
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "sessions-watch-"));
@@ -74,6 +84,54 @@ describe("startWatch", () => {
     watcher = startWatch({ sources: ["codex"], debounceMs: 50, pollMs: 0 });
     expect(watcher.sources).toEqual(["codex"]);
   });
+
+  it("reports successful and failed ingest observability without leaking file contents", async () => {
+    const file = join(projectDir, "watch-status.jsonl");
+    const oldMtime = new Date(Date.now() - 10_000);
+    writeFileSync(file, sessionLines("watch-status", "watched status"));
+    utimesSync(file, oldMtime, oldMtime);
+
+    const pending = getWatchStatus({ sources: ["claude"] }).roots[0];
+    expect(pending?.lagSeconds).toBeGreaterThanOrEqual(9);
+
+    watcher = startWatch({ sources: ["claude"], debounceMs: 25, pollMs: 100 });
+    const claudeStatus = () => getWatchStatus({ sources: ["claude"] }).roots[0];
+    await waitFor(() => claudeStatus()?.lastSuccessAt !== null);
+    await waitFor(() => (claudeStatus()?.skippedFiles ?? 0) > 0);
+
+    const successful = claudeStatus();
+    expect(successful?.lastAttemptAt).not.toBeNull();
+    expect(successful?.lastSuccessAt).not.toBeNull();
+    expect(successful?.lagSeconds).toBe(0);
+    expect(successful?.skippedFiles).toBeGreaterThan(0);
+    expect(successful?.lastError).toBeNull();
+
+    const originalParser = getParser("claude");
+    if (!originalParser) throw new Error("claude parser not registered");
+    const transcriptSecret = "SECRET_TRANSCRIPT_CONTENT";
+    try {
+      registerParser({
+        source: "claude",
+        sessionRoots: () => originalParser.sessionRoots(),
+        listSessionFiles: () => originalParser.listSessionFiles(),
+        parseFile: (path) => originalParser.parseFile(path),
+        parseFileResult: () => {
+          throw new Error("provoked parse error");
+        },
+      });
+      writeFileSync(file, transcriptSecret);
+      await waitFor(() => claudeStatus()?.lastError !== null);
+
+      const failed = claudeStatus();
+      expect(failed?.lastAttemptAt).not.toBeNull();
+      expect(failed?.lastSuccessAt).toBe(successful?.lastSuccessAt);
+      expect(failed?.lagSeconds).toBeGreaterThanOrEqual(0);
+      expect(failed?.lastError).toBe("provoked parse error");
+      expect(failed?.lastError).not.toContain(transcriptSecret);
+    } finally {
+      registerParser(originalParser);
+    }
+  }, 8000);
 
   it("ingests a newly written session file via the poll safety net", async () => {
     const ingests: string[] = [];
