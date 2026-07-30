@@ -16,6 +16,7 @@
 
 import { resolveStorageClient } from "@hasna/contracts/client/storage";
 import type { HasnaStorageClient } from "@hasna/contracts/client/storage";
+import { normalizeStorageMode } from "@hasna/contracts/mode";
 import type {
   Machine,
   Message,
@@ -168,6 +169,54 @@ function anySet(source: Env, keys: readonly string[]): boolean {
 }
 
 /**
+ * The value that means "use the server" in the INSTALLED @hasna/contracts.
+ *
+ * Derived, never hardcoded, and that is load-bearing rather than tidy. The
+ * storage-mode enum has already changed once: contracts <=0.8.5 accepts `cloud`
+ * plus the deprecated aliases `self_hosted`/`remote`/`hybrid`, while contracts
+ * after the inference removal accepts ONLY `sqlite`/`postgres` and THROWS on
+ * everything else. The two valid sets are DISJOINT, so any literal pinned here
+ * is a bet on which side of that change a machine is on, and the bet loses on
+ * one side or the other.
+ *
+ * Measured 2026-07-30 against contracts 0.5.2: `postgres` throws, `self_hosted`
+ * normalizes. Against contracts main (0.8.6): `postgres` normalizes,
+ * `self_hosted` throws. Probing newest-first therefore yields the right token on
+ * both generations, and on the next one provided it keeps a server token here.
+ *
+ * The probe runs through the library's own `normalizeStorageMode`, so the answer
+ * comes from the installed code rather than from our belief about it.
+ */
+export const SERVER_MODE_CANDIDATES = ["postgres", "self_hosted", "cloud"] as const;
+
+/** Accepts a mode token or throws. Injectable so both enum generations are testable. */
+export type ModeNormalizer = (value: string) => unknown;
+
+let cachedServerMode: string | null = null;
+
+export function serverStorageMode(normalize: ModeNormalizer = normalizeStorageMode): string {
+  const useCache = normalize === (normalizeStorageMode as ModeNormalizer);
+  if (useCache && cachedServerMode !== null) return cachedServerMode;
+  for (const candidate of SERVER_MODE_CANDIDATES) {
+    try {
+      normalize(candidate);
+      if (useCache) cachedServerMode = candidate;
+      return candidate;
+    } catch {
+      // Not a token this generation of @hasna/contracts understands.
+    }
+  }
+  // Every candidate was rejected: the enum changed again and this list is stale.
+  // Fail loudly rather than guess -- guessing is the defect class this pin exists
+  // to remove, and a wrong mode silently reads the wrong dataset.
+  throw new Error(
+    `No known server storage mode is accepted by the installed @hasna/contracts ` +
+      `(tried ${SERVER_MODE_CANDIDATES.join(", ")}). The storage-mode enum has changed; ` +
+      `add the new server token to SERVER_MODE_CANDIDATES in src/db/session-store.ts.`,
+  );
+}
+
+/**
  * Return an env whose storage mode is explicit.
  *
  * An already-set mode -- through any of the four documented variables -- is left
@@ -178,7 +227,7 @@ function anySet(source: Env, keys: readonly string[]): boolean {
 export function sessionsCloudEnv(source: Env = process.env): Env {
   if (anySet(source, MODE_KEYS)) return source;
   if (anySet(source, API_URL_KEYS) && anySet(source, API_KEY_KEYS)) {
-    return { ...source, HASNA_SESSIONS_STORAGE_MODE: "self_hosted" };
+    return { ...source, HASNA_SESSIONS_STORAGE_MODE: serverStorageMode() };
   }
   return source;
 }
