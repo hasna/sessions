@@ -131,6 +131,58 @@ export interface SessionStore {
 
 const APP = "sessions";
 
+// -- Explicit mode selection -------------------------------------------------
+//
+// This client PINS the storage mode before calling the contracts resolver. It
+// must never depend on that resolver inferring a cloud transition from the mere
+// presence of an API URL (or of a credential the resolver can find on disk).
+//
+// Owner ruling 2026-07-29: a local->network transition must be explicitly
+// signalled, never inferred from a credential file appearing on disk. The
+// contracts client still infers today, and hasna/contracts#51 removes it. When
+// that lands, a consumer that passes `process.env` straight through gets the
+// LOCAL SQLite store for a fully-configured cloud client -- silently, at exit 0,
+// which is the exact silent-degrade this fleet has spent the day chasing.
+//
+// Measured 2026-07-30: of the five repos importing the contracts client at
+// runtime, `domains`, `logs` and `todos` already pin; `files` and `sessions` did
+// not, and were the two that #51 would strand. This is the `sessions` pin, and it
+// deliberately mirrors `withImpliedSelfHostedMode` in @hasna/logs so the fleet
+// converges on one shape rather than five.
+//
+// Pinning is also what makes this client immune to WHICH inference is live
+// upstream -- env pair, URL alone, or disk credential. The mode is ours to state.
+
+const MODE_KEYS = [
+  "HASNA_SESSIONS_STORAGE_MODE",
+  "HASNA_SESSIONS_MODE",
+  "SESSIONS_STORAGE_MODE",
+  "SESSIONS_MODE",
+] as const;
+const API_URL_KEYS = ["HASNA_SESSIONS_API_URL", "SESSIONS_API_URL"] as const;
+const API_KEY_KEYS = ["HASNA_SESSIONS_API_KEY", "SESSIONS_API_KEY"] as const;
+
+/** True when any of `keys` carries a non-blank value. The value is never read out. */
+function anySet(source: Env, keys: readonly string[]): boolean {
+  return keys.some((k) => (source[k]?.trim() ?? "") !== "");
+}
+
+/**
+ * Return an env whose storage mode is explicit.
+ *
+ * An already-set mode -- through any of the four documented variables -- is left
+ * exactly as it is, so an operator pinning `local` is never overridden. Only the
+ * complete API url + key pair implies `self_hosted`; half a pair implies nothing,
+ * because half a pair is not a statement of intent.
+ */
+export function sessionsCloudEnv(source: Env = process.env): Env {
+  if (anySet(source, MODE_KEYS)) return source;
+  if (anySet(source, API_URL_KEYS) && anySet(source, API_KEY_KEYS)) {
+    return { ...source, HASNA_SESSIONS_STORAGE_MODE: "self_hosted" };
+  }
+  return source;
+}
+
 function isNotFound(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -503,7 +555,7 @@ export function resolveSessionStore(
   env: Env = process.env,
   overrides?: Parameters<typeof resolveStorageClient>[2],
 ): SessionStore {
-  const resolved = resolveStorageClient(APP, env, overrides);
+  const resolved = resolveStorageClient(APP, sessionsCloudEnv(env), overrides);
   if (resolved.transport === "cloud-http") return cloudStore(resolved.client);
   return localStore();
 }
