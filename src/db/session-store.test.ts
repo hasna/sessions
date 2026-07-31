@@ -259,12 +259,12 @@ describe("cloud store routes to /v1 with bearer key", () => {
 
   test("fails loudly for every local-only cloud operation", async () => {
     const { store } = cloudStore(() => ({ json: {} }));
-    await expect(store.semanticSearch("q", {})).rejects.toThrow("semantic search");
-    await expect(store.hybridSearch("q", {})).rejects.toThrow("hybrid search");
+    expect(() => store.semanticSearch("q", {})).toThrow("semantic search");
+    expect(() => store.hybridSearch("q", {})).toThrow("hybrid search");
     await expect(store.recall("q", {})).rejects.toThrow("recall' is local-only");
-    await expect(store.embed({})).rejects.toThrow("embed");
-    await expect(store.mergeFromDb("x")).rejects.toThrow("import-db");
-    await expect(store.ingest()).rejects.toThrow("ingest");
-    await expect(store.recomputeMachines()).rejects.toThrow("recompute-machines");
+    expect(() => store.embed({})).toThrow("embed");
+    expect(() => store.mergeFromDb("x")).toThrow("import-db");
+    expect(() => store.ingest()).toThrow("ingest");
+    expect(() => store.recomputeMachines()).toThrow("recompute-machines");
   });
 });

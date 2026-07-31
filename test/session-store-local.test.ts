@@ -76,7 +76,7 @@ describe("local session store complete surface", () => {
     expect(await store.hybridSearch("searchable", { limit: 3 })).toHaveLength(1);
 
     const recall = await store.recall("searchable world", { limit: 2 });
-    expect(recall.sessions).toHaveLength(1);
+    expect(recall.results).toHaveLength(1);
     expect(await store.graphEntities()).not.toEqual([]);
     expect(await store.graphEntities("tool")).toContainEqual(expect.objectContaining({ name: "Read" }));
     expect(await store.graphRelated("tool", "Read", 5)).toHaveLength(1);
