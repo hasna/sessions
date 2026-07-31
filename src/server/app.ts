@@ -38,6 +38,8 @@ const ENDPOINTS = [
   "/v1/search/content?q=…",
   "/v1/search/tools?q=…",
   "/v1/graph?type=…|related=type:name|session=id",
+  "/v1/live-traces/:id",
+  "/v1/live-traces/:id/events",
   "/v1/recent",
   "/v1/machines",
   "/v1/stats",
@@ -46,6 +48,13 @@ const ENDPOINTS = [
 function intParam(url: URL, name: string, fallback: number): number {
   const v = parseInt(url.searchParams.get(name) ?? "", 10);
   return Number.isFinite(v) ? v : fallback;
+}
+
+function optionalIntParam(url: URL, name: string): number | undefined {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return undefined;
+  const value = parseInt(raw, 10);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 function listOptionsFromUrl(url: URL, defaultLimit: number): ListOptions {
@@ -203,6 +212,49 @@ async function handleV1(url: URL, request: Request): Promise<Response> {
     } catch (err) {
       return json({ ok: false, error: (err as Error).message }, 400);
     }
+  }
+
+  // Live workflow traces: append visible events and replay a bounded tail.
+  if (path.startsWith("/v1/live-traces/")) {
+    const rest = path.slice("/v1/live-traces/".length);
+    const parts = rest.split("/");
+    const traceId = decodeURIComponent(parts[0] ?? "");
+    if (!traceId) return json({ ok: false, error: "missing trace id" }, 400);
+
+    if (parts.length === 1) {
+      if (method !== "GET") {
+        return json({ ok: false, error: "Method not allowed", allowedMethods: ["GET"] }, 405);
+      }
+      const result = await source.tailTrace(traceId, {
+        after: optionalIntParam(url, "after"),
+        limit: optionalIntParam(url, "limit"),
+      });
+      if (!result) return json({ ok: false, error: `live trace not found: ${traceId}` }, 404);
+      return json({ ok: true, ...result });
+    }
+
+    if (parts.length === 2 && parts[1] === "events") {
+      if (method !== "POST") {
+        return json({ ok: false, error: "Method not allowed", allowedMethods: ["POST"] }, 405);
+      }
+      let body: Record<string, unknown>;
+      try {
+        body = (await request.json()) as Record<string, unknown>;
+      } catch {
+        return json({ ok: false, error: "invalid JSON body" }, 400);
+      }
+      if (!body || typeof body !== "object") {
+        return json({ ok: false, error: "expected a JSON object body" }, 400);
+      }
+      try {
+        const result = await source.appendTrace(traceId, body as never);
+        return json({ ok: true, ...result }, result.idempotent ? 200 : 201);
+      } catch (err) {
+        return json({ ok: false, error: (err as Error).message }, 400);
+      }
+    }
+
+    return json({ ok: false, error: "Not found", endpoints: ENDPOINTS }, 404);
   }
 
   // /v1/sessions/:id (GET | DELETE)

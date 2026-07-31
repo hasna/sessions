@@ -92,6 +92,27 @@ describe("local Store importContent safety", () => {
     });
     expect(replacement.imported).toEqual({ messages: 1, toolCalls: 0 });
   });
+
+  test("appends and tails live traces", async () => {
+    const store = resolveSessionStore({});
+    const input = {
+      correlation: { workflow_run_id: "workflow-local", loop_run_id: "loop-local" },
+      event: { id: "event-local-1", kind: "message" as const, message: "local trace event" },
+    };
+
+    const appended = await store.appendTrace("trace-local", input);
+    expect(appended.idempotent).toBe(false);
+    expect(appended.event.sequence).toBe(1);
+    expect(appended.event.message).toBe("local trace event");
+
+    const duplicate = await store.appendTrace("trace-local", { event: input.event });
+    expect(duplicate.idempotent).toBe(true);
+
+    const tail = await store.tailTrace("trace-local", { after: 0, limit: 10 });
+    expect(tail?.events.map((event) => event.id)).toEqual(["event-local-1"]);
+    expect(tail?.next_after).toBe(1);
+    expect(await store.tailTrace("missing-trace")).toBeNull();
+  });
 });
 
 describe("cloud store routes to /v1 with bearer key", () => {
@@ -200,5 +221,68 @@ describe("cloud store routes to /v1 with bearer key", () => {
     expect(await store.toolCalls("s1")).toEqual([{ id: "t1" }] as never);
     expect(calls[0].url).toContain("/v1/sessions/s1/messages");
     expect(calls[1].url).toContain("/v1/sessions/s1/tool-calls");
+  });
+
+  test("live traces -> /v1/live-traces append and tail", async () => {
+    const trace = {
+      id: "trace/1",
+      status: "active",
+      workflow_run_id: "workflow-1",
+      loop_run_id: "loop-1",
+      step_id: null,
+      task_id: null,
+      provider: null,
+      worktree_path: null,
+      worktree_policy: null,
+      created_at: "2026-07-31T00:00:00.000Z",
+      updated_at: "2026-07-31T00:00:00.000Z",
+      expires_at: "2026-08-07T00:00:00.000Z",
+      next_sequence: 2,
+    };
+    const event = {
+      id: "event-1",
+      trace_id: "trace/1",
+      sequence: 1,
+      kind: "message",
+      level: "info",
+      message: "hello",
+      event_status: null,
+      data: {},
+      workflow_run_id: "workflow-1",
+      loop_run_id: "loop-1",
+      step_id: null,
+      task_id: null,
+      provider: null,
+      worktree_path: null,
+      worktree_policy: null,
+      occurred_at: "2026-07-31T00:00:00.000Z",
+      stored_at: "2026-07-31T00:00:00.000Z",
+      redacted: false,
+      truncated: false,
+    };
+    const { store, calls } = cloudStore((c) => {
+      if (c.method === "POST") return { status: 201, json: { ok: true, trace, event, idempotent: false } };
+      return { json: { ok: true, trace, events: [event], next_after: 1, earliest_sequence: 1, cursor_expired: false } };
+    });
+    const input = {
+      correlation: { workflow_run_id: "workflow-1", loop_run_id: "loop-1" },
+      event: { id: "event-1", kind: "message" as const, message: "hello" },
+    };
+
+    expect(await store.appendTrace("trace/1", input)).toEqual({ trace, event, idempotent: false } as never);
+    expect(await store.tailTrace("trace/1", { after: 0, limit: 5 })).toEqual({
+      trace,
+      events: [event],
+      next_after: 1,
+      earliest_sequence: 1,
+      cursor_expired: false,
+    } as never);
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toContain("/v1/live-traces/trace%2F1/events");
+    expect(calls[0].body).toMatchObject(input);
+    expect(calls[1].method).toBe("GET");
+    expect(calls[1].url).toContain("/v1/live-traces/trace%2F1");
+    expect(calls[1].url).toContain("after=0");
+    expect(calls[1].url).toContain("limit=5");
   });
 });

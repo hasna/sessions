@@ -294,6 +294,35 @@ function cloudStore(client: HasnaStorageClient): SessionStore {
         throw error;
       }
     },
+    async appendTrace(traceId, input) {
+      const options = input.event.id
+        ? { idempotencyKey: `trace:${traceId}:${input.event.id}` }
+        : undefined;
+      const res = await t.post<{ ok?: boolean } & AppendLiveTraceEventResult>(
+        `/live-traces/${encodeURIComponent(traceId)}/events`,
+        input,
+        options,
+      );
+      return { trace: res.trace, event: res.event, idempotent: res.idempotent };
+    },
+    async tailTrace(traceId, opts = {}) {
+      try {
+        const res = await t.get<{ ok?: boolean } & TailLiveTraceResult>(
+          `/live-traces/${encodeURIComponent(traceId)}`,
+          { query: { after: opts.after, limit: opts.limit } },
+        );
+        return {
+          trace: res.trace,
+          events: res.events,
+          next_after: res.next_after,
+          earliest_sequence: res.earliest_sequence,
+          cursor_expired: res.cursor_expired,
+        };
+      } catch (error) {
+        if (isNotFound(error)) return null;
+        throw error;
+      }
+    },
     // These require the local embedding/FTS index or a local-to-local DB merge;
     // recall is intentionally local-only. Fail loudly instead of silently
     // reading the local SQLite island (that was the split-brain bug).
@@ -498,6 +527,14 @@ function localStore(): SessionStore {
     async recomputeMachines() {
       const { recomputeMachineCounts } = await import("./machines.js");
       recomputeMachineCounts();
+    },
+    async appendTrace(traceId, input) {
+      const { appendLocalLiveTraceEvent } = await import("./live-traces.js");
+      return appendLocalLiveTraceEvent(traceId, input);
+    },
+    async tailTrace(traceId, opts = {}) {
+      const { tailLocalLiveTrace } = await import("./live-traces.js");
+      return tailLocalLiveTrace(traceId, opts);
     },
   };
 }

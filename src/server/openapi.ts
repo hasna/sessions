@@ -3,10 +3,12 @@
 // (@hasna/contracts/sdk). Keep it in lock-step with app.ts.
 
 import { getPackageInfo } from "../lib/package.js";
-import { SESSION_SOURCES } from "../types/index.js";
+import { LIVE_TRACE_EVENT_KINDS, LIVE_TRACE_STATUSES, SESSION_SOURCES } from "../types/index.js";
 
 const tokenTotalSchema = { type: "integer", format: "int64" } as const;
 const sessionSourceSchema = { type: "string", enum: [...SESSION_SOURCES] } as const;
+const liveTraceStatusSchema = { type: "string", enum: [...LIVE_TRACE_STATUSES] } as const;
+const liveTraceEventKindSchema = { type: "string", enum: [...LIVE_TRACE_EVENT_KINDS] } as const;
 
 const sessionSchema = {
   type: "object",
@@ -140,6 +142,96 @@ const toolCallCreateSchema = {
   required: ["tool_name"],
 } as const;
 
+const liveTraceCorrelationProperties = {
+  workflow_run_id: { type: "string" },
+  loop_run_id: { type: "string" },
+  step_id: { type: "string", nullable: true },
+  task_id: { type: "string", nullable: true },
+  provider: { type: "string", nullable: true },
+  worktree_path: { type: "string", nullable: true },
+  worktree_policy: { type: "string", nullable: true },
+} as const;
+
+const liveTraceSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    status: liveTraceStatusSchema,
+    ...liveTraceCorrelationProperties,
+    created_at: { type: "string" },
+    updated_at: { type: "string" },
+    expires_at: { type: "string" },
+    next_sequence: { type: "integer", format: "int64" },
+  },
+  required: ["id", "status", "workflow_run_id", "loop_run_id", "created_at", "updated_at", "expires_at", "next_sequence"],
+} as const;
+
+const liveTraceEventSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    trace_id: { type: "string" },
+    sequence: { type: "integer", format: "int64" },
+    kind: liveTraceEventKindSchema,
+    level: { type: "string", enum: ["info", "warn", "error"] },
+    message: { type: "string" },
+    event_status: { type: "string", nullable: true },
+    data: { type: "object", additionalProperties: true },
+    ...liveTraceCorrelationProperties,
+    occurred_at: { type: "string" },
+    stored_at: { type: "string" },
+    redacted: { type: "boolean" },
+    truncated: { type: "boolean" },
+  },
+  required: [
+    "id",
+    "trace_id",
+    "sequence",
+    "kind",
+    "level",
+    "message",
+    "data",
+    "workflow_run_id",
+    "loop_run_id",
+    "occurred_at",
+    "stored_at",
+    "redacted",
+    "truncated",
+  ],
+} as const;
+
+const liveTraceCorrelationSchema = {
+  type: "object",
+  properties: liveTraceCorrelationProperties,
+  required: ["workflow_run_id", "loop_run_id"],
+} as const;
+
+const appendLiveTraceEventSchema = {
+  type: "object",
+  properties: {
+    correlation: liveTraceCorrelationSchema,
+    event: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        kind: liveTraceEventKindSchema,
+        level: { type: "string", enum: ["info", "warn", "error"] },
+        message: { type: "string" },
+        event_status: { type: "string", nullable: true },
+        data: { type: "object", additionalProperties: true },
+        occurred_at: { type: "string" },
+        correlation: {
+          type: "object",
+          properties: liveTraceCorrelationProperties,
+        },
+      },
+      required: ["kind", "message"],
+    },
+    trace_status: liveTraceStatusSchema,
+  },
+  required: ["event"],
+} as const;
+
 export function buildOpenApiDocument(): Record<string, unknown> {
   const pkg = getPackageInfo();
   return {
@@ -195,6 +287,31 @@ export function buildOpenApiDocument(): Record<string, unknown> {
         MessageCreate: messageCreateSchema,
         ToolCall: toolCallSchema,
         ToolCallCreate: toolCallCreateSchema,
+        LiveTrace: liveTraceSchema,
+        LiveTraceEvent: liveTraceEventSchema,
+        AppendLiveTraceEvent: appendLiveTraceEventSchema,
+        AppendLiveTraceEventResponse: {
+          type: "object",
+          properties: {
+            ok: { type: "boolean" },
+            trace: { $ref: "#/components/schemas/LiveTrace" },
+            event: { $ref: "#/components/schemas/LiveTraceEvent" },
+            idempotent: { type: "boolean" },
+          },
+          required: ["ok", "trace", "event", "idempotent"],
+        },
+        TailLiveTraceResponse: {
+          type: "object",
+          properties: {
+            ok: { type: "boolean" },
+            trace: { $ref: "#/components/schemas/LiveTrace" },
+            events: { type: "array", items: { $ref: "#/components/schemas/LiveTraceEvent" } },
+            next_after: { type: "integer", format: "int64" },
+            earliest_sequence: { type: "integer", format: "int64", nullable: true },
+            cursor_expired: { type: "boolean" },
+          },
+          required: ["ok", "trace", "events", "next_after", "earliest_sequence", "cursor_expired"],
+        },
         SessionContentImport: {
           type: "object",
           description: "Imports a full session content snapshot into Postgres. Existing nonempty content cannot be replaced with fewer child rows unless destructive.allowContentShrink is true and reason is non-empty.",
@@ -438,6 +555,37 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           },
           responses: {
             "201": jsonRef("SessionContentImportResponse", "Imported"),
+            "400": jsonRef("ErrorResponse", "Invalid input"),
+          },
+        },
+      },
+      "/v1/live-traces/{id}": {
+        get: {
+          operationId: "tailLiveTrace",
+          summary: "Replay live workflow trace events after a sequence cursor",
+          parameters: [
+            pathParam("id"),
+            queryParam("after", "integer"),
+            queryParam("limit", "integer"),
+          ],
+          responses: {
+            ...json200("TailLiveTraceResponse", "Live trace event page"),
+            "404": jsonRef("ErrorResponse", "Trace not found"),
+          },
+        },
+      },
+      "/v1/live-traces/{id}/events": {
+        post: {
+          operationId: "appendLiveTraceEvent",
+          summary: "Append one visible live workflow trace event",
+          parameters: [pathParam("id")],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/AppendLiveTraceEvent" } } },
+          },
+          responses: {
+            "201": jsonRef("AppendLiveTraceEventResponse", "Trace event appended"),
+            ...json200("AppendLiveTraceEventResponse", "Idempotent replay"),
             "400": jsonRef("ErrorResponse", "Invalid input"),
           },
         },

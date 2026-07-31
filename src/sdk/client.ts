@@ -1,5 +1,5 @@
 // @generated from OpenAPI by @hasna/contracts SDK generator — DO NOT EDIT.
-// Source: SessionsApi 0.12.10
+// Source: SessionsApi 0.12.11
 
 export interface Session { "id": string; "source": "claude" | "codex" | "codewith" | "gemini"; "source_id": string; "source_path"?: string | null; "title"?: string | null; "project_path"?: string | null; "project_name"?: string | null; "model"?: string | null; "model_provider"?: string | null; "git_branch"?: string | null; "git_sha"?: string | null; "git_origin_url"?: string | null; "cli_version"?: string | null; "is_subagent": boolean; "parent_session_id"?: string | null; "total_input_tokens"?: number; "total_output_tokens"?: number; "total_cache_read_tokens"?: number; "total_cache_write_tokens"?: number; "total_thinking_tokens"?: number; "message_count"?: number; "tool_call_count"?: number; "started_at"?: string | null; "ended_at"?: string | null; "duration_seconds"?: number | null; "ingested_at"?: string; "updated_at"?: string; "source_modified_at"?: string | null; "machine"?: string | null; "metadata"?: Record<string, unknown> }
 
@@ -14,6 +14,16 @@ export interface MessageCreate { "id"?: string; "session_id"?: string; "source_i
 export interface ToolCall { "id": string; "message_id"?: string | null; "session_id": string; "tool_name": string; "tool_input"?: string | null; "tool_output"?: string | null; "duration_ms"?: number | null; "status"?: "success" | "error" | "timeout"; "timestamp"?: string | null; "metadata"?: Record<string, unknown> }
 
 export interface ToolCallCreate { "id"?: string; "message_id"?: string | null; "session_id"?: string; "tool_name": string; "tool_input"?: string | null; "tool_output"?: string | null; "duration_ms"?: number | null; "status"?: "success" | "error" | "timeout"; "timestamp"?: string | null; "metadata"?: Record<string, unknown> }
+
+export interface LiveTrace { "id": string; "status": "active" | "completed" | "failed" | "cancelled"; "workflow_run_id": string; "loop_run_id": string; "step_id"?: string | null; "task_id"?: string | null; "provider"?: string | null; "worktree_path"?: string | null; "worktree_policy"?: string | null; "created_at": string; "updated_at": string; "expires_at": string; "next_sequence": number }
+
+export interface LiveTraceEvent { "id": string; "trace_id": string; "sequence": number; "kind": "message" | "tool_call" | "command" | "validation" | "verifier" | "status"; "level": "info" | "warn" | "error"; "message": string; "event_status"?: string | null; "data": Record<string, unknown>; "workflow_run_id": string; "loop_run_id": string; "step_id"?: string | null; "task_id"?: string | null; "provider"?: string | null; "worktree_path"?: string | null; "worktree_policy"?: string | null; "occurred_at": string; "stored_at": string; "redacted": boolean; "truncated": boolean }
+
+export interface AppendLiveTraceEvent { "correlation"?: { "workflow_run_id": string; "loop_run_id": string; "step_id"?: string | null; "task_id"?: string | null; "provider"?: string | null; "worktree_path"?: string | null; "worktree_policy"?: string | null }; "event": { "id"?: string; "kind": "message" | "tool_call" | "command" | "validation" | "verifier" | "status"; "level"?: "info" | "warn" | "error"; "message": string; "event_status"?: string | null; "data"?: Record<string, unknown>; "occurred_at"?: string; "correlation"?: { "workflow_run_id"?: string; "loop_run_id"?: string; "step_id"?: string | null; "task_id"?: string | null; "provider"?: string | null; "worktree_path"?: string | null; "worktree_policy"?: string | null } }; "trace_status"?: "active" | "completed" | "failed" | "cancelled" }
+
+export interface AppendLiveTraceEventResponse { "ok": boolean; "trace": LiveTrace; "event": LiveTraceEvent; "idempotent": boolean }
+
+export interface TailLiveTraceResponse { "ok": boolean; "trace": LiveTrace; "events": Array<LiveTraceEvent>; "next_after": number; "earliest_sequence": number | null; "cursor_expired": boolean }
 
 export interface SessionContentImport { "session": SessionCreate; "messages": Array<MessageCreate>; "toolCalls": Array<ToolCallCreate>; "backup"?: { "artifact"?: string | null; "created_at"?: string | null; "note"?: string | null }; "destructive"?: { "allowContentShrink": boolean; "reason": string } }
 
@@ -137,6 +147,24 @@ export class SessionsApi {
     async getReady(init?: RequestInit): Promise<HealthResponse> {
       return this.request("GET", `/ready`, {
         body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Replay live workflow trace events after a sequence cursor */
+    async tailLiveTrace(id: string, query?: { "after"?: number; "limit"?: number }, init?: RequestInit): Promise<TailLiveTraceResponse> {
+      return this.request("GET", `/v1/live-traces/${encodeURIComponent(String(id))}`, {
+        body: undefined,
+        query,
+        init,
+      });
+    }
+
+    /** Append one visible live workflow trace event */
+    async appendLiveTraceEvent(id: string, body: AppendLiveTraceEvent, init?: RequestInit): Promise<AppendLiveTraceEventResponse> {
+      return this.request("POST", `/v1/live-traces/${encodeURIComponent(String(id))}/events`, {
+        body,
         query: undefined,
         init,
       });

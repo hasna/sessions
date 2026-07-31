@@ -19,9 +19,11 @@ describe("cloud migration ledger", () => {
     const initial = migrations.find((migration) => migration.id === "0001_init");
     const codewith = migrations.find((migration) => migration.id === "0004_codewith_session_source");
     const sourceIdIndex = migrations.find((migration) => migration.id === "0005_session_source_id_lookup_index");
+    const liveTraces = migrations.find((migration) => migration.id === "0006_live_traces");
     expect(initial).toBeDefined();
     expect(codewith).toBeDefined();
     expect(sourceIdIndex).toBeDefined();
+    expect(liveTraces).toBeDefined();
     expect(initial?.sql).toMatch(/CHECK\s*\(source IN \('claude', 'codex', 'gemini'\)\)/);
     expect(initial?.sql).not.toContain("codewith");
     expect(initial?.checksum).toBe(APPROVED_BASE_0001_CHECKSUM);
@@ -76,6 +78,7 @@ describe("cloud migration ledger", () => {
       ["0003_session_token_bigints", "already_applied"],
       ["0004_codewith_session_source", "pending"],
       ["0005_session_source_id_lookup_index", "pending"],
+      ["0006_live_traces", "already_applied"],
     ]);
   });
 });

@@ -432,6 +432,62 @@ describe("/v1 authenticated API (local mode)", () => {
     }
   });
 
+  it("appends and tails live traces over /v1", async () => {
+    const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const rw = keyFor(["sessions:read", "sessions:write"]);
+      const H = { "x-api-key": rw, "content-type": "application/json" };
+      const traceId = "serve-trace-1";
+      const body = {
+        correlation: {
+          workflow_run_id: "workflow-serve-1",
+          loop_run_id: "loop-serve-1",
+          provider: "codewith",
+        },
+        event: {
+          id: "event-serve-1",
+          kind: "message",
+          message: "visible operator event",
+          data: { phase: "start" },
+        },
+      };
+
+      const appended = await fetch(`${base}/v1/live-traces/${encodeURIComponent(traceId)}/events`, {
+        method: "POST",
+        headers: H,
+        body: JSON.stringify(body),
+      });
+      expect(appended.status).toBe(201);
+      const appendedBody = await appended.json();
+      expect(appendedBody.ok).toBe(true);
+      expect(appendedBody.trace.workflow_run_id).toBe("workflow-serve-1");
+      expect(appendedBody.event.sequence).toBe(1);
+      expect(appendedBody.idempotent).toBe(false);
+
+      const duplicate = await fetch(`${base}/v1/live-traces/${encodeURIComponent(traceId)}/events`, {
+        method: "POST",
+        headers: H,
+        body: JSON.stringify({ event: body.event }),
+      });
+      expect(duplicate.status).toBe(200);
+      expect((await duplicate.json()).idempotent).toBe(true);
+
+      const tailed = await fetch(`${base}/v1/live-traces/${encodeURIComponent(traceId)}?after=0&limit=5`, {
+        headers: { "x-api-key": rw },
+      });
+      expect(tailed.status).toBe(200);
+      const tailBody = await tailed.json();
+      expect(tailBody.events.map((event: { id: string }) => event.id)).toEqual(["event-serve-1"]);
+      expect(tailBody.next_after).toBe(1);
+
+      const missing = await fetch(`${base}/v1/live-traces/missing`, { headers: { "x-api-key": rw } });
+      expect(missing.status).toBe(404);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   it("accepts the key via Authorization: Bearer", async () => {
     const server = createSessionsServer({ hostname: "127.0.0.1", port: 0 });
     try {
