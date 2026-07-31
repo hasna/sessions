@@ -155,6 +155,21 @@ function rejectEmptySourceQualifiedIdentifier(displayIdentifier: string, identif
   }
 }
 
+function shouldReplaceSessionSnapshot(existing: Session, incoming: SessionInsert): boolean {
+  const incomingMessages = incoming.message_count ?? 0;
+  const incomingToolCalls = incoming.tool_call_count ?? 0;
+  const incomingRecords = incomingMessages + incomingToolCalls;
+  const existingRecords = existing.message_count + existing.tool_call_count;
+  if (incomingRecords !== existingRecords) return incomingRecords > existingRecords;
+  if (incomingMessages !== existing.message_count) return incomingMessages > existing.message_count;
+
+  const incomingModifiedAt = incoming.source_modified_at ?? "";
+  const existingModifiedAt = existing.source_modified_at ?? "";
+  if (incomingModifiedAt !== existingModifiedAt) return incomingModifiedAt > existingModifiedAt;
+
+  return (incoming.source_path ?? "") >= (existing.source_path ?? "");
+}
+
 /** Upsert a session keyed by (source, source_id). Returns the stored row. */
 export function upsertSession(input: SessionInsert): Session {
   const db = getDatabase();
@@ -540,7 +555,10 @@ function insertToolCall(sessionId: string, input: ToolCallInsert): void {
  * and tool calls, and recompute aggregate counts/token totals. Idempotent —
  * re-ingesting the same session replaces its children rather than duplicating.
  */
-export function saveParsedSession(parsed: ParsedSession): Session {
+export function saveParsedSession(
+  parsed: ParsedSession,
+  opts: { preservePreferredSnapshot?: boolean } = {},
+): Session {
   const db = getDatabase();
   return db.transaction(() => {
     const inputTokens = sum(parsed.messages, "input_tokens");
@@ -549,7 +567,7 @@ export function saveParsedSession(parsed: ParsedSession): Session {
     const cacheWrite = sum(parsed.messages, "cache_write_tokens");
     const thinking = sum(parsed.messages, "thinking_tokens");
 
-    const session = upsertSession({
+    const sessionInput: SessionInsert = {
       ...parsed.session,
       message_count: parsed.messages.length,
       tool_call_count: parsed.toolCalls.length,
@@ -558,7 +576,12 @@ export function saveParsedSession(parsed: ParsedSession): Session {
       total_cache_read_tokens: parsed.session.total_cache_read_tokens ?? cacheRead,
       total_cache_write_tokens: parsed.session.total_cache_write_tokens ?? cacheWrite,
       total_thinking_tokens: parsed.session.total_thinking_tokens ?? thinking,
-    });
+    };
+    const existing = getSessionBySource(sessionInput.source, sessionInput.source_id);
+    if (opts.preservePreferredSnapshot && existing && !shouldReplaceSessionSnapshot(existing, sessionInput)) {
+      return existing;
+    }
+    const session = upsertSession(sessionInput);
 
     db.prepare("DELETE FROM tool_calls_fts WHERE rowid IN (SELECT rowid FROM tool_calls_fts_refs WHERE session_id = ?)").run(session.id);
     db.prepare("DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages_fts_refs WHERE session_id = ?)").run(session.id);
@@ -609,14 +632,14 @@ export interface SaveStagedParsedSessionResult {
  */
 export function saveStagedParsedSession(
   staged: StagedParsedSession,
-  opts: { batchSize?: number } = {}
+  opts: { batchSize?: number; preservePreferredSnapshot?: boolean } = {}
 ): SaveStagedParsedSessionResult {
   const db = getDatabase();
   const batchSize = opts.batchSize ?? 128;
   let maxBatchRecords = 0;
 
   const session = db.transaction(() => {
-    const stored = upsertSession({
+    const sessionInput: SessionInsert = {
       ...staged.session,
       message_count: staged.messageCount,
       tool_call_count: staged.toolCallCount,
@@ -625,7 +648,12 @@ export function saveStagedParsedSession(
       total_cache_read_tokens: staged.session.total_cache_read_tokens ?? staged.totalCacheReadTokens,
       total_cache_write_tokens: staged.session.total_cache_write_tokens ?? staged.totalCacheWriteTokens,
       total_thinking_tokens: staged.session.total_thinking_tokens ?? staged.totalThinkingTokens,
-    });
+    };
+    const existing = getSessionBySource(sessionInput.source, sessionInput.source_id);
+    if (opts.preservePreferredSnapshot && existing && !shouldReplaceSessionSnapshot(existing, sessionInput)) {
+      return existing;
+    }
+    const stored = upsertSession(sessionInput);
 
     db.prepare("DELETE FROM tool_calls_fts WHERE rowid IN (SELECT rowid FROM tool_calls_fts_refs WHERE session_id = ?)").run(stored.id);
     db.prepare("DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages_fts_refs WHERE session_id = ?)").run(stored.id);

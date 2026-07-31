@@ -28,6 +28,8 @@ function mapRole(role: unknown): MessageRole {
 }
 
 export class OpenAiRolloutParser implements SessionParser {
+  readonly preservePreferredSnapshots = true;
+
   private sessionIndexSignature: string | null = null;
   private sessionIndexTitles = new Map<string, string>();
 

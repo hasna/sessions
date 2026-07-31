@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * MCP server for sessions.
- * Provides indexed search/ingest tools, friendly-name registry tools, and cross-adapter import.
+ * Provides indexed search/ingest tools, active-store tools, and cross-adapter import.
  */
 
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -13,6 +13,10 @@ import type { CanonicalSession } from "../lib/adapters/types.js";
 import { importCanonicalSessions } from "../lib/adapters/import.js";
 import { resolveSessionStore, getLocalStore } from "../db/session-store.js";
 import type { Session } from "../types/index.js";
+import {
+  sessionsWatchdogRestart,
+  sessionsWatchdogRestartAll,
+} from "../lib/watchdog.js";
 
 /**
  * Build the underlying resume command for a Store session using its provider
@@ -56,10 +60,13 @@ MCP server for ${packageInfo.name}
 Options:
   -V, --version  output the version number
   -h, --help     display help for command
-  --http         run Streamable HTTP transport on 127.0.0.1 (default port 8877)
-  --port <n>     HTTP port (--http or MCP_HTTP=1)
+  --http         explicitly select Streamable HTTP transport (the default)
+  --stdio        run the MCP server over stdio
+  --port <n>     HTTP port (default: 8877)
 
-Runs a stdio MCP server with session discovery, resume, search, stats, and feedback tools.`);
+Runs Streamable HTTP on 127.0.0.1 by default. Set MCP_STDIO=1 or pass --stdio
+for stdio clients. MCP_HTTP=1 explicitly selects HTTP; MCP_HTTP_PORT sets its
+port.`);
 }
 
 const args = process.argv.slice(2);
@@ -581,6 +588,32 @@ server.tool(
         generated_at: new Date().toISOString(),
         sessions: await sessionStore().list({ project_path: args.project }),
       });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "sessions_watchdog_restart",
+  "Respawn crashed panes for one tmux session, resume its named Claude session, and wait for Claude to start.",
+  { session_name: z.string().min(1).describe("Exact tmux and Claude session name") },
+  async (args: { session_name: string }) => {
+    try {
+      return textJson(await sessionsWatchdogRestart(args.session_name));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.tool(
+  "sessions_watchdog_restart_all",
+  "Respawn all crashed tmux panes, resuming each named Claude session when a healthy sibling provides its working directory.",
+  {},
+  async () => {
+    try {
+      return textJson(await sessionsWatchdogRestartAll());
     } catch (e) {
       return fail(e);
     }

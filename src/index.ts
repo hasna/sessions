@@ -63,6 +63,18 @@ export type {
 } from "./lib/live.js";
 
 export {
+  sessionsWatchdogRestart,
+  sessionsWatchdogRestartAll,
+  watchdogSessionPrefix,
+} from "./lib/watchdog.js";
+export type {
+  WatchdogRestartEntry,
+  WatchdogRestartOptions,
+  WatchdogRestartOutcome,
+  WatchdogRestartResult,
+} from "./lib/watchdog.js";
+
+export {
   BULK_SESSION_ACTIONS,
   buildBulkGuardDecision,
   buildBulkSessionPlan,
