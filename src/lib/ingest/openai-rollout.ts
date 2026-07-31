@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdtempSync, openSync, readSync, readdirSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -30,9 +30,13 @@ function mapRole(role: unknown): MessageRole {
 export class OpenAiRolloutParser implements SessionParser {
   readonly preservePreferredSnapshots = true;
 
+  private sessionIndexSignature: string | null = null;
+  private sessionIndexTitles = new Map<string, string>();
+
   constructor(
     readonly source: Extract<SessionSource, "codex" | "codewith">,
-    private readonly sessionsRoot: () => string
+    private readonly sessionsRoot: () => string,
+    private readonly sessionIndexPath?: () => string,
   ) {}
 
   sessionRoots(): string[] {
@@ -62,6 +66,7 @@ export class OpenAiRolloutParser implements SessionParser {
     let sourceId: string | undefined;
     let cwd: string | undefined;
     let cliVersion: string | undefined;
+    let model: string | undefined;
     let modelProvider: string | undefined;
     let gitBranch: string | undefined;
     let gitSha: string | undefined;
@@ -69,6 +74,13 @@ export class OpenAiRolloutParser implements SessionParser {
     let firstTs: string | undefined;
     let lastTs: string | undefined;
     let title: string | undefined;
+    let parentThreadId: string | undefined;
+    let forkedFromId: string | undefined;
+    let threadSource: string | undefined;
+    let agentNickname: string | undefined;
+    let agentRole: string | undefined;
+    let agentPath: string | undefined;
+    let isSubagent = false;
     let seq = 0;
 
     const parseRecord = (o: Record<string, unknown>) => {
@@ -80,11 +92,33 @@ export class OpenAiRolloutParser implements SessionParser {
         if (typeof payload.cwd === "string") cwd = payload.cwd;
         if (typeof payload.cli_version === "string") cliVersion = payload.cli_version;
         if (typeof payload.model_provider === "string") modelProvider = payload.model_provider;
+        if (typeof payload.parent_thread_id === "string") parentThreadId = payload.parent_thread_id;
+        if (typeof payload.forked_from_id === "string") forkedFromId = payload.forked_from_id;
+        if (typeof payload.thread_source === "string") threadSource = payload.thread_source;
+        if (typeof payload.agent_nickname === "string") agentNickname = payload.agent_nickname;
+        if (typeof payload.agent_role === "string") agentRole = payload.agent_role;
+        if (typeof payload.agent_path === "string") agentPath = payload.agent_path;
+        isSubagent =
+          Boolean(parentThreadId) ||
+          threadSource === "subagent" ||
+          isStructuredSubagentSource(payload.source);
+        const metaTimestamp =
+          typeof payload.timestamp === "string" ? payload.timestamp : ts;
+        if (metaTimestamp && !firstTs) firstTs = metaTimestamp;
         const git = payload.git as Record<string, unknown> | undefined;
         if (git) {
           if (typeof git.branch === "string") gitBranch = git.branch;
           if (typeof git.commit_hash === "string") gitSha = git.commit_hash;
           if (typeof git.repository_url === "string") gitUrl = git.repository_url;
+        }
+        return;
+      }
+
+      if (o.type === "turn_context") {
+        if (typeof payload.cwd === "string") cwd = payload.cwd;
+        if (typeof payload.model === "string") model = payload.model;
+        if (!modelProvider && typeof payload.model_provider === "string") {
+          modelProvider = payload.model_provider;
         }
         return;
       }
@@ -162,6 +196,7 @@ export class OpenAiRolloutParser implements SessionParser {
 
     const fileBase = basename(filePath).replace(/\.jsonl$/, "");
     sourceId = sourceId ?? fileBase;
+    const indexedTitle = this.indexedTitle(sourceId);
     const mtime = (() => {
       try {
         return statSync(filePath).mtime.toISOString();
@@ -174,17 +209,27 @@ export class OpenAiRolloutParser implements SessionParser {
       source: this.source,
       source_id: sourceId,
       source_path: filePath,
-      title: title ?? null,
+      title: indexedTitle ?? title ?? null,
       project_path: cwd ?? null,
       project_name: cwd ? basename(cwd) : null,
+      model: model ?? null,
       model_provider: modelProvider ?? null,
       git_branch: gitBranch ?? null,
       git_sha: gitSha ?? null,
       git_origin_url: gitUrl ?? null,
       cli_version: cliVersion ?? null,
+      is_subagent: isSubagent,
+      parent_session_id: parentThreadId ?? null,
       started_at: firstTs ?? null,
       ended_at: lastTs ?? null,
       source_modified_at: mtime,
+      metadata: compactMetadata({
+        forked_from_id: forkedFromId,
+        thread_source: threadSource,
+        agent_nickname: agentNickname,
+        agent_role: agentRole,
+        agent_path: agentPath,
+      }),
     };
 
     const parsed = sink.toParseFileResult(session);
@@ -197,6 +242,57 @@ export class OpenAiRolloutParser implements SessionParser {
       sourceContentDigest,
     };
   }
+
+  private indexedTitle(sourceId: string): string | undefined {
+    if (!this.sessionIndexPath) return undefined;
+    const path = this.sessionIndexPath();
+    let signature: string;
+    try {
+      const stat = statSync(path);
+      signature = `${stat.mtimeMs}:${stat.size}`;
+    } catch {
+      this.sessionIndexSignature = null;
+      this.sessionIndexTitles.clear();
+      return undefined;
+    }
+
+    if (signature !== this.sessionIndexSignature) {
+      const titles = new Map<string, string>();
+      for (const line of readFileSync(path, "utf-8").split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line) as Record<string, unknown>;
+          const id = typeof entry.id === "string" ? entry.id : "";
+          const name = typeof entry.thread_name === "string" ? entry.thread_name.trim() : "";
+          // session_index.jsonl is append-only: the latest valid entry wins.
+          // Only copy the public title fields so unrelated profile/auth data can
+          // never leak into normalized session metadata.
+          if (id && name) titles.set(id, name);
+        } catch {
+          // Ignore malformed index rows; rollout parsing remains authoritative.
+        }
+      }
+      this.sessionIndexTitles = titles;
+      this.sessionIndexSignature = signature;
+    }
+    return this.sessionIndexTitles.get(sourceId);
+  }
+}
+
+function isStructuredSubagentSource(value: unknown): boolean {
+  if (typeof value === "string") return value.toLowerCase() === "subagent";
+  if (!value || typeof value !== "object") return false;
+  return Object.keys(value as Record<string, unknown>).some((key) =>
+    key.replaceAll("_", "").toLowerCase().includes("subagent"),
+  );
+}
+
+function compactMetadata(
+  values: Record<string, string | undefined>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(values).filter((entry): entry is [string, string] => Boolean(entry[1])),
+  );
 }
 
 interface RolloutSink {
