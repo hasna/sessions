@@ -175,6 +175,22 @@ describe("tmux watchdog scanner", () => {
     ).toBe(false);
   });
 
+  it("supports non-hyphen numbered sibling session names", () => {
+    const accountOutput = [
+      "account010\taccount010\t0\t0\tclaude\t/work/account010\t0",
+      "account011\taccount011\t0\t0\tbash\t/work/account011\t0",
+    ].join("\n");
+
+    expect(scanWatchdogFromTmuxOutput(accountOutput)).toEqual([
+      {
+        session_name: "account011",
+        window_target: "account011:0",
+        status: "crashed",
+        sibling_dir: "/work/account011",
+      },
+    ]);
+  });
+
   it("lists tmux panes with the watchdog format through the injected runner", () => {
     const calls: string[][] = [];
     const runner: TmuxRunner = (args) => {

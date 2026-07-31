@@ -394,9 +394,8 @@ function hasHealthySibling(sessionName: string, healthySessions: Set<string>): b
 }
 
 function siblingPrefix(sessionName: string): string | null {
-  const separator = sessionName.lastIndexOf("-");
-  if (separator <= 0 || separator === sessionName.length - 1) return null;
-  return sessionName.slice(0, separator + 1);
+  const prefix = watchdogSessionPrefix(sessionName);
+  return prefix === sessionName ? null : prefix;
 }
 
 function normalizeCommand(command: string): string {
