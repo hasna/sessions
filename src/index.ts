@@ -63,15 +63,22 @@ export type {
 } from "./lib/live.js";
 
 export {
+  parseWatchdogPaneLine,
+  scanWatchdogFromTmuxOutput,
+  scanWatchdogSessions,
   sessionsWatchdogRestart,
   sessionsWatchdogRestartAll,
   watchdogSessionPrefix,
 } from "./lib/watchdog.js";
 export type {
+  WatchdogCandidate,
+  WatchdogPaneRecord,
   WatchdogRestartEntry,
   WatchdogRestartOptions,
   WatchdogRestartOutcome,
   WatchdogRestartResult,
+  WatchdogScanOptions,
+  WatchdogStatus,
 } from "./lib/watchdog.js";
 
 export {
