@@ -304,7 +304,7 @@ function listClaudeProjectSessions(projectPath: string, projectsDir: string): Pr
       projectPath,
       filePath,
       modifiedAt: stat.mtime.toISOString(),
-      mtimeMs: stat.mtimeMs,
+      mtimeMs: Number(stat.mtimeMs),
     });
   }
   return sessions.sort((a, b) => b.mtimeMs - a.mtimeMs || a.filePath.localeCompare(b.filePath));
@@ -332,7 +332,7 @@ function listCodexProjectSessions(projectPath: string, sessionsDir: string): Pro
       projectPath,
       filePath,
       modifiedAt: stat.mtime.toISOString(),
-      mtimeMs: stat.mtimeMs,
+      mtimeMs: Number(stat.mtimeMs),
     });
   }
   return sessions.sort((a, b) => b.mtimeMs - a.mtimeMs || a.filePath.localeCompare(b.filePath));
