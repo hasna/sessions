@@ -160,9 +160,9 @@ Exposes session tools for agents/orchestrators: `search_sessions`,
 `list_sessions`, `machines`, `get_session`, `ingest`, `embed`, `session_stats`,
 `knowledge_graph`, active-store tools (`sessions_list`, `sessions_history`,
 `sessions_search`, `sessions_resume`, `sessions_rename`, `sessions_watch`,
-`sessions_stats`), cross-adapter import tools, and agent registry tools. MCP no
-longer exposes the removed DSN-on-client push/pull tools or direct feedback
-write tool.
+`sessions_watchdog_restart`, `sessions_watchdog_restart_all`, `sessions_stats`),
+cross-adapter import tools, and agent registry tools. MCP no longer exposes the
+removed DSN-on-client push/pull tools or direct feedback write tool.
 
 ## HTTP mode
 
