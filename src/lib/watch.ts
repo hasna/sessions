@@ -1,6 +1,6 @@
 import { watch, existsSync, readFileSync, renameSync, statSync, writeFileSync, type FSWatcher } from "node:fs";
 import { dirname, join } from "node:path";
-import { getFileState } from "../db/ingestion.js";
+import { listFileStates } from "../db/ingestion.js";
 import { getSessionsDbPath } from "./paths.js";
 import { listParsers, ingestSource, type IngestResult } from "./ingest/index.js";
 
@@ -110,10 +110,11 @@ function sourceLagSeconds(source: string): number | null {
   }
 
   let newestPendingMtime = 0;
+  const fileStates = new Map(listFileStates(source).map((state) => [state.file_path, state]));
   for (const file of files) {
     try {
       const stat = statSync(file);
-      const state = getFileState(source, file);
+      const state = fileStates.get(file);
       if (state?.status === "ok" && state.file_mtime === stat.mtime.toISOString() && state.file_size === stat.size) continue;
       newestPendingMtime = Math.max(newestPendingMtime, stat.mtimeMs);
     } catch {

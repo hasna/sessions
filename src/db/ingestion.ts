@@ -23,6 +23,20 @@ export function getFileState(source: string, filePath: string): FileState | null
   };
 }
 
+export function listFileStates(source: string): FileState[] {
+  const db = getDatabase();
+  const rows = db
+    .prepare("SELECT * FROM ingestion_state WHERE source = ?")
+    .all(source) as Record<string, unknown>[];
+  return rows.map((row) => ({
+    source: row.source as string,
+    file_path: row.file_path as string,
+    file_mtime: (row.file_mtime as string) ?? null,
+    file_size: row.file_size == null ? null : Number(row.file_size),
+    status: (row.status as string) ?? null,
+  }));
+}
+
 export function setFileState(
   source: string,
   filePath: string,
