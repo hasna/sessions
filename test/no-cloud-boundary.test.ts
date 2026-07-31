@@ -46,6 +46,10 @@ describe("no-cloud package boundary", () => {
       "package.json",
       "bun.lock",
       "src/cli/index.tsx",
+      "src/cli/filesystem-commands.ts",
+      "src/cli/indexed-commands.ts",
+      "src/cli/store-commands.ts",
+      "src/cli/sync-commands.ts",
       "src/db/session-store.ts",
       "src/index.ts",
       "src/mcp/index.ts",
@@ -62,6 +66,12 @@ describe("no-cloud package boundary", () => {
     // The client routes through the sessions-native Store abstraction
     // (LocalStore | ApiStore over /v1) — never @hasna/cloud, never a DSN.
     expect(readRepoFile("src/mcp/index.ts")).toContain("resolveSessionStore");
-    expect(readRepoFile("src/cli/index.tsx")).toContain("resolveSessionStore");
+    const cliCommandSources = [
+      "src/cli/filesystem-commands.ts",
+      "src/cli/indexed-commands.ts",
+      "src/cli/store-commands.ts",
+      "src/cli/sync-commands.ts",
+    ].map(readRepoFile).join("\n");
+    expect(cliCommandSources).toContain("resolveSessionStore");
   });
 });
