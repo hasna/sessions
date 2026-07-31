@@ -1735,9 +1735,9 @@ program
     }
     // Message/tool-call bodies come through the Store: local SQLite in local mode
     // or the authenticated /v1 content endpoints in self_hosted mode.
-    const messages = await store.messages(s.id);
+    const n = parseNonNegativeIntOption(opts.messages, 12, "--messages");
+    const messages = n === 0 ? [] : await store.messages(s.id);
     const tools = await store.toolCalls(s.id);
-    const n = parsePositiveIntOption(opts.messages, 12, "--messages");
     const previewMessages = messages.slice(0, n);
     if (opts.json) return void printJson({ session: s, messages: previewMessages, tools });
     console.log(`${s.title ?? "(untitled)"}`);
