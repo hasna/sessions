@@ -35,6 +35,8 @@ export interface IngestOptions {
   force?: boolean;
   /** Progress callback (one line per event). */
   onProgress?: (message: string) => void;
+  /** Called for each file that fails to ingest. */
+  onError?: (error: Error) => void;
 }
 
 const INGEST_LOCK_DIR = "ingest.lock";
@@ -196,9 +198,11 @@ function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestR
         }
       }
     } catch (err) {
+      const error = err as Error;
       result.errors++;
-      setFileState(source, file, before.mtime, before.size, "error", (err as Error).message);
-      opts.onProgress?.(`[${source}] ERROR ${file}: ${(err as Error).message}`);
+      setFileState(source, file, before.mtime, before.size, "error", error.message);
+      opts.onProgress?.(`[${source}] ERROR ${file}: ${error.message}`);
+      opts.onError?.(error);
     }
   }
 
