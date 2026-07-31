@@ -1,0 +1,3 @@
+{"timestamp":"2026-05-02T09:00:00Z","type":"session_meta","payload":{"id":"duplicate-rollout-id","cwd":"/workspace/complete","cli_version":"test","model_provider":"openai"}}
+{"timestamp":"2026-05-02T09:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"complete first"}]}}
+{"timestamp":"2026-05-02T09:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"complete second"}]}}

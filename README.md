@@ -80,6 +80,13 @@ sessions sync --watch --interval 60 --max-iterations 3
 sessions reindex
 ```
 
+Codex and Codewith rollout files are enumerated in path order. When multiple
+files have the same session ID, ingest keeps the snapshot with the most total
+messages and tool calls; ties prefer more messages, then the newer source
+modification time, then the lexicographically later path. A stale partial copy
+therefore cannot replace a fuller snapshot, and live and archived copies share
+one session row.
+
 ## Session titles & resume
 
 ```bash

@@ -1,0 +1,2 @@
+{"timestamp":"2026-05-02T10:00:00Z","type":"session_meta","payload":{"id":"distinct-rollout-id","cwd":"/workspace/distinct","cli_version":"test","model_provider":"openai"}}
+{"timestamp":"2026-05-02T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"distinct session"}]}}

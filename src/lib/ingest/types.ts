@@ -28,6 +28,7 @@ export interface ParseFileResult {
 export interface SessionParser {
   /** Provider identifier (claude, codex, codewith, gemini, …). */
   readonly source: SessionSource;
+  readonly preservePreferredSnapshots?: boolean;
   /** Root directories where this provider stores session files. */
   sessionRoots(): string[];
   /** Enumerate absolute paths of session files under the roots. */

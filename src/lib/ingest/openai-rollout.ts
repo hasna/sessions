@@ -28,6 +28,8 @@ function mapRole(role: unknown): MessageRole {
 }
 
 export class OpenAiRolloutParser implements SessionParser {
+  readonly preservePreferredSnapshots = true;
+
   constructor(
     readonly source: Extract<SessionSource, "codex" | "codewith">,
     private readonly sessionsRoot: () => string
@@ -46,7 +48,7 @@ export class OpenAiRolloutParser implements SessionParser {
         out.push(join(root, entry));
       }
     }
-    return out;
+    return out.sort();
   }
 
   parseFile(filePath: string): ParsedSession[] {
