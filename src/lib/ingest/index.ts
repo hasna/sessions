@@ -176,12 +176,14 @@ function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestR
 
         let fileSessions = 0;
         for (const ps of parsed.sessions) {
-          saveParsedSession(ps);
+          saveParsedSession(ps, { preservePreferredSnapshot: parser.preservePreferredSnapshots });
           result.sessions++;
           fileSessions++;
         }
         for (const staged of parsed.stagedSessions ?? []) {
-          saveStagedParsedSession(staged);
+          saveStagedParsedSession(staged, {
+            preservePreferredSnapshot: parser.preservePreferredSnapshots,
+          });
           result.sessions++;
           fileSessions++;
         }

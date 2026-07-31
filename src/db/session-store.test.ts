@@ -201,4 +201,70 @@ describe("cloud store routes to /v1 with bearer key", () => {
     expect(calls[0].url).toContain("/v1/sessions/s1/messages");
     expect(calls[1].url).toContain("/v1/sessions/s1/tool-calls");
   });
+
+  test("covers rename, relocate, content search, tool search, and graph routes", async () => {
+    const { store, calls } = cloudStore((call) => {
+      if (call.method === "PATCH") return { json: { session: { id: "renamed" } } };
+      if (call.url.includes("/relocate")) return { json: {} };
+      if (call.url.includes("/search/content")) return { json: { results: [{ session_id: "s1" }] } };
+      if (call.url.includes("/search/tools")) return { json: { results: [{ session_id: "s1", tool_name: "Read" }] } };
+      if (call.url.includes("related=")) return { json: { sessions: [{ id: "s1" }] } };
+      if (call.url.includes("session=")) return { json: { graph: { session: { id: "s1" }, tools: [] } } };
+      return { json: { entities: [{ type: "tool", name: "Read", session_count: 1 }] } };
+    });
+
+    expect(await store.rename("native/id", "Title", { source: "codex" })).toEqual({ id: "renamed" } as never);
+    expect(await store.relocatePaths("/old", "/new")).toEqual({ rowsUpdated: 0 });
+    expect(await store.searchContent("hello", { project_path: "/work", machine: "m" })).toHaveLength(1);
+    expect(await store.searchToolCalls("Read", { source: "claude" })).toHaveLength(1);
+    expect(await store.graphEntities()).toHaveLength(1);
+    expect(await store.graphEntities("tool")).toHaveLength(1);
+    expect(await store.graphRelated("tool", "Read", 2)).toHaveLength(1);
+    expect(await store.graphSession("s1", { source: "claude" })).toMatchObject({ tools: [] });
+    expect(calls[0].url).toContain("native%2Fid");
+    expect(calls[0].body).toEqual({ title: "Title" });
+  });
+
+  test("returns empty/null fallbacks for sparse successful cloud responses", async () => {
+    const { store } = cloudStore(() => ({ json: {} }));
+    expect(await store.list({})).toEqual([]);
+    expect(await store.recent(1)).toEqual([]);
+    expect(await store.get("id")).toBeNull();
+    expect((await store.importContent({
+      session: { source: "claude", source_id: "s" }, messages: [], toolCalls: [],
+    })).backup).toBeNull();
+    expect(await store.rename("id", "title")).toBeNull();
+    expect(await store.search("q", {})).toEqual([]);
+    expect(await store.machines()).toEqual([]);
+    expect(await store.messages("id")).toEqual([]);
+    expect(await store.toolCalls("id")).toEqual([]);
+    expect(await store.searchContent("q", {})).toEqual([]);
+    expect(await store.searchToolCalls("q", {})).toEqual([]);
+    expect(await store.graphEntities()).toEqual([]);
+    expect(await store.graphRelated("tool", "x", 1)).toEqual([]);
+    expect(await store.graphSession("id")).toBeNull();
+  });
+
+  test("maps only 404s to null/false and rethrows other transport failures", async () => {
+    const missing = cloudStore(() => ({ status: 404, json: { error: "gone" } })).store;
+    expect(await missing.rename("gone", "x")).toBeNull();
+    expect(await missing.graphSession("gone")).toBeNull();
+
+    const broken = cloudStore(() => ({ status: 500, json: { error: "broken" } })).store;
+    await expect(broken.get("x")).rejects.toMatchObject({ status: 500 });
+    await expect(broken.remove("x")).rejects.toMatchObject({ status: 500 });
+    await expect(broken.rename("x", "x")).rejects.toMatchObject({ status: 500 });
+    await expect(broken.graphSession("x")).rejects.toMatchObject({ status: 500 });
+  });
+
+  test("fails loudly for every local-only cloud operation", async () => {
+    const { store } = cloudStore(() => ({ json: {} }));
+    expect(() => store.semanticSearch("q", {})).toThrow("semantic search");
+    expect(() => store.hybridSearch("q", {})).toThrow("hybrid search");
+    await expect(store.recall("q", {})).rejects.toThrow("recall' is local-only");
+    expect(() => store.embed({})).toThrow("embed");
+    expect(() => store.mergeFromDb("x")).toThrow("import-db");
+    expect(() => store.ingest()).toThrow("ingest");
+    expect(() => store.recomputeMachines()).toThrow("recompute-machines");
+  });
 });

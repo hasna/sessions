@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { appendFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  copyFileSync,
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  utimesSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getParser, ingestSource, ingestAll } from "../src/lib/ingest/index.js";
@@ -64,6 +72,30 @@ const sharedRolloutLines = (cwd: string) =>
       },
     }),
   ].join("\n");
+
+const rolloutFixture = (name: string) => join(import.meta.dir, "fixtures", "rollouts", name);
+
+function storedRolloutSnapshot(sourceId: string): string {
+  const session = getSessionBySource("codex", sourceId);
+  if (!session) throw new Error(`missing codex session ${sourceId}`);
+  return JSON.stringify({
+    source_id: session.source_id,
+    source_path: session.source_path,
+    title: session.title,
+    project_path: session.project_path,
+    message_count: session.message_count,
+    tool_call_count: session.tool_call_count,
+    started_at: session.started_at,
+    ended_at: session.ended_at,
+    source_modified_at: session.source_modified_at,
+    messages: getMessages(session.id).map(({ role, content, sequence_num, timestamp }) => ({
+      role,
+      content,
+      sequence_num,
+      timestamp,
+    })),
+  });
+}
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "sessions-ingest-"));
@@ -291,6 +323,61 @@ describe("ingestSource", () => {
     expect(partial).toMatchObject({ source: "codex", scanned: 1, ingested: 0, sessions: 0, errors: 0 });
     expect(getFileState("codex", file)?.status).toBe("pending");
     expect(getMessages(existing.id).map((m) => m.content)).toEqual(["stable"]);
+  });
+
+  it("resolves duplicate rollout snapshots identically regardless of enumeration order", () => {
+    const rolloutDir = join(root, "codex", "sessions", "duplicates");
+    mkdirSync(rolloutDir, { recursive: true });
+    const complete = join(rolloutDir, "rollout-duplicate-complete.jsonl");
+    const partial = join(rolloutDir, "rollout-duplicate-partial.jsonl");
+    copyFileSync(rolloutFixture("rollout-duplicate-complete.jsonl"), complete);
+    copyFileSync(rolloutFixture("rollout-duplicate-partial.jsonl"), partial);
+    utimesSync(complete, new Date("2026-05-02T09:00:03Z"), new Date("2026-05-02T09:00:03Z"));
+    utimesSync(partial, new Date("2026-05-02T09:00:04Z"), new Date("2026-05-02T09:00:04Z"));
+
+    const parser = getParser("codex");
+    if (!parser) throw new Error("missing codex parser");
+    const originalListSessionFiles = parser.listSessionFiles;
+    try {
+      parser.listSessionFiles = () => [complete, partial];
+      ingestSource("codex", { force: true });
+      const completeThenPartial = storedRolloutSnapshot("duplicate-rollout-id");
+
+      parser.listSessionFiles = () => [partial, complete];
+      ingestSource("codex", { force: true });
+      const partialThenComplete = storedRolloutSnapshot("duplicate-rollout-id");
+
+      expect(completeThenPartial).toBe(partialThenComplete);
+      expect(JSON.parse(completeThenPartial)).toMatchObject({
+        source_path: complete,
+        project_path: "/workspace/complete",
+        message_count: 2,
+        messages: [{ content: "complete first" }, { content: "complete second" }],
+      });
+      expect(listSessions({ source: "codex" })).toHaveLength(1);
+    } finally {
+      parser.listSessionFiles = originalListSessionFiles;
+    }
+  });
+
+  it("keeps rollout files with distinct source ids as separate sessions", () => {
+    const rolloutDir = join(root, "codex", "sessions", "distinct");
+    mkdirSync(rolloutDir, { recursive: true });
+    copyFileSync(
+      rolloutFixture("rollout-duplicate-complete.jsonl"),
+      join(rolloutDir, "rollout-duplicate-complete.jsonl"),
+    );
+    copyFileSync(
+      rolloutFixture("rollout-distinct.jsonl"),
+      join(rolloutDir, "rollout-distinct.jsonl"),
+    );
+
+    ingestSource("codex");
+
+    expect(listSessions({ source: "codex" }).map((session) => session.source_id).sort()).toEqual([
+      "distinct-rollout-id",
+      "duplicate-rollout-id",
+    ]);
   });
 });
 
