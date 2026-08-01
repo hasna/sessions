@@ -15,6 +15,7 @@ function runCli(args: string[]) {
       HOME: root,
       CLAUDE_PATH: join(root, "claude"),
       CODEX_PATH: join(root, "codex"),
+      CODEWITH_PATH: join(root, "codewith"),
       GEMINI_PATH: join(root, "gemini"),
       SESSIONS_DB_PATH: join(root, "sessions.db"),
       HASNA_SESSIONS_DB_PATH: join(root, "sessions.db"),
@@ -50,7 +51,37 @@ describe("sessions content sync CLI", () => {
     expect(Buffer.from(daemonHelp.stdout).toString("utf-8")).toContain("self_hosted");
     expect(Buffer.from(daemonHelp.stdout).toString("utf-8")).toContain("/v1 API");
     expect(Buffer.from(daemonHelp.stdout).toString("utf-8")).toContain("--max-iterations");
+    expect(Buffer.from(daemonHelp.stdout).toString("utf-8")).toContain("--status");
     expect(Buffer.from(daemonHelp.stdout).toString("utf-8")).toContain('default: "60"');
+  });
+
+  it("exposes provider roots and ingest observability through daemon status", () => {
+    mkdirSync(join(root, "codewith", "sessions"), { recursive: true });
+
+    const jsonResult = runCli(["daemon", "--status", "--json"]);
+    expect(jsonResult.exitCode).toBe(0);
+    expect(Buffer.from(jsonResult.stderr).toString("utf-8")).toBe("");
+    const status = JSON.parse(Buffer.from(jsonResult.stdout).toString("utf-8"));
+    const codewith = status.roots.find((entry: { source: string }) => entry.source === "codewith");
+    expect(codewith).toMatchObject({
+      source: "codewith",
+      exists: true,
+      lastAttemptAt: null,
+      lastSuccessAt: null,
+      lagSeconds: 0,
+      skippedFiles: 0,
+      lastError: null,
+    });
+
+    const humanResult = runCli(["daemon", "--status"]);
+    expect(humanResult.exitCode).toBe(0);
+    const output = Buffer.from(humanResult.stdout).toString("utf-8");
+    expect(output).toContain("daemon status");
+    expect(output).toContain("codewith");
+    expect(output).toContain("lag(s)");
+    expect(output).toContain("last attempt");
+    expect(output).toContain("last success");
+    expect(output).toContain("last error");
   });
 
   it("defaults sync --limit to a bounded value mirroring daemon so a bare sync does not scan the whole store", () => {

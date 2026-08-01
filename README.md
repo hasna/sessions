@@ -250,6 +250,24 @@ sessions sync --watch --interval 60 --max-iterations 10 \
   --backup-command 'sessions transfer export --output ~/.hasna/sessions/backups'
 ```
 
+Supervise continuous local ingestion as a long-running service and let its
+10-second poll recover writes missed by filesystem notifications. For example,
+a systemd user service can run `sessions ingest-watch --no-initial --poll 10000`
+with `Restart=on-failure` and `RestartSec=5`; set provider path environment
+variables in the supervisor rather than embedding machine-specific paths in the
+unit. After starting or restarting it, verify both the configured Codewith root
+and persisted ingest health with `sessions daemon --status` (or `--json` for a
+health probe). A healthy active root has a recent last attempt and success, zero
+lag, and no last error; skipped files normally increase on unchanged poll ticks.
+
+To roll back, stop and disable the supervisor unit, restore the previously
+installed package version, and run one `sessions ingest --source codewith`
+before re-enabling the old unit. Keep the sessions database and
+`watch-status.json`: ingestion is mtime-gated and session writes are upserts, so
+restarts and version rollback do not require deleting state or rebuilding the
+index. If the restored version cannot read the existing database, leave the
+service stopped and restore the database from the pre-upgrade backup instead.
+
 For one-time historical content backfills, use the explicit backfill workflow
 instead of an unbounded live sync. It defaults to inventory/dry-run JSON and
 reports selected sessions, duplicate source IDs, message/tool-call counts, byte
