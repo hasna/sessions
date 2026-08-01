@@ -55,6 +55,16 @@ export class OpenAiRolloutParser implements SessionParser {
     return out.sort();
   }
 
+  auxiliaryIngestionSignature(_filePath: string): string | null {
+    if (!this.sessionIndexPath) return null;
+    try {
+      const stat = statSync(this.sessionIndexPath());
+      return `${stat.mtimeMs}:${stat.size}`;
+    } catch {
+      return null;
+    }
+  }
+
   parseFile(filePath: string): ParsedSession[] {
     return this.parseFileResult(filePath).sessions;
   }
@@ -76,7 +86,9 @@ export class OpenAiRolloutParser implements SessionParser {
     let title: string | undefined;
     let parentThreadId: string | undefined;
     let forkedFromId: string | undefined;
+    let originator: string | undefined;
     let threadSource: string | undefined;
+    let subagentDepth: number | undefined;
     let agentNickname: string | undefined;
     let agentRole: string | undefined;
     let agentPath: string | undefined;
@@ -94,14 +106,23 @@ export class OpenAiRolloutParser implements SessionParser {
         if (typeof payload.model_provider === "string") modelProvider = payload.model_provider;
         if (typeof payload.parent_thread_id === "string") parentThreadId = payload.parent_thread_id;
         if (typeof payload.forked_from_id === "string") forkedFromId = payload.forked_from_id;
+        if (typeof payload.originator === "string") originator = payload.originator;
         if (typeof payload.thread_source === "string") threadSource = payload.thread_source;
         if (typeof payload.agent_nickname === "string") agentNickname = payload.agent_nickname;
         if (typeof payload.agent_role === "string") agentRole = payload.agent_role;
         if (typeof payload.agent_path === "string") agentPath = payload.agent_path;
+        const structuredSource = parseSessionSource(payload.source);
+        parentThreadId = structuredSource.parentThreadId ?? parentThreadId;
+        threadSource = structuredSource.threadSource ?? threadSource;
+        subagentDepth = structuredSource.subagentDepth ?? subagentDepth;
+        agentNickname = structuredSource.agentNickname ?? agentNickname;
+        agentRole = structuredSource.agentRole ?? agentRole;
+        agentPath = structuredSource.agentPath ?? agentPath;
         isSubagent =
           Boolean(parentThreadId) ||
           threadSource === "subagent" ||
-          isStructuredSubagentSource(payload.source);
+          threadSource?.startsWith("subagent:") ||
+          structuredSource.isSubagent;
         const metaTimestamp =
           typeof payload.timestamp === "string" ? payload.timestamp : ts;
         if (metaTimestamp && !firstTs) firstTs = metaTimestamp;
@@ -224,8 +245,10 @@ export class OpenAiRolloutParser implements SessionParser {
       ended_at: lastTs ?? null,
       source_modified_at: mtime,
       metadata: compactMetadata({
+        originator,
         forked_from_id: forkedFromId,
         thread_source: threadSource,
+        subagent_depth: subagentDepth,
         agent_nickname: agentNickname,
         agent_role: agentRole,
         agent_path: agentPath,
@@ -279,20 +302,69 @@ export class OpenAiRolloutParser implements SessionParser {
   }
 }
 
-function isStructuredSubagentSource(value: unknown): boolean {
-  if (typeof value === "string") return value.toLowerCase() === "subagent";
-  if (!value || typeof value !== "object") return false;
-  return Object.keys(value as Record<string, unknown>).some((key) =>
-    key.replaceAll("_", "").toLowerCase().includes("subagent"),
-  );
+interface SessionSourceMetadata {
+  threadSource?: string;
+  parentThreadId?: string;
+  subagentDepth?: number;
+  agentNickname?: string;
+  agentRole?: string;
+  agentPath?: string;
+  isSubagent: boolean;
+}
+
+function parseSessionSource(value: unknown): SessionSourceMetadata {
+  if (typeof value === "string") {
+    return { threadSource: value, isSubagent: value.toLowerCase() === "subagent" };
+  }
+
+  const source = asRecord(value);
+  if (!source) return { isSubagent: false };
+  const subagent = asRecord(source.subagent);
+  if (!subagent) {
+    return {
+      isSubagent: Object.keys(source).some((key) =>
+        key.replaceAll("_", "").toLowerCase().includes("subagent"),
+      ),
+    };
+  }
+
+  const threadSpawn = asRecord(subagent.thread_spawn);
+  return {
+    threadSource: threadSpawn ? "subagent:thread_spawn" : "subagent",
+    parentThreadId: stringField(threadSpawn, "parent_thread_id") ?? stringField(subagent, "parent_thread_id"),
+    subagentDepth: numberField(threadSpawn, "depth") ?? numberField(subagent, "depth"),
+    agentNickname: stringField(threadSpawn, "agent_nickname") ?? stringField(subagent, "agent_nickname"),
+    agentRole: stringField(threadSpawn, "agent_role") ?? stringField(subagent, "agent_role"),
+    agentPath: stringField(threadSpawn, "agent_path") ?? stringField(subagent, "agent_path"),
+    isSubagent: true,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value != null && typeof value === "object"
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringField(value: Record<string, unknown> | undefined, key: string): string | undefined {
+  const field = value?.[key];
+  return typeof field === "string" ? field : undefined;
+}
+
+function numberField(value: Record<string, unknown> | undefined, key: string): number | undefined {
+  const field = value?.[key];
+  return typeof field === "number" && Number.isFinite(field) ? field : undefined;
 }
 
 function compactMetadata(
-  values: Record<string, string | undefined>,
+  values: Record<string, string | number | undefined>,
 ): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(values).filter((entry): entry is [string, string] => Boolean(entry[1])),
-  );
+  const metadata: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (typeof value === "string" && value) metadata[key] = value;
+    if (typeof value === "number" && Number.isFinite(value)) metadata[key] = value;
+  }
+  return metadata;
 }
 
 interface RolloutSink {

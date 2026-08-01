@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { listFileStates } from "../db/ingestion.js";
 import { getSessionsDbPath } from "./paths.js";
 import { listParsers, ingestSource, type IngestResult } from "./ingest/index.js";
+import { ingestionStateMtime } from "./ingest/types.js";
 
 export interface WatchOptions {
   /** Restrict watching to these provider sources. Defaults to every parser. */
@@ -115,7 +116,13 @@ function sourceLagSeconds(source: string): number | null {
     try {
       const stat = statSync(file);
       const state = fileStates.get(file);
-      if (state?.status === "ok" && state.file_mtime === stat.mtime.toISOString() && state.file_size === stat.size) continue;
+      const mtime = stat.mtime.toISOString();
+      const auxiliarySignature = parser.auxiliaryIngestionSignature?.(file) ?? null;
+      if (
+        state?.status === "ok" &&
+        state.file_mtime === ingestionStateMtime(mtime, auxiliarySignature) &&
+        state.file_size === stat.size
+      ) continue;
       newestPendingMtime = Math.max(newestPendingMtime, stat.mtimeMs);
     } catch {
       continue;

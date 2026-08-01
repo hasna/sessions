@@ -74,6 +74,7 @@ const sharedRolloutLines = (cwd: string) =>
   ].join("\n");
 
 const rolloutFixture = (name: string) => join(import.meta.dir, "fixtures", "rollouts", name);
+const codewithFixture = (name: string) => join(import.meta.dir, "fixtures", "codewith", name);
 
 function storedRolloutSnapshot(sourceId: string): string {
   const session = getSessionBySource("codex", sourceId);
@@ -186,6 +187,72 @@ describe("ingestSource", () => {
 
     const codewithStats = getIngestionStats().find((s) => s.source === "codewith");
     expect(codewithStats?.session_count).toBe(1);
+  });
+
+  it("round-trips indexed Codewith root and subagent provenance without auth metadata", () => {
+    const codewithRoot = join(root, "codewith");
+    const sessionDir = join(codewithRoot, "sessions", "2026", "06", "01");
+    const rootRollout = join(sessionDir, "rollout-2026-06-01T10-00-00-codewith-fixture-root.jsonl");
+    const subagentRollout = join(sessionDir, "rollout-2026-06-01T10-01-00-codewith-fixture-subagent.jsonl");
+    const sessionIndex = join(codewithRoot, "session_index.jsonl");
+    mkdirSync(sessionDir, { recursive: true });
+    copyFileSync(codewithFixture("rollout-root.jsonl"), rootRollout);
+    copyFileSync(codewithFixture("rollout-subagent.jsonl"), subagentRollout);
+    copyFileSync(codewithFixture("session_index.jsonl"), sessionIndex);
+
+    expect(ingestSource("codewith")).toMatchObject({
+      source: "codewith",
+      scanned: 2,
+      ingested: 2,
+      sessions: 2,
+      errors: 0,
+    });
+
+    const rootSession = getSessionBySource("codewith", "codewith-fixture-root");
+    const subagentSession = getSessionBySource("codewith", "codewith-fixture-subagent");
+    expect(rootSession).toMatchObject({
+      source_path: rootRollout,
+      title: "Indexed Codewith root title",
+      project_path: "/workspace/synthetic-root-project",
+      project_name: "synthetic-root-project",
+      model: "gpt-fixture-root",
+      model_provider: "openai",
+      is_subagent: false,
+      parent_session_id: null,
+      started_at: "2026-06-01T10:00:00.000Z",
+      ended_at: "2026-06-01T10:00:03.000Z",
+      metadata: { originator: "codewith" },
+    });
+    expect(rootSession?.machine).toBeTruthy();
+    expect(subagentSession).toMatchObject({
+      source_path: subagentRollout,
+      title: "Indexed Codewith subagent title",
+      project_path: "/workspace/synthetic-root-project",
+      project_name: "synthetic-root-project",
+      model: "gpt-fixture-subagent",
+      model_provider: "openai",
+      is_subagent: true,
+      parent_session_id: "codewith-fixture-root",
+      started_at: "2026-06-01T10:01:00.000Z",
+      ended_at: "2026-06-01T10:01:03.000Z",
+      metadata: {
+        originator: "codewith",
+        thread_source: "subagent:thread_spawn",
+        subagent_depth: 1,
+        agent_nickname: "fixture-worker",
+        agent_role: "worker",
+        agent_path: "/root/fixture-worker",
+      },
+    });
+    expect(subagentSession?.machine).toBe(rootSession?.machine);
+
+    appendFileSync(
+      sessionIndex,
+      '\n{"id":"codewith-fixture-root","thread_name":"Updated indexed root title","auth_profile":"synthetic-profile-label"}\n',
+    );
+    const refreshed = ingestSource("codewith");
+    expect(refreshed).toMatchObject({ scanned: 2, ingested: 2, skipped: 0, sessions: 2, errors: 0 });
+    expect(getSessionBySource("codewith", "codewith-fixture-root")?.title).toBe("Updated indexed root title");
   });
 
   it("throws for an unknown source", () => {

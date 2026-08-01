@@ -33,10 +33,19 @@ export interface SessionParser {
   sessionRoots(): string[];
   /** Enumerate absolute paths of session files under the roots. */
   listSessionFiles(): string[];
+  /** Signature of auxiliary parser input that must invalidate stored file state. */
+  auxiliaryIngestionSignature?(filePath: string): string | null;
   /** Parse a session file into normalized sessions. Most providers yield one per file; some (gemini logs.json) yield many. Returns [] if none. */
   parseFile(filePath: string): ParsedSession[];
   /** Parse a session file and return parser state useful to safe ingestion. */
   parseFileResult?(filePath: string, opts?: ParseFileOptions): ParseFileResult;
+}
+
+/** Preserve legacy mtime state unless a parser has an auxiliary ingestion input. */
+export function ingestionStateMtime(fileMtime: string, auxiliarySignature: string | null): string {
+  return auxiliarySignature === null
+    ? fileMtime
+    : JSON.stringify([fileMtime, auxiliarySignature]);
 }
 
 /** Flatten a Claude/Codex content value (string or array of blocks) into plain text. */

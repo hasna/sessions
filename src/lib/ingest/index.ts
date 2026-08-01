@@ -9,6 +9,7 @@ import { saveParsedSession, saveStagedParsedSession } from "../../db/sessions.js
 import { getFileState, setFileState, updateIngestionStats } from "../../db/ingestion.js";
 import { registerMachine, recomputeMachineCounts } from "../../db/machines.js";
 import { getSessionsDir } from "../paths.js";
+import { ingestionStateMtime, type SessionParser } from "./types.js";
 
 // Register the built-in parsers on import.
 registerParser(new ClaudeParser());
@@ -48,8 +49,8 @@ interface IngestLockInfo {
 }
 
 interface FileSnapshot {
-  mtime: string;
   size: number;
+  stateMtime: string;
 }
 
 function ingestLockPath(): string {
@@ -119,17 +120,19 @@ function withIngestLock<T>(fn: () => T): T {
   }
 }
 
-function snapshotFile(file: string): FileSnapshot | null {
+function snapshotFile(parser: SessionParser, file: string): FileSnapshot | null {
   try {
     const st = statSync(file);
-    return { mtime: st.mtime.toISOString(), size: st.size };
+    const mtime = st.mtime.toISOString();
+    const auxiliarySignature = parser.auxiliaryIngestionSignature?.(file) ?? null;
+    return { size: st.size, stateMtime: ingestionStateMtime(mtime, auxiliarySignature) };
   } catch {
     return null;
   }
 }
 
 function sameSnapshot(a: FileSnapshot, b: FileSnapshot): boolean {
-  return a.mtime === b.mtime && a.size === b.size;
+  return a.stateMtime === b.stateMtime && a.size === b.size;
 }
 
 function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestResult {
@@ -142,7 +145,7 @@ function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestR
 
   for (const file of files) {
     result.scanned++;
-    const before = snapshotFile(file);
+    const before = snapshotFile(parser, file);
     if (!before) {
       // File vanished between listing and stat — skip.
       continue;
@@ -150,7 +153,7 @@ function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestR
 
     if (!opts.force) {
       const state = getFileState(source, file);
-      if (state && state.status === "ok" && state.file_mtime === before.mtime && state.file_size === before.size) {
+      if (state && state.status === "ok" && state.file_mtime === before.stateMtime && state.file_size === before.size) {
         result.skipped++;
         continue;
       }
@@ -158,20 +161,20 @@ function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestR
 
     try {
       const parsed = parser.parseFileResult?.(file, { preferStaging: true }) ?? { sessions: parser.parseFile(file) };
-      const after = snapshotFile(file);
+      const after = snapshotFile(parser, file);
       try {
         if (!after) {
-          setFileState(source, file, before.mtime, before.size, "pending", "file vanished after parsing");
+          setFileState(source, file, before.stateMtime, before.size, "pending", "file vanished after parsing");
           opts.onProgress?.(`[${source}] deferred ${file}: file vanished after parsing`);
           continue;
         }
         if (parsed.incompleteTrailingRecord) {
-          setFileState(source, file, after.mtime, after.size, "pending", "incomplete trailing JSONL record");
+          setFileState(source, file, after.stateMtime, after.size, "pending", "incomplete trailing JSONL record");
           opts.onProgress?.(`[${source}] deferred ${file}: incomplete trailing JSONL record`);
           continue;
         }
         if (!sameSnapshot(before, after)) {
-          setFileState(source, file, after.mtime, after.size, "pending", "file changed during parsing");
+          setFileState(source, file, after.stateMtime, after.size, "pending", "file changed during parsing");
           opts.onProgress?.(`[${source}] deferred ${file}: file changed during parsing`);
           continue;
         }
@@ -189,7 +192,7 @@ function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestR
           result.sessions++;
           fileSessions++;
         }
-        setFileState(source, file, after.mtime, after.size, "ok");
+        setFileState(source, file, after.stateMtime, after.size, "ok");
         result.ingested++;
         opts.onProgress?.(`[${source}] ingested ${file} (${fileSessions} session${fileSessions === 1 ? "" : "s"})`);
       } finally {
@@ -200,7 +203,7 @@ function ingestSourceUnlocked(source: string, opts: IngestOptions = {}): IngestR
     } catch (err) {
       const error = err as Error;
       result.errors++;
-      setFileState(source, file, before.mtime, before.size, "error", error.message);
+      setFileState(source, file, before.stateMtime, before.size, "error", error.message);
       opts.onProgress?.(`[${source}] ERROR ${file}: ${error.message}`);
       opts.onError?.(error);
     }
