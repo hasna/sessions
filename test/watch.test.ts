@@ -17,6 +17,12 @@ const sessionLines = (id: string, text: string) =>
     JSON.stringify({ type: "assistant", message: { role: "assistant", model: "claude-opus-4", content: [{ type: "text", text: "ok" }] }, uuid: `${id}-a`, timestamp: "2026-05-01T10:00:02Z", sessionId: id }),
   ].join("\n");
 
+const codewithRolloutLines = (id: string, text: string) =>
+  [
+    JSON.stringify({ timestamp: "2026-05-02T10:00:00Z", type: "session_meta", payload: { id, cwd: "/work/codewith" } }),
+    JSON.stringify({ timestamp: "2026-05-02T10:00:01Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } }),
+  ].join("\n");
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
@@ -38,6 +44,7 @@ beforeEach(() => {
   process.env.GEMINI_PATH = join(root, "gemini-missing");
   // Use a temp FILE db (not :memory:) so the watcher's ingest and this test's
   // reads share state even if they resolve to separate db module singletons.
+  process.env.HASNA_SESSIONS_DIR = join(root, "sessions-home");
   process.env.SESSIONS_DB_PATH = join(root, "sessions.db");
   resetDatabase();
   getDatabase();
@@ -52,6 +59,7 @@ afterEach(() => {
   delete process.env.CODEX_PATH;
   delete process.env.CODEWITH_PATH;
   delete process.env.GEMINI_PATH;
+  delete process.env.HASNA_SESSIONS_DIR;
   delete process.env.SESSIONS_DB_PATH;
 });
 
@@ -144,5 +152,45 @@ describe("startWatch", () => {
 
     expect(ingests.length).toBeGreaterThan(0);
     expect(listSessions({ source: "claude" }).some((s) => s.source_id === "watch-1")).toBe(true);
+  }, 8000);
+
+  it("recovers Codewith sessions across watcher restart without duplicates and preserves status", async () => {
+    const rolloutDir = join(root, "codewith", "sessions", "2026", "05", "02");
+    mkdirSync(rolloutDir, { recursive: true });
+    process.env.CODEWITH_PATH = join(root, "codewith");
+
+    watcher = startWatch({ sources: ["codewith"], debounceMs: 25, pollMs: 100 });
+    writeFileSync(join(rolloutDir, "rollout-first.jsonl"), codewithRolloutLines("codewith-first", "first"));
+    await waitFor(() => listSessions({ source: "codewith" }).length === 1);
+    watcher.stop();
+    watcher = null;
+
+    const stoppedStatus = getWatchStatus({ sources: ["codewith"] }).roots[0];
+    expect(stoppedStatus?.lastAttemptAt).not.toBeNull();
+    expect(stoppedStatus?.lastSuccessAt).not.toBeNull();
+    expect(stoppedStatus?.lastError).toBeNull();
+
+    // Simulate a filesystem event missed while the supervised process is down.
+    writeFileSync(join(rolloutDir, "rollout-second.jsonl"), codewithRolloutLines("codewith-second", "second"));
+    await sleep(250);
+    expect(listSessions({ source: "codewith" }).map((session) => session.source_id)).toEqual(["codewith-first"]);
+
+    watcher = startWatch({ sources: ["codewith"], debounceMs: 25, pollMs: 100 });
+    await waitFor(() => listSessions({ source: "codewith" }).length === 2);
+    await waitFor(() => (getWatchStatus({ sources: ["codewith"] }).roots[0]?.skippedFiles ?? 0) === 2);
+
+    expect(listSessions({ source: "codewith" }).map((session) => session.source_id).sort()).toEqual([
+      "codewith-first",
+      "codewith-second",
+    ]);
+    const restartedStatus = getWatchStatus({ sources: ["codewith"] }).roots[0];
+    expect(restartedStatus).toMatchObject({
+      exists: true,
+      lagSeconds: 0,
+      skippedFiles: 2,
+      lastError: null,
+    });
+    expect(restartedStatus?.lastAttemptAt).not.toBeNull();
+    expect(restartedStatus?.lastSuccessAt).not.toBeNull();
   }, 8000);
 });

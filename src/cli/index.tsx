@@ -46,6 +46,7 @@ import {
 import { getPackageVersion } from "../lib/package.js";
 import type { Session } from "../types/index.js";
 import type { SessionStore } from "../db/session-store.js";
+import type { WatchStatus } from "../lib/watch.js";
 import {
   formatLivePaneTable,
   listLivePanes,
@@ -64,6 +65,22 @@ const program = new Command();
 
 function printJson(value: unknown): void {
   writeStdoutFully(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function printProviderWatchStatus(status: WatchStatus, commandName: string): void {
+  console.log(`${commandName} status`);
+  console.log(`  sources:  ${status.sources.join(", ") || "(no provider dirs found)"}`);
+  console.log(`  debounce: ${status.debounceMs}ms`);
+  console.log(`  poll:     ${status.pollMs}ms`);
+  console.log("  state source  lag(s) skipped last attempt             last success             last error root");
+  for (const root of status.roots) {
+    const lag = String(root.lagSeconds ?? "-").padStart(6);
+    const skipped = String(root.skippedFiles).padStart(7);
+    const attempt = (root.lastAttemptAt ?? "-").padEnd(24);
+    const success = (root.lastSuccessAt ?? "-").padEnd(24);
+    const error = root.lastError ?? "-";
+    console.log(`  ${root.exists ? "ok  " : "miss"}  ${root.source.padEnd(7)} ${lag} ${skipped} ${attempt} ${success} ${error} ${root.root}`);
+  }
 }
 
 function failCli(error: unknown): never {
@@ -1298,6 +1315,7 @@ interface ApiSyncCliOptions {
   interval?: string;
   maxIterations?: string;
   backupCommand?: string;
+  status?: boolean;
 }
 
 interface ContentSyncResult {
@@ -1596,8 +1614,16 @@ program
   .option("--interval <seconds>", "Watch interval in seconds (minimum 5)", "60")
   .option("--max-iterations <n>", "Stop after n cycles; pass a larger value for longer supervised runs", "60")
   .option("--backup-command <command>", "Required for live self_hosted pushes; output is suppressed")
+  .option("--status", "Print provider ingest-watch roots and persisted metrics, then exit")
   .option("--json", "Emit one JSON object per cycle")
   .action(async (opts: ApiSyncCliOptions) => {
+    if (opts.status) {
+      const { getWatchStatus } = await import("../lib/watch.js");
+      const status = getWatchStatus({ sources: opts.source ? [opts.source] : undefined });
+      if (opts.json) printJson(status);
+      else printProviderWatchStatus(status, "daemon");
+      return;
+    }
     await runContentSyncCli({ ...opts, watch: true }, "daemon");
   });
 
@@ -1636,19 +1662,7 @@ program
     if (opts.status) {
       const status = getWatchStatus({ sources, debounceMs, pollMs });
       if (opts.json) return void printJson(status);
-      console.log("watch-ingest status");
-      console.log(`  sources:  ${status.sources.join(", ") || "(no provider dirs found)"}`);
-      console.log(`  debounce: ${status.debounceMs}ms`);
-      console.log(`  poll:     ${status.pollMs}ms`);
-      console.log("  state source  lag(s) skipped last attempt             last success             last error root");
-      for (const root of status.roots) {
-        const lag = String(root.lagSeconds ?? "-").padStart(6);
-        const skipped = String(root.skippedFiles).padStart(7);
-        const attempt = (root.lastAttemptAt ?? "-").padEnd(24);
-        const success = (root.lastSuccessAt ?? "-").padEnd(24);
-        const error = root.lastError ?? "-";
-        console.log(`  ${root.exists ? "ok  " : "miss"}  ${root.source.padEnd(7)} ${lag} ${skipped} ${attempt} ${success} ${error} ${root.root}`);
-      }
+      printProviderWatchStatus(status, "watch-ingest");
       return;
     }
     if (opts.initial !== false) {

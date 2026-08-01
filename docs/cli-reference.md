@@ -77,7 +77,7 @@ The JSON schemas and guard semantics are defined in the
 | Command | Options and behavior |
 | --- | --- |
 | `sessions sync` | Ingest, then push content in self-hosted mode. Supports `--no-ingest`, `--dry-run`, `--watch`, source/project/machine filters, `--limit` (default `500`), `--interval`, `--max-iterations` (default `60`), `--backup-command`, and `--json`. |
-| `sessions daemon` | Run bounded sync polling. Same filters and safety options as `sync`; `--interval` defaults to `60` seconds and `--max-iterations` defaults to `60`. |
+| `sessions daemon` | Run bounded sync polling. Same filters and safety options as `sync`; `--interval` defaults to `60` seconds and `--max-iterations` defaults to `60`. `--status` exits after printing the provider ingest-watch roots and persisted lag, last-attempt, last-success, skipped-file, and error metrics; add `--json` for machine-readable output. |
 | `sessions backfill` | Inventory by default or apply a bounded historical backfill. Selection flags are `--source`, `--pilot`, `--range-start`, `--range-end`, repeatable `--known-id`, and `--all-sources`. Apply requires `--apply`, `--confirm-apply BACKFILL_APPLY`, `--max-total-bytes`, and `--backup-command`; production-like targets additionally require `--allow-production` after separate approval. `--batch-size` defaults to `128`, `--concurrency` to `1`, and `--max-session-bytes` to `67108864`. `--checkpoint` overrides the default `~/.hasna/sessions/backfill/checkpoint.json`; `--json` emits machine-readable output. |
 
 Live self-hosted sync and backfill apply require a successful backup command.
