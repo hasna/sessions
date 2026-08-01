@@ -357,6 +357,8 @@ class StagedRolloutSink implements RolloutSink {
   totalThinkingTokens = 0;
 
   constructor() {
+    // This disposable stage can always be rebuilt from the authoritative rollout.
+    this.db.exec("PRAGMA synchronous = OFF");
     this.db.exec(`
       CREATE TABLE messages (idx INTEGER PRIMARY KEY, json TEXT NOT NULL);
       CREATE TABLE tool_calls (idx INTEGER PRIMARY KEY, call_id TEXT, json TEXT NOT NULL);
