@@ -431,8 +431,33 @@ function createSessionsReplacementTable(db: SqliteAdapter): void {
   );
 }
 
+/**
+ * Widening the `sessions.source` CHECK is a whole-table rebuild: SQLite cannot
+ * alter a CHECK in place, so every row is copied into a replacement table —
+ * and preflight first takes a full `VACUUM INTO` copy of the database on top of
+ * that. The cost is proportional to the whole store, not to the change.
+ *
+ * That is affordable on a small store and ruinous on a large one. On the 9.16 GB
+ * station01 store it never finished inside a command timeout, so EVERY
+ * invocation — including read-only ones like `sessions list --limit 1` — began
+ * the rebuild, was killed, rolled back, and left another multi-GB partial
+ * backup behind. Ten days of that accumulated ~25 GB of abandoned backups and
+ * the constraint was never actually widened, so the next invocation started
+ * over. Reads paid a multi-GB write and returned nothing.
+ *
+ * So the rebuild is opt-in, matching HASNA_SESSIONS_REBUILD_FTS_ON_OPEN, which
+ * gates the other whole-table repair in this file for exactly this reason.
+ * Opening a store is never allowed to cost the size of the store.
+ *
+ * This only ever affects stores created before 'codewith' existed: SCHEMA
+ * already creates `sessions` with the wide constraint, so new databases need no
+ * migration. A legacy store keeps working for reads and for its existing
+ * sources; it rejects `codewith` rows at the CHECK until an operator runs the
+ * migration deliberately with HASNA_SESSIONS_MIGRATE_SOURCE_CONSTRAINT=1.
+ */
 function migrateSessionSourceConstraint(db: SqliteAdapter): void {
   if (sourceCheckAllowsCodewith(tableSql(db, "sessions"))) return;
+  if (process.env.HASNA_SESSIONS_MIGRATE_SOURCE_CONSTRAINT !== "1") return;
 
   preflightSourceConstraintMigration(db);
   const before = countTables(db);
