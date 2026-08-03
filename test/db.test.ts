@@ -171,6 +171,9 @@ describe("schema migration", () => {
       db.exec("INSERT INTO tool_calls_fts_refs(rowid, session_id, tool_call_id) VALUES (1, 's1', 't1')");
       db.exec("INSERT INTO tool_calls_fts(rowid, tool_call_id, session_id, tool_name, tool_input, tool_output) VALUES (1, 't1', 's1', 'shell', 'echo ok', 'ok')");
 
+      // The rebuild is opt-in: it copies the whole table and takes a full
+      // VACUUM INTO backup first, so it is never run implicitly on open.
+      process.env.HASNA_SESSIONS_MIGRATE_SOURCE_CONSTRAINT = "1";
       initSchema(db);
 
       const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").get() as { sql: string };
@@ -194,6 +197,7 @@ describe("schema migration", () => {
       ).toThrow();
       expect(readdirSync(join(dir, "migration-backups")).some((name) => name.startsWith("sessions-pre-codewith-source-"))).toBe(true);
     } finally {
+      delete process.env.HASNA_SESSIONS_MIGRATE_SOURCE_CONSTRAINT;
       db.close();
       rmSync(dir, { recursive: true, force: true });
     }
@@ -216,7 +220,21 @@ describe("schema migration", () => {
     );
     db.exec("INSERT INTO sessions (id, source, source_id, title) VALUES ('legacy', 'unknown', 'bad', 'still readable')");
 
-    expect(() => initSchema(db)).toThrow(/unknown sources/);
+    // Opening such a store must NOT throw: the migration is opt-in, so an
+    // unrecognised source in the data can no longer make every command fail.
+    initSchema(db);
+    expect((db.prepare("SELECT title FROM sessions WHERE id = 'legacy'").get() as { title: string }).title).toBe(
+      "still readable",
+    );
+
+    // Opting in still refuses to migrate rather than dropping the unknown rows,
+    // and still leaves the legacy database readable afterwards.
+    try {
+      process.env.HASNA_SESSIONS_MIGRATE_SOURCE_CONSTRAINT = "1";
+      expect(() => initSchema(db)).toThrow(/unknown sources/);
+    } finally {
+      delete process.env.HASNA_SESSIONS_MIGRATE_SOURCE_CONSTRAINT;
+    }
     const row = db.prepare("SELECT title FROM sessions WHERE id = 'legacy'").get() as { title: string };
     expect(row.title).toBe("still readable");
     db.close();
