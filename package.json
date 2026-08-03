@@ -1,7 +1,7 @@
 {
   "name": "@hasna/sessions",
   "version": "0.12.11",
-  "description": "Search and sync AI coding sessions (Claude, Codex, Codewith, Gemini) — unified SQLite index with full-text search",
+  "description": "Search and sync AI coding sessions (Claude, Codex, Codewith, plus legacy Gemini CLI logs) — unified SQLite index with full-text search",
   "type": "module",
   "engines": {
     "bun": ">=1.0.0"
